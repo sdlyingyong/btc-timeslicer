@@ -1043,7 +1043,7 @@ function draw() {
         for (let x = 0; x < Wpx; x++) {
           if (!gotB[x]) continue;
           ctx.fillStyle = cs[x] >= os[x] ? 'rgba(239,77,77,0.55)' : 'rgba(47,191,113,0.55)';
-          const vh = (sums[x] / maxSum) * (volBot - volTop);
+          const vh = Math.min((sums[x] / maxSum) * (volBot - volTop), volBot - volTop);
           ctx.fillRect(PAD_L + x, volBot - vh, 1, vh);
         }
       }
