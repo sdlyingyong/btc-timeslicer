@@ -1,45 +1,40 @@
-# BTC 时光机 · 单文件网页版
+# BTC 时光机 · K线复盘工具
 
-一个**只含 BTC** 的离线 K 线回看工具，所有数据（日线 / 4h / 1h / 15 分，15m 全量 24.1 万根）全部内联在这个 `index.html` 里。
+一个**单文件离线可用**的 BTC K 线复盘网页。所有数据（1d / 4h / 1h / 15 分，15m 全量 24.1 万根）全部内联在一个 `index.html` 中，双击即可离线打开，也可直接部署到 GitHub Pages 分享链接。
 
-- 数据范围：2019-09-08 ~ 2026-07-28（BTC-USDT 永续）
-- 功能：对数坐标、EMA20/120、键盘 ←/→ 逐根步进、滚轮缩放、VOL、画线、锁定时间
-- 体积：约 30.5 MB（数据全内联的代价，浏览器可正常打开）
-- 隐私：不含任何个人账户、交割单或交易记录
+在线地址：https://sdlyingyong.github.io/btc-timeslicer/
 
----
+## 功能
 
-## 部署成「别人点链接就能看」的公开网页
+- **多周期**：日线 / 4小时 / 1小时 / 15分钟 一键切换，时间范围 2019-09-08 起（BTC-USDT 永续）
+- **复盘工具**：画线（趋势线 / 水平线 / 测量线）、EMA20/EMA120、对数/线性坐标切换、VOL 成交量
+- **盈亏比计算**：点击「盈亏比」后按住 K 线定入场，拖出止盈 TP、拖出止损 SL，三条线可拖动实时计算 R（盈亏比）、回报%/风险%，多空切换自动换位
+- **浏览记忆**：每个周期的画线、缩放位置自动保存（localStorage），关掉再打开原样恢复；「重置刷新」一键清空
+- **OKX 风格时间轴**：自然间隔主/次刻度，跨天首标签带日期，跨年标签带年份
+- **性能**：大缩放（单帧 24.1 万根 K 线）采用像素桶聚合降采样，canvas 绘制调用从 193 万次/帧降至约 4 千次/帧（-99.8%），绘制耗时 836ms → 23ms（-97%）
 
-### 方案 A：Netlify Drop（最省事，无需装 git / 不用命令行）
-1. 打开 https://app.netlify.com/drop
-2. 把本文件夹（`btc-single-web`）整个拖进去
-3. 几秒后拿到 `https://xxx.netlify.app` 公开网址，发给任何人即可直接看图
+## 使用方法
 
-> 首次可能要求用邮箱注册/登录 Netlify（免费），拖完即生效。
+### 本地使用
+双击 `index.html` 即可离线打开（file:// 环境直接可用），或用：
 
-### 方案 B：GitHub Pages（你已有 GitHub 账号时）
-1. 新建一个公开仓库，把本文件夹内容（至少 `index.html`）推上去
-2. 仓库 `Settings → Pages`，Source 选 `main` 分支根目录，保存
-3. 稍等片刻，访问 `https://<你的用户名>.github.io/<仓库名>/` 即为公开页
-
-若本机装了 git，可在本文件夹内执行：
-```
-git init && git add . && git commit -m "btc single web"
-git branch -M main
-git remote add origin https://github.com/<用户名>/<仓库名>.git
-git push -u origin main
-```
-
-### 其它可选
-- Vercel：https://vercel.com → Add New → 拖入本文件夹
-- Cloudflare Pages：https://pages.cloudflare.com → 直接拖放部署
-
----
-
-## 本地自测
-双击 `index.html` 即可离线打开（file:// 也行），或用：
 ```
 python -m http.server 8080 --directory btc-single-web
-# 浏览器访问 http://localhost:8080
 ```
+
+### 部署到 GitHub Pages
+1. 新建公开仓库，把本文件夹内容（至少 `index.html`）推上去
+2. 仓库 `Settings → Pages`，Source 选 `main` 分支根目录，保存
+3. 稍等片刻访问 `https://<用户名>.github.io/<仓库名>/`
+
+## 技术细节
+
+- **单文件架构**：数据以分钟级 epoch 数值内联（`[t, o, h, l, c, v]` 六字段），体积约 17MB
+- **渲染优化**：
+  - `xW >= 1`（K 线 ≥1px）：逐根绘制
+  - `xW < 1`（大缩放）：每像素一桶，蜡烛取桶内 maxHi/minLo + 首开末收，EMA 取桶中点采样，VOL 桶内求和后按桶级最大值归一化
+- 隐私：不含任何个人账户、交割单或交易记录，纯本地计算
+
+## 数据来源
+
+BTC-USDT 永续合约 15 分钟 K 线（2026-07-28 截止），由上游数据生成，本页仅用于行情回看与复盘，不构成任何投资建议。
