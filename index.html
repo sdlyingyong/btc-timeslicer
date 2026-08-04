@@ -1022,6 +1022,8 @@ function draw() {
         ctx.fillRect(x - cw / 2, volBot - vh, cw, vh);
       }
     } else {
+      const sums = new Float64Array(Wpx), os = new Float64Array(Wpx), cs = new Float64Array(Wpx), gotB = new Uint8Array(Wpx);
+      let maxSum = 0;
       for (let x = 0; x < Wpx; x++) {
         const { i0, i1 } = bucketOf(x);
         if (i1 <= i0) continue;
@@ -1034,9 +1036,16 @@ function draw() {
           c = +r[4];
         }
         if (!got) continue;
-        ctx.fillStyle = c >= o ? 'rgba(239,77,77,0.55)' : 'rgba(47,191,113,0.55)';
-        const vh = (sum / vmax) * (volBot - volTop);
-        ctx.fillRect(PAD_L + x, volBot - vh, 1, vh);
+        sums[x] = sum; os[x] = o; cs[x] = c; gotB[x] = 1;
+        if (sum > maxSum) maxSum = sum;
+      }
+      if (maxSum > 0) {
+        for (let x = 0; x < Wpx; x++) {
+          if (!gotB[x]) continue;
+          ctx.fillStyle = cs[x] >= os[x] ? 'rgba(239,77,77,0.55)' : 'rgba(47,191,113,0.55)';
+          const vh = (sums[x] / maxSum) * (volBot - volTop);
+          ctx.fillRect(PAD_L + x, volBot - vh, 1, vh);
+        }
       }
     }
     ctx.fillStyle = '#6b7689'; ctx.textAlign = 'left';
