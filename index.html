@@ -100,8 +100,6 @@
   #tradePanel .row b#tradeEntry { color: #e8ecf4; }
   #tradePanel .row b#tradeTP { color: #74f0a8; }
   #tradePanel .row b#tradeSL { color: #ff8585; }
-  #tradePanel .row b#tradeR, #tradePanel .row b#tradeReward { color: #ffce54; }
-  #tradePanel .row b#tradeWin { color: #9fe4ff; }
   #tradePanel .tp-input { width: 84px; background: #0e1220; border: 1px solid #2a3142; color: #cdd3e0; border-radius: 5px; padding: 3px 6px; font-size: 12px; font-family: monospace; text-align: right; }
   #tradePanel .tp-input:focus { outline: none; border-color: #4dd2ff; }
   #tradePanel .rr b { color: #ffce54; font-size: 15px; }
@@ -148,8 +146,8 @@
     </button>
     <label class="chk"><input type="checkbox" id="contDraw"><span class="sw" style="background:#6b7689"></span>连画</label>
     <button id="clearLines" class="danger" title="清除所有画线">清除画线</button>
-    <button id="tradeEnter" title="交易规划：入场/止盈/止损三线 + R值盈亏比计算">
-      <svg class="btn-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 21V4"/><path d="M6 4h13l-3 4 3 4H6"/></svg>交易规划
+    <button id="tradeEnter" title="盈亏比：按下定入场 → 拖出止盈 TP → 拖出止损 SL，三条线均可拖动实时计算">
+      <svg class="btn-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 21V4"/><path d="M6 4h13l-3 4 3 4H6"/></svg>盈亏比
     </button>
     <div class="seg" id="tradeDirSeg">
       <button class="seg-btn long active" data-dir="long">做多</button>
@@ -178,18 +176,14 @@
 </div>
 <div id="main">
   <div id="tradePanel">
-    <h4>交易规划 <span class="dir dir-long" id="tradeDir">做多</span></h4>
+    <h4>盈亏比 <span class="dir dir-long" id="tradeDir">做多</span></h4>
     <div class="row"><span>入场价</span><b id="tradeEntry">-</b></div>
     <div class="row"><span>入场K线</span><b id="tradeEntryTime" style="color:#9aa6bd;font-weight:500">-</b></div>
     <div class="row"><span>止盈 TP</span><b id="tradeTP">-</b></div>
     <div class="row"><span>止损 SL</span><b id="tradeSL">-</b></div>
-    <div class="row"><span>下单金额 (USDT)</span><input id="tradePosSize" class="tp-input" type="number" min="0" step="1" placeholder="0"></div>
-    <div class="row"><span>单笔风险 R</span><b id="tradeR">-</b></div>
-    <div class="row"><span>潜在盈利</span><b id="tradeReward">-</b></div>
-    <div class="row rr"><span>盈亏比 (R比例)</span><b id="tradeRR">-</b></div>
-    <div class="row"><span>平衡胜率</span><b id="tradeWin">-</b></div>
+    <div class="row rr"><span>盈亏比</span><b id="tradeRR">-</b></div>
     <div class="verdict vgood" id="tradeVerdict">-</div>
-    <div class="vtip">拖矩形空白处整体移动(入场K线跟随) · 拖入场手柄换入场K线 · 拖TP/SL调价位 · 切换多/空 · 填金额算USDT · Del删除</div>
+    <div class="vtip">按下定入场 → 拖出止盈 → 拖出止损 · 拖动任一条线实时计算 · 切换多/空自动换位 · Del 删除</div>
   </div>
   <div id="topbar">
     <span id="info"></span>
@@ -198,7 +192,7 @@
   </div>
   <canvas id="chart"></canvas>
   <div id="hint">
-    <span class="tip-text">滚轮缩放 · 拖拽平移 · <kbd>←</kbd><kbd>→</kbd> 逐根步进 · <kbd>Del</kbd> 删除选中 · 拖三色手柄调整交易规划</span>
+    <span class="tip-text">滚轮缩放 · 拖拽平移 · <kbd>←</kbd><kbd>→</kbd> 逐根步进 · <kbd>Del</kbd> 删除选中 · 「盈亏比」拖出入场/止盈/止损</span>
     <button id="hintClose" title="隐藏提示">×</button>
   </div>
 </div>
@@ -254,8 +248,8 @@ let drawingMeasure = null;
 let selectedLine = null;
 let dragTarget = null;
 let keepCursorTime = false;   // 切换标的/周期时保留鼠标所在K线时间，不跳最新
-let tradeMode = false;          // 交易规划按钮是否激活（激活时若无规划则创建）
-let tradePosSize = 0;           // 下单金额（0=不显示USDT，用户可输入）
+let tradeMode = false;          // 盈亏比工具是否激活（激活时若无规划则按 入场→TP→SL 拖出）
+let rrDraft = null;             // 拖动创建中的草稿 {phase: 1入场定,2拖TP,3拖SL, entry, idx}
 const TCOL = { profit: '#e85d8a', risk: '#3ebd93', entry: '#5dade2', handle: '#4dd2ff' };
 
 // 数据源（内联 或 分块懒加载）
@@ -934,22 +928,51 @@ function draw() {
     }
   }
 
-  // 蜡烛 + 影线
-  for (let i = s; i < e; i++) {
-    const r = getBar(i);
-    if (!r) continue;
-    const o = +r[1], c = +r[4], h = +r[2], l = +r[3];
-    const up = c >= o;
-    ctx.strokeStyle = ctx.fillStyle = up ? '#ef4d4d' : '#2fbf71';
-    const x = xI(i - s);
-    ctx.beginPath(); ctx.moveTo(x, yP(h)); ctx.lineTo(x, yP(l)); ctx.stroke();
-    const yo = yP(o), yc = yP(c);
-    const top = Math.min(yo, yc), bh = Math.max(1, Math.abs(yc - yo));
-    if (xW > 2.2) ctx.fillRect(x - cw / 2, top, cw, bh);
-    else ctx.fillRect(x - 0.5, top, 1, bh);
+  // 蜡烛 + 影线（大缩放 xW<1 时按像素桶聚合，避免逐根 canvas 调用）
+  const nVis = e - s;
+  const Wpx = Math.max(1, Math.round(plotW));
+  const bucketOf = (x) => ({ i0: s + Math.floor(x * nVis / Wpx), i1: s + Math.floor((x + 1) * nVis / Wpx) });
+  if (xW >= 1) {
+    for (let i = s; i < e; i++) {
+      const r = getBar(i);
+      if (!r) continue;
+      const o = +r[1], c = +r[4], h = +r[2], l = +r[3];
+      const up = c >= o;
+      ctx.strokeStyle = ctx.fillStyle = up ? '#ef4d4d' : '#2fbf71';
+      const x = xI(i - s);
+      ctx.beginPath(); ctx.moveTo(x, yP(h)); ctx.lineTo(x, yP(l)); ctx.stroke();
+      const yo = yP(o), yc = yP(c);
+      const top = Math.min(yo, yc), bh = Math.max(1, Math.abs(yc - yo));
+      if (xW > 2.2) ctx.fillRect(x - cw / 2, top, cw, bh);
+      else ctx.fillRect(x - 0.5, top, 1, bh);
+    }
+  } else {
+    for (let x = 0; x < Wpx; x++) {
+      const { i0, i1 } = bucketOf(x);
+      if (i1 <= i0) continue;
+      let maxHi = -Infinity, minLo = Infinity, o = NaN, c = NaN, got = false;
+      for (let i = i0; i < i1; i++) {
+        const r = getBar(i);
+        if (!r) continue;
+        got = true;
+        const h = +r[2], l = +r[3];
+        if (h > maxHi) maxHi = h;
+        if (l < minLo) minLo = l;
+        if (i === i0) o = +r[1];
+        c = +r[4];
+      }
+      if (!got) continue;
+      const up = c >= o;
+      ctx.strokeStyle = ctx.fillStyle = up ? '#ef4d4d' : '#2fbf71';
+      const px = PAD_L + x + 0.5;
+      ctx.beginPath(); ctx.moveTo(px, yP(maxHi)); ctx.lineTo(px, yP(minLo)); ctx.stroke();
+      const yo = yP(o), yc = yP(c);
+      const top = Math.min(yo, yc), bh = Math.max(1, Math.abs(yc - yo));
+      ctx.fillRect(px - 0.5, top, 1, bh);
+    }
   }
 
-  // EMA 均线（全局序列缓存，平移/缩放只增量推进）
+  // EMA 均线（全局序列缓存，平移/缩放只增量推进；大缩放按像素桶采样）
   function drawEMA(period, color, checked) {
     if (!checked) return;
     computeEMA(period, e);                 // 同步确保算到窗口右端（增量，几乎免费）
@@ -957,11 +980,22 @@ function draw() {
     if (!full) return;
     ctx.strokeStyle = color; ctx.lineWidth = 1.4; ctx.beginPath();
     let started = false;
-    for (let i = s; i < e; i++) {
-      const v = full[i];
-      if (v == null || Number.isNaN(v)) continue;
-      const x = xI(i - s), y = yP(v);
-      if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+    if (xW >= 1) {
+      for (let i = s; i < e; i++) {
+        const v = full[i];
+        if (v == null || Number.isNaN(v)) continue;
+        const x = xI(i - s), y = yP(v);
+        if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+      }
+    } else {
+      for (let x = 0; x < Wpx; x++) {
+        const { i0, i1 } = bucketOf(x);
+        const mid = i0 + Math.floor((i1 - i0) / 2);
+        const v = full[mid];
+        if (v == null || Number.isNaN(v)) continue;
+        const px = PAD_L + x + 0.5, y = yP(v);
+        if (!started) { ctx.moveTo(px, y); started = true; } else ctx.lineTo(px, y);
+      }
     }
     ctx.stroke();
     for (let i = e - 1; i >= s; i--) {
@@ -976,15 +1010,34 @@ function draw() {
   drawEMA(20, '#ffb454', document.getElementById('ema20').checked);
   drawEMA(120, '#4ade80', document.getElementById('ema120').checked);
 
-  // 成交量
+  // 成交量（大缩放按像素桶求和）
   if (vmax > 0) {
-    for (let i = s; i < e; i++) {
-      const r = getBar(i);
-      if (!r) continue;
-      const v = +r[5], o = +r[1], c = +r[4];
-      ctx.fillStyle = c >= o ? 'rgba(239,77,77,0.55)' : 'rgba(47,191,113,0.55)';
-      const x = xI(i - s), vh = (v / vmax) * (volBot - volTop);
-      ctx.fillRect(x - cw / 2, volBot - vh, cw, vh);
+    if (xW >= 1) {
+      for (let i = s; i < e; i++) {
+        const r = getBar(i);
+        if (!r) continue;
+        const v = +r[5], o = +r[1], c = +r[4];
+        ctx.fillStyle = c >= o ? 'rgba(239,77,77,0.55)' : 'rgba(47,191,113,0.55)';
+        const x = xI(i - s), vh = (v / vmax) * (volBot - volTop);
+        ctx.fillRect(x - cw / 2, volBot - vh, cw, vh);
+      }
+    } else {
+      for (let x = 0; x < Wpx; x++) {
+        const { i0, i1 } = bucketOf(x);
+        if (i1 <= i0) continue;
+        let sum = 0, o = NaN, c = NaN, got = false;
+        for (let i = i0; i < i1; i++) {
+          const r = getBar(i);
+          if (!r) continue;
+          got = true; sum += +r[5];
+          if (i === i0) o = +r[1];
+          c = +r[4];
+        }
+        if (!got) continue;
+        ctx.fillStyle = c >= o ? 'rgba(239,77,77,0.55)' : 'rgba(47,191,113,0.55)';
+        const vh = (sum / vmax) * (volBot - volTop);
+        ctx.fillRect(PAD_L + x, volBot - vh, 1, vh);
+      }
     }
     ctx.fillStyle = '#6b7689'; ctx.textAlign = 'left';
     ctx.fillText('VOL', PAD_L + 2, volTop + 12);
@@ -1001,17 +1054,49 @@ function draw() {
     ctx.fillRect(PAD_L, hy - 1.5, plotW, 3);
   }
 
-  // 时间轴
-  ctx.fillStyle = '#6b7689'; ctx.textAlign = 'center';
-  const step = Math.max(1, Math.floor((e - s) / 6));
+  // 时间轴（OKX 风格：自然间隔主刻度 + 次级刻度线 + 跨天首标签带日期）
+  const PERIOD_MIN = { '15m': 15, '1h': 60, '4h': 240, '1d': 1440 };
+  const pMin = PERIOD_MIN[cur] || 15;
+  const visMin = nVis * pMin;                  // 可视时长（分钟）
+  const targetMin = visMin / 7;                // 目标标签间隔
+  const steps = [1, 2, 5, 10, 15, 30, 60, 120, 180, 240, 360, 480, 720, 1440,
+                 2880, 4320, 5760, 10080, 14400, 20160, 43200, 86400, 129600,
+                 262800, 525600, 1051200, 2628000, 5256000, 13140000, 26280000];
+  let intMin = steps[steps.length - 1];
+  for (const st of steps) { if (st >= targetMin) { intMin = st; break; } }
+  const step = Math.max(1, Math.round(intMin / pMin));
+  const y0r = s < len ? String(getBar(s) ? tsStr(getBar(s)[0]).slice(0, 4) : '') : '';
+  const lblTime = v => tsStr(v).slice(11, 16);        // HH:MM
+  const lblDate = v => { const d = tsStr(v).slice(0, 10); return d.slice(0, 4) === y0r ? d.slice(5) : d; };  // MM-DD / YYYY-MM-DD
+  const tsAt = i => { const r = getBar(i); return r ? r[0] : null; };
+  ctx.font = '11px "SFMono-Regular", Consolas, monospace';
+  const dayLevel = intMin >= 1440;
+  // 次级刻度（主刻度中间，更短更暗，无文字）
+  ctx.strokeStyle = '#2a3142'; ctx.lineWidth = 1;
+  for (let i = s + Math.floor(step / 2); i < e; i += step) {
+    ctx.beginPath(); ctx.moveTo(xI(i - s), H - 14); ctx.lineTo(xI(i - s), H - 11); ctx.stroke();
+  }
+  // 主刻度：刻度线 + 标签（分钟级：跨天首标带日期；天级：跨年标年份）
+  ctx.strokeStyle = '#5a6478';
+  let lastDay = null;
   for (let i = s; i < e; i += step) {
-    const r = getBar(i);
-    if (!r) continue;
-    ctx.fillText(tsStr(r[0]).slice(0, 10), xI(i - s), H - 6);
+    const t = tsAt(i);
+    if (t == null) continue;
+    const x = xI(i - s);
+    ctx.beginPath(); ctx.moveTo(x, H - 16); ctx.lineTo(x, H - 6); ctx.stroke();
+    const day = tsStr(t).slice(0, 10);
+    let label;
+    if (dayLevel) label = lblDate(t);
+    else if (day !== lastDay) label = lblDate(t) + ' ' + lblTime(t);
+    else label = lblTime(t);
+    lastDay = day;
+    ctx.fillStyle = '#6b7689'; ctx.textAlign = 'center';
+    ctx.fillText(label, x, H - 20);
   }
 
   drawLines();
   drawTrades();
+  drawRRDraft();
   updateTradePanel();
 
 
@@ -1123,31 +1208,20 @@ function roundRect(x, y, w, h, r) {
   ctx.closePath();
 }
 
-// ---------- 交易规划（多单/空单：入场/止盈/止损 + R值盈亏比） ----------
+// ---------- 盈亏比计算（多/空：入场/止盈/止损三线，拖动实时算 R） ----------
 // trade 作为 lines 元素 {type:'trade', entry, tp, sl, dir}，按 SYM|period 自动记忆
 function closeAt(i) { const b = getBar(i); return b ? b[4] : null; }  // 入场K线收盘
 function getTradePlan() { return lines.find(l => l.type === 'trade') || null; }
+function setTradeHint(t) { const el = document.querySelector('#hint .tip-text'); if (el) el.innerHTML = t; }
+// 进入创建模式：按住定入场 → 拖出止盈 → 再拖出止损
 function initTradePlan() {
-  let tp = getTradePlan();
-  if (tp) return tp;
-  const mid = (SCALE.pmin + SCALE.pmax) / 2;
-  const span = (SCALE.pmax - SCALE.pmin) || 1;
+  const tp = getTradePlan();
+  if (tp) { selectedLine = tp; syncTradeDir(tp.dir); return tp; }
   const dirEl = document.querySelector('#tradeDirSeg .seg-btn.active');
-  const dir = dirEl ? dirEl.dataset.dir : 'long';
-  const idx0 = Math.floor(SCALE.viewStart + viewCount / 2);   // 矩形锚定的K线索引，缩放/平移时贴着该K线
-  const e0 = closeAt(idx0);                                    // 入场点铆钉到该K线收盘
-  const mid0 = e0 != null ? e0 : mid;
-  tp = {
-    type: 'trade',
-    entry: mid0,
-    tp: dir === 'short' ? mid0 - span * 0.3 : mid0 + span * 0.3,
-    sl: dir === 'short' ? mid0 + span * 0.15 : mid0 - span * 0.15,
-    dir: dir,
-    idx: idx0
-  };
-  lines.push(tp);
-  selectedLine = tp;
-  return tp;
+  rrDraft = { phase: 'tp', dir: dirEl ? dirEl.dataset.dir : 'long', idx: -1, entry: null, tp: null, sl: null };
+  setTradeHint('按住画布：定入场K线 → 拖动松手定止盈 → 再拖动松手定止损');
+  draw();
+  return null;
 }
 function drawTrade(ln, isSel) {
   const { entry, tp, sl, dir } = ln;
@@ -1179,10 +1253,7 @@ function drawTrade(ln, isSel) {
   const rr = riskP > 0 ? rewardP / riskP : 0;
   const pctRisk = entry !== 0 ? (riskP / entry * 100) : 0;
   const pctReward = entry !== 0 ? (rewardP / entry * 100) : 0;
-  const posAmt = tradePosSize || 0;
-  const riskUSD = posAmt * pctRisk / 100;
-  const rewardUSD = posAmt * pctReward / 100;
-  // 三层浮标标签
+  // 三个标签
   const lblW = Math.min(rw - 8, 156);
   function drawLabel(y, rows, alignRight, bgCol) {
     ctx.font = '11.5px "SFMono-Regular", Consolas, monospace';
@@ -1203,9 +1274,9 @@ function drawTrade(ln, isSel) {
       ctx.fillText(rows[i], lx + padLR, ly + padT + i * lineH);
     }
   }
-  drawLabel(yt, [`预计盈利 ${rewardUSD > 0 ? rewardUSD.toFixed(2) + ' USDT' : fmtPrice(rewardP)} (${pctReward >= 0 ? '+' : ''}${pctReward.toFixed(2)}%)`, `回报 ${rr.toFixed(2)}`], true, TCOL.profit);
-  drawLabel(ye, [`风险回报比 ${rr.toFixed(2)}`, ...(posAmt > 0 ? [`下单数量 ${posAmt.toFixed(2)} USDT`] : []), `R 比例 1:${rr.toFixed(1)}`], false, TCOL.entry);
-  drawLabel(ys, [`预计亏损 ${riskUSD > 0 ? '-' + riskUSD.toFixed(2) + ' USDT' : '-' + fmtPrice(riskP)} (-${pctRisk.toFixed(2)}%)`, `风险 ${pctRisk.toFixed(2)}%`], true, TCOL.risk);
+  drawLabel(yt, [`TP ${fmtPrice(tp)}`, `回报 ${pctReward >= 0 ? '+' : ''}${pctReward.toFixed(2)}%`], true, TCOL.profit);
+  drawLabel(ye, [dir === 'long' ? '做多' : '做空', `盈亏比 ${rr.toFixed(2)}R`, `入场 ${fmtPrice(entry)}`], false, TCOL.entry);
+  drawLabel(ys, [`SL ${fmtPrice(sl)}`, `风险 -${pctRisk.toFixed(2)}%`], true, TCOL.risk);
   // 拖拽手柄（入场在左，TP/SL 在右）
   for (const [key, y] of [['tp', yt], ['entry', ye], ['sl', ys]]) {
     const isSelH = isSel && dragTarget && dragTarget.line === ln && dragTarget.handle === key;
@@ -1216,11 +1287,29 @@ function drawTrade(ln, isSel) {
     ctx.fillRect(hx - 4, y - 4, 8, 8);
     ctx.strokeRect(hx - 4, y - 4, 8, 8);
   }
-  // 右侧边缘止损价标注
-  ctx.fillStyle = TCOL.risk; ctx.font = 'bold 11px system-ui, sans-serif';
-  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
-  ctx.fillText(`止损: ${fmtPrice(sl)}`, plotR - 4, ys);
-  ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+}
+// 拖动创建中的预览（rrDraft）：入场横线 + 正在拖的 TP/SL 虚线
+function drawRRDraft() {
+  if (!rrDraft) return;
+  const plotL = PAD_L, plotR = PAD_L + SCALE.plotW;
+  const cx = dataXToScreenX(rrDraft.idx);
+  const rw = Math.min(170, SCALE.plotW * 0.40);
+  const ye = priceToY(rrDraft.entry);
+  const yt = rrDraft.tp != null ? priceToY(rrDraft.tp) : null;
+  const ys = rrDraft.sl != null ? priceToY(rrDraft.sl) : null;
+  ctx.setLineDash([5, 4]); ctx.lineWidth = 1;
+  for (const [y, col] of [[ye, TCOL.entry], [yt, TCOL.profit], [ys, TCOL.risk]]) {
+    if (y == null) continue;
+    ctx.strokeStyle = col; ctx.globalAlpha = 0.8;
+    ctx.beginPath(); ctx.moveTo(plotL, y); ctx.lineTo(plotR, y); ctx.stroke();
+  }
+  ctx.setLineDash([]); ctx.globalAlpha = 1;
+  ctx.fillStyle = TCOL.entry; ctx.textAlign = 'left';
+  ctx.font = 'bold 11.5px "SFMono-Regular", Consolas, monospace';
+  ctx.fillText('入场 ' + fmtPrice(rrDraft.entry), plotL + 4, ye - 4);
+  const hint = rrDraft.phase === 'tp' ? '松开鼠标 = 止盈 TP' : '松开鼠标 = 止损 SL';
+  ctx.fillStyle = '#a8b4c4';
+  ctx.fillText(hint, plotL + rw / 2, Math.min(ye, yt ?? ye, ys ?? ye) - 8);
 }
 function updateTradePanel() {
   const p = document.getElementById('tradePanel');
@@ -1239,21 +1328,18 @@ function updateTradePanel() {
   const ab = getBar(plan.idx);
   document.getElementById('tradeEntryTime').textContent = ab ? tsStr(ab[0]) : '-';
   document.getElementById('tradeEntry').textContent = fmtPrice(entry);
-  document.getElementById('tradeTP').textContent = fmtPrice(tp);
-  document.getElementById('tradeSL').textContent = fmtPrice(sl);
-  document.getElementById('tradeR').textContent = fmtPrice(riskP);
-  document.getElementById('tradeReward').textContent = fmtPrice(rewardP);
+  document.getElementById('tradeTP').textContent = fmtPrice(tp) + '  (' + (rewardP >= 0 ? '+' : '') + (entry !== 0 ? (rewardP / entry * 100) : 0).toFixed(2) + '%)';
+  document.getElementById('tradeSL').textContent = fmtPrice(sl) + '  (-' + (entry !== 0 ? (riskP / entry * 100) : 0).toFixed(2) + '%)';
   document.getElementById('tradeRR').textContent = rr.toFixed(2) + 'R  (1:' + rr.toFixed(1) + ')';
-  document.getElementById('tradeWin').textContent = (winNeed * 100).toFixed(1) + '%';
   const v = document.getElementById('tradeVerdict');
   if (riskP <= 0 || rewardP <= 0) {
-    v.className = 'verdict vbad'; v.textContent = '⚠ 入场/止损/止盈需为不同价位';
+    v.className = 'verdict vbad'; v.textContent = '⚠ 入场/止盈/止损需为不同价位';
   } else if (ok) {
     v.className = 'verdict vgood';
-    v.textContent = `✓ 划算：每 1R 风险搏 ${rr.toFixed(2)}R，胜率 ${(winNeed * 100).toFixed(1)}% 即可盈亏平衡`;
+    v.textContent = `✓ 每 1R 风险搏 ${rr.toFixed(2)}R，胜率 ${(winNeed * 100).toFixed(1)}% 即可盈亏平衡`;
   } else {
     v.className = 'verdict vbad';
-    v.textContent = `✗ 偏贵：盈亏比仅 ${rr.toFixed(2)}R，需胜率 ${(winNeed * 100).toFixed(1)}% 才不亏`;
+    v.textContent = `✗ 盈亏比仅 ${rr.toFixed(2)}R，需胜率 ${(winNeed * 100).toFixed(1)}% 才不亏`;
   }
 }
 function dist(a, b, c, d) { return Math.hypot(a - c, b - d); }
@@ -1344,6 +1430,18 @@ canvas.addEventListener('mousedown', e => {
     }
     return;
   }
+  // 盈亏比创建：按下定入场 → 拖动中预览 → 松手定 TP/SL
+  if (tradeMode && !getTradePlan()) {
+    if (!rrDraft) {
+      const ni = Math.max(0, Math.min(dataLen() - 1, Math.round(xToIdx(mx))));
+      const c = closeAt(ni);
+      if (c == null) { draw(); return; }
+      const dirEl = document.querySelector('#tradeDirSeg .seg-btn.active');
+      rrDraft = { phase: 'tp', dir: dirEl ? dirEl.dataset.dir : 'long', idx: ni, entry: c, tp: null, sl: null };
+    }
+    draw();
+    return;
+  }
   // 光标模式：选中已有线 / 准备拖拽 / 空白处按住拖动平移
   // 成交量分隔条：在分隔线附近按下 -> 拖动调节 VOL 高度
   {
@@ -1379,6 +1477,13 @@ canvas.addEventListener('mousemove', e => {
   hover.x = e.clientX - rect.left; hover.y = e.clientY - rect.top;
 
   if (toolMode === 'hline' || toolMode === 'trend') { redrawSoon(); return; }
+
+  // 盈亏比创建：拖动预览 TP/SL
+  if (tradeMode && rrDraft && !getTradePlan()) {
+    if (rrDraft.phase === 'tp') rrDraft.tp = yToPrice(hover.y);
+    else if (rrDraft.phase === 'sl') rrDraft.sl = yToPrice(hover.y);
+    redrawSoon(); return;
+  }
 
   if (dragTarget) {
     const ln = dragTarget.line;
@@ -1456,7 +1561,24 @@ window.addEventListener('mousemove', e => {
   }
   redrawSoon();
 });
-window.addEventListener('mouseup', () => { drag = false; dragTarget = null; dragStart = null; dragVol = false; canvas.style.cursor = 'crosshair'; scheduleSessionSave(); });
+window.addEventListener('mouseup', () => {
+  if (tradeMode && rrDraft && !getTradePlan()) {
+    if (rrDraft.phase === 'tp' && rrDraft.tp != null) {
+      rrDraft.phase = 'sl'; draw(); return;          // TP 已定，进入拖 SL
+    } else if (rrDraft.phase === 'sl' && rrDraft.sl != null) {
+      const plan = { type: 'trade', entry: rrDraft.entry, tp: rrDraft.tp, sl: rrDraft.sl, dir: rrDraft.dir, idx: rrDraft.idx };
+      lines.push(plan); selectedLine = plan;
+      rrDraft = null;
+      tradeMode = false;
+      document.getElementById('tradeEnter').classList.remove('trade-active');
+      setTradeHint('滚轮缩放 · 拖拽平移 · <kbd>←</kbd><kbd>→</kbd> 逐根步进 · <kbd>Del</kbd> 删除选中 · 「盈亏比」拖出入场/止盈/止损');
+      exitToolMode();
+      draw(); scheduleSessionSave();
+      return;
+    }
+  }
+  drag = false; dragTarget = null; dragStart = null; dragVol = false; canvas.style.cursor = 'crosshair'; scheduleSessionSave();
+});
 canvas.addEventListener('mouseleave', () => { if (!drag) { hover.x = -1; hover.y = -1; redrawSoon(); } });
 
 // 键盘
@@ -1535,14 +1657,17 @@ document.getElementById('tradeEnter').addEventListener('click', () => {
 function syncTradeDir(dir) {
   document.querySelectorAll('#tradeDirSeg .seg-btn').forEach(x => x.classList.toggle('active', x.dataset.dir === dir));
   const tp = getTradePlan();
-  if (tp) { tp.dir = dir; draw(); scheduleSessionSave(); }
+  if (tp) {
+    tp.dir = dir;
+    // 方向与 TP/SL 位置矛盾时自动换位（多：TP>入场>SL；空：TP<入场<SL）
+    if ((dir === 'long' && tp.tp < tp.sl) || (dir === 'short' && tp.tp > tp.sl)) {
+      const t = tp.tp; tp.tp = tp.sl; tp.sl = t;
+    }
+    draw(); scheduleSessionSave();
+  }
 }
 document.querySelectorAll('#tradeDirSeg .seg-btn').forEach(b => {
   b.addEventListener('click', () => syncTradeDir(b.dataset.dir));
-});
-document.getElementById('tradePosSize').addEventListener('input', e => {
-  tradePosSize = parseFloat(e.target.value) || 0;
-  draw();
 });
 // 重置刷新：清空全部记忆（所有周期的画线+浏览位置），回到最新K线
 document.getElementById('resetSession').addEventListener('click', () => {
