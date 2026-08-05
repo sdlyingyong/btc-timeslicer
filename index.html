@@ -231,7 +231,7 @@ const PERIODS = [
   { p: '1d', label: '日线' }, { p: '4h', label: '4 小时' },
   { p: '1h', label: '1 小时' }, { p: '15m', label: '15 分' }
 ];
-const PAD_L = 8, PAD_R = 62, PAD_T = 12, PAD_B = 22;
+const PAD_L = 8, PAD_R = 62, PAD_T = 12, PAD_B = 26;
 const canvas = document.getElementById('chart');
 const ctx = canvas.getContext('2d');
 const dpr = window.devicePixelRatio || 1;
@@ -1123,6 +1123,11 @@ function draw() {
   }
 
   // 时间轴（OKX 风格：自然间隔主刻度 + 次级刻度线 + 跨天首标签带日期）
+  // 时间轴独立背景条：把成交量柱与日期标签完全隔开，避免柱体遮挡
+  ctx.fillStyle = '#0a0d12';
+  ctx.fillRect(PAD_L - 2, H - PAD_B + 2, plotW + 2, PAD_B - 4);
+  ctx.strokeStyle = '#1c2230'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(PAD_L, H - PAD_B + 2); ctx.lineTo(PAD_L + plotW, H - PAD_B + 2); ctx.stroke();
   const PERIOD_MIN = { '15m': 15, '1h': 60, '4h': 240, '1d': 1440 };
   const pMin = PERIOD_MIN[cur] || 15;
   const visMin = nVis * pMin;                  // 可视时长（分钟）
