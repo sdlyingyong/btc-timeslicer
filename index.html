@@ -231,7 +231,7 @@ const PERIODS = [
   { p: '1d', label: '日线' }, { p: '4h', label: '4 小时' },
   { p: '1h', label: '1 小时' }, { p: '15m', label: '15 分' }
 ];
-const PAD_L = 8, PAD_R = 62, PAD_T = 12, PAD_B = 26;
+const PAD_L = 8, PAD_R = 62, PAD_T = 12, PAD_B = 32;
 const canvas = document.getElementById('chart');
 const ctx = canvas.getContext('2d');
 const dpr = window.devicePixelRatio || 1;
@@ -1123,11 +1123,12 @@ function draw() {
   }
 
   // 时间轴（OKX 风格：自然间隔主刻度 + 次级刻度线 + 跨天首标签带日期）
-  // 时间轴独立背景条：把成交量柱与日期标签完全隔开，避免柱体遮挡
-  ctx.fillStyle = '#0a0d12';
-  ctx.fillRect(PAD_L - 2, H - PAD_B + 2, plotW + 2, PAD_B - 4);
-  ctx.strokeStyle = '#1c2230'; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(PAD_L, H - PAD_B + 2); ctx.lineTo(PAD_L + plotW, H - PAD_B + 2); ctx.stroke();
+  // 时间轴独立背景面板：与成交量区域完全隔离，日期清晰可读
+  const taTop = volBot + 2;
+  ctx.fillStyle = '#0e1219';
+  ctx.fillRect(PAD_L - 2, taTop, plotW + 2, H - taTop);
+  ctx.strokeStyle = '#222b3d'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(PAD_L, taTop); ctx.lineTo(PAD_L + plotW, taTop); ctx.stroke();
   const PERIOD_MIN = { '15m': 15, '1h': 60, '4h': 240, '1d': 1440 };
   const pMin = PERIOD_MIN[cur] || 15;
   const visMin = nVis * pMin;                  // 可视时长（分钟）
@@ -1147,7 +1148,7 @@ function draw() {
   // 次级刻度（主刻度中间，更短更暗，无文字）
   ctx.strokeStyle = '#2a3142'; ctx.lineWidth = 1;
   for (let i = s + Math.floor(step / 2); i < e; i += step) {
-    ctx.beginPath(); ctx.moveTo(xI(i - s), H - 14); ctx.lineTo(xI(i - s), H - 11); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(xI(i - s), taTop + 6); ctx.lineTo(xI(i - s), taTop + 9); ctx.stroke();
   }
   // 主刻度：刻度线 + 标签（分钟级：跨天首标带日期；天级：跨年标年份）
   ctx.strokeStyle = '#5a6478';
@@ -1156,15 +1157,15 @@ function draw() {
     const t = tsAt(i);
     if (t == null) continue;
     const x = xI(i - s);
-    ctx.beginPath(); ctx.moveTo(x, H - 16); ctx.lineTo(x, H - 6); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x, taTop + 4); ctx.lineTo(x, taTop + 14); ctx.stroke();
     const day = tsStr(t).slice(0, 10);
     let label;
     if (dayLevel) label = lblDate(t);
     else if (day !== lastDay) label = lblDate(t) + ' ' + lblTime(t);
     else label = lblTime(t);
     lastDay = day;
-    ctx.fillStyle = '#6b7689'; ctx.textAlign = 'center';
-    ctx.fillText(label, x, H - 20);
+    ctx.fillStyle = '#8a9ab0'; ctx.textAlign = 'center';
+    ctx.fillText(label, x, taTop + 26);
   }
 
   drawLines();
