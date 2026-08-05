@@ -1701,8 +1701,13 @@ window.addEventListener('keydown', e => {
   e.preventDefault();
   const len = dataLen();
   const plotW = canvas.clientWidth - PAD_L - PAD_R;
-  const barsPerPx = viewCount / Math.max(1, plotW);  // 每像素覆盖多少根K线
+  const barsPerPx = viewCount / Math.max(1, plotW);
   const step = Math.max(1, Math.round(barsPerPx));    // 步进量随缩放自适应：缩放越小步进越大，避免桶边界跳动
+  // 桶对齐：viewStart 量化到桶边界，确保每像素聚合的 K 线范围不变，柱子稳定不跳
+  if (barsPerPx > 1) {
+    const bkt = Math.max(1, Math.round(barsPerPx));
+    viewStart = Math.round(Math.floor(viewStart / bkt) * bkt);
+  }
   if (e.key === 'ArrowLeft') viewStart = Math.max(0, viewStart - step);
   else viewStart = Math.min(len - viewCount, viewStart + step);
   DS.ensure(Math.max(0, Math.floor(viewStart) - 200), Math.floor(viewStart) + viewCount);
@@ -1722,6 +1727,9 @@ canvas.addEventListener('wheel', e => {
   viewCount = nc;
   // 缩放只改变左侧可见历史量，右侧（最新K线）始终钉住，避免露出右侧未来空白
   viewStart = Math.max(0, Math.min(len - viewCount, rightEdge - viewCount));
+  // 桶对齐：缩放后量化 viewStart，桶边界稳定不跳
+  const bkt = Math.max(1, Math.round(viewCount / Math.max(1, plotW)));
+  viewStart = Math.round(Math.floor(viewStart / bkt) * bkt);
   DS.ensure(Math.max(0, Math.floor(viewStart) - 200), Math.floor(viewStart) + viewCount);
   redrawSoon(); scheduleViewSave();
 }, { passive: false });
