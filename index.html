@@ -1175,7 +1175,7 @@ function draw() {
 
 
 
-  // 十字光标（仅光标模式）
+  // 十字光标（仅光标模式）+ 鼠标位置日期时间
   const inPlot = hover.x >= PAD_L && hover.x <= PAD_L + plotW && hover.y >= mainTop && hover.y <= volBot;
   if (toolMode === 'cursor' && inPlot) {
     ctx.strokeStyle = '#5a6478'; ctx.setLineDash([4, 3]);
@@ -1185,6 +1185,21 @@ function draw() {
     if (hover.y >= mainTop && hover.y <= mainBot) {
       const p = SCALE.pY(hover.y);
       ctx.fillStyle = '#cdd3e0'; ctx.fillText(fmtPrice(p), PAD_L + plotW + 5, hover.y + 3);
+    }
+    // 鼠标所在K线的日期时间（显示在十字光标竖线下方）
+    const hoverIdx = Math.floor(SCALE.viewStart + (hover.x - PAD_L) / SCALE.xW);
+    const hoverBar = getBar(hoverIdx);
+    if (hoverBar) {
+      const tsLabel = tsStr(hoverBar[0]);
+      ctx.font = '11px "SFMono-Regular", Consolas, monospace';
+      ctx.textAlign = 'center';
+      const tw = ctx.measureText(tsLabel).width;
+      const lx = hover.x, ly = taTop - 4;
+      ctx.fillStyle = 'rgba(12,16,24,0.88)';
+      ctx.fillRect(lx - tw / 2 - 5, ly - 11, tw + 10, 15);
+      ctx.fillStyle = '#cdd3e0';
+      ctx.fillText(tsLabel, lx, ly);
+      ctx.textAlign = 'left';
     }
   }
 }
