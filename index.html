@@ -192,7 +192,7 @@
   </div>
   <canvas id="chart"></canvas>
   <div id="hint">
-    <span class="tip-text">滚轮缩放 · 拖拽平移 · <kbd>←</kbd><kbd>→</kbd> 逐根步进 · <kbd>Del</kbd> 删除选中 · 「盈亏比」拖出入场/止盈/止损</span>
+    <span class="tip-text">滚轮缩放 · 拖拽平移 · <kbd>←</kbd><kbd>→</kbd> 逐根步进 · <kbd>G</kbd> 日期跳转 · <kbd>Del</kbd> 删除选中 · 「盈亏比」拖出入场/止盈/止损</span>
     <button id="hintClose" title="隐藏提示">×</button>
   </div>
 </div>
@@ -256,6 +256,7 @@ const TCOL = { profit: '#e85d8a', risk: '#3ebd93', entry: '#5dade2', handle: '#4
 let DS = null;
 let drawScheduled = false;
 let volFrac = 0.22;   // 成交量副图占图表高度比例（可拖动调节）
+let goToOpen = false;   // 日期跳转对话框打开标志（打开时屏蔽其它快捷键）
 
 function dataLen() { return DS ? DS.len : 0; }
 function getBar(i) { return DS ? DS.getBar(i) : null; }
@@ -726,6 +727,64 @@ async function findIdxByTime(ts) {
     else return mid;
   }
   return lo;
+}
+
+// ---------- 日期快速跳转（G 键 + 时间轴点击） ----------
+function showGoToDialog() {
+  if (goToOpen) return;
+  goToOpen = true;
+  const mask = document.createElement('div');
+  mask.id = 'goToMask';
+  mask.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);display:flex;align-items:center;justify-content:center;z-index:1000;font-family:system-ui,sans-serif;';
+  const panel = document.createElement('div');
+  panel.style.cssText = 'background:#1a2030;border:1px solid #2a3142;border-radius:12px;padding:22px 24px;width:340px;box-shadow:0 20px 60px rgba(0,0,0,0.5);';
+  const title = document.createElement('div');
+  title.textContent = '跳转到日期';
+  title.style.cssText = 'font-size:15px;font-weight:700;color:#f0f3fa;margin-bottom:4px;';
+  const sub = document.createElement('div');
+  sub.textContent = '输入日期时间，视图将居中到最近的K线';
+  sub.style.cssText = 'font-size:11.5px;color:#5e6b82;margin-bottom:14px;';
+  const input = document.createElement('input');
+  input.type = 'datetime-local';
+  input.style.cssText = 'width:100%;background:#0e1220;border:1px solid #2a3142;color:#cdd3e0;border-radius:8px;padding:10px 12px;font-size:14px;font-family:Consolas,monospace;outline:none;box-sizing:border-box;';
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') doJump(); });
+  input.addEventListener('keydown', e => { if (e.key === 'Escape') closeGoTo(); });
+  const ci = Math.max(0, Math.min(dataLen() - 1, Math.floor(viewStart + viewCount / 2)));
+  const bar = getBar(ci);
+  if (bar) input.value = tsStr(bar[0]).replace(' ', 'T').slice(0, 16);
+  const btns = document.createElement('div');
+  btns.style.cssText = 'display:flex;gap:8px;margin-top:16px;justify-content:flex-end;';
+  const btnCancel = document.createElement('button');
+  btnCancel.textContent = '取消';
+  btnCancel.style.cssText = 'background:#1c2433;color:#9aa6bd;border:1px solid #2a3142;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer;';
+  btnCancel.onclick = closeGoTo;
+  const btnGo = document.createElement('button');
+  btnGo.textContent = '跳转';
+  btnGo.style.cssText = 'background:rgba(77,210,255,0.15);color:#9fe4ff;border:1px solid rgba(77,210,255,0.4);border-radius:8px;padding:8px 20px;font-size:13px;font-weight:600;cursor:pointer;';
+  btnGo.onclick = doJump;
+  btns.appendChild(btnCancel); btns.appendChild(btnGo);
+  panel.appendChild(title); panel.appendChild(sub); panel.appendChild(input); panel.appendChild(btns);
+  mask.appendChild(panel);
+  mask.addEventListener('mousedown', e => { if (e.target === mask) closeGoTo(); });
+  document.body.appendChild(mask);
+  input.focus();
+  async function doJump() {
+    const v = input.value;
+    if (!v) return;
+    const t = Date.parse(v);
+    if (isNaN(t)) { setLoading('日期格式无效'); return; }
+    const idx = await findIdxByTime(t / 60000);
+    if (idx < 0) return;
+    viewStart = Math.max(0, Math.min(dataLen() - viewCount, idx - viewCount / 2));
+    DS.ensure(Math.max(0, Math.floor(viewStart) - 200), Math.floor(viewStart) + viewCount);
+    closeGoTo();
+    redrawSoon(); scheduleViewSave();
+  }
+  function closeGoTo() {
+    goToOpen = false;
+    const el = document.getElementById('goToMask');
+    if (el) el.remove();
+  }
 }
 
 async function setView(sym, period) {
@@ -1414,6 +1473,19 @@ canvas.addEventListener('mousedown', e => {
   const rect = canvas.getBoundingClientRect();
   const mx = e.clientX - rect.left, my = e.clientY - rect.top;
 
+  // 时间轴区域点击：视图居中到点击处的K线
+  if (my >= canvas.clientHeight - PAD_B && dataLen() > 0) {
+    const plotW = canvas.clientWidth - PAD_L - PAD_R;
+    if (mx >= PAD_L && mx <= PAD_L + plotW) {
+      const frac = Math.max(0, Math.min(1, (mx - PAD_L) / plotW));
+      const targetIdx = Math.floor(viewStart + frac * viewCount);
+      viewStart = Math.max(0, Math.min(dataLen() - viewCount, targetIdx - viewCount / 2));
+      DS.ensure(Math.max(0, Math.floor(viewStart) - 200), Math.floor(viewStart) + viewCount);
+      redrawSoon(); scheduleViewSave();
+    }
+    return;
+  }
+
   if (toolMode === 'hline') {
     lines.push({ type: 'hline', price: yToPrice(my) });
     selectedLine = lines[lines.length - 1];
@@ -1580,7 +1652,7 @@ window.addEventListener('mouseup', () => {
       rrDraft = null;
       tradeMode = false;
       document.getElementById('tradeEnter').classList.remove('trade-active');
-      setTradeHint('滚轮缩放 · 拖拽平移 · <kbd>←</kbd><kbd>→</kbd> 逐根步进 · <kbd>Del</kbd> 删除选中 · 「盈亏比」拖出入场/止盈/止损');
+      setTradeHint('滚轮缩放 · 拖拽平移 · <kbd>←</kbd><kbd>→</kbd> 逐根步进 · <kbd>G</kbd> 日期跳转 · <kbd>Del</kbd> 删除选中 · 「盈亏比」拖出入场/止盈/止损');
       exitToolMode();
       draw(); scheduleSessionSave();
       return;
@@ -1592,8 +1664,15 @@ canvas.addEventListener('mouseleave', () => { if (!drag) { hover.x = -1; hover.y
 
 // 键盘
 window.addEventListener('keydown', e => {
+  if (goToOpen) return;   // 跳转对话框打开时屏蔽全部快捷键（含 Delete/箭头，避免误操作画线）
   if (e.key === 'Delete' || e.key === 'Del' || e.key === 'Backspace') {
     if (selectedLine) { lines = lines.filter(l => l !== selectedLine); selectedLine = null; draw(); scheduleSessionSave(); }
+    return;
+  }
+  if (e.key === 'g' || e.key === 'G') {
+    if (toolMode !== 'cursor') return;
+    e.preventDefault();
+    showGoToDialog();
     return;
   }
   if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
