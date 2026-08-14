@@ -92,7 +92,7 @@ const move = (x, y) => mm({ clientX: x, clientY: y });
 const wmove = (x, y) => wmm({ clientX: x, clientY: y });
 const up = () => wmu({});
 const key = (k) => wkd({ key: k, preventDefault() {} });
-const wheel = (dy) => wl({ deltaY: dy, preventDefault() {} });
+const wheel = (dy, dx) => wl({ deltaY: dy || 0, deltaX: dx || 0, preventDefault() {} });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 // 屏幕坐标 <-> 逻辑坐标（依赖 SCALE 建立后）
 const sx = idx => API.dataXToScreenX(idx);
@@ -229,7 +229,7 @@ const sy = p => API.priceToY(p);
 
   // ============ 5.5 滚轮缩放（PRD §8：macOS 灵敏度优化） ============
   {
-    const len = DATA['15m'].length;
+    const len = API.dataLen();
 
     // 方向：向上滚一格（deltaY<0）→ 放大（viewCount 减小）
     const vc0 = API.getViewCount();
@@ -274,6 +274,65 @@ const sy = p => API.priceToY(p);
     // viewStart 始终在合法范围
     check('viewStart 不越界', API.getViewStart() >= 0 && API.getViewStart() <= len - API.getViewCount(),
       'vs=' + API.getViewStart().toFixed(0) + ' vc=' + API.getViewCount());
+  }
+
+  // ============ 5.6 双指滑动平移（PRD §9：deltaX 免按住拖拽，兼容 Win） ============
+  {
+    const len = API.dataLen();
+
+    // 前置：恢复到可平移的中间视图（§5.5 末尾疯狂缩小把视图推到极限，viewStart 被钳死）
+    for (let i = 0; i < 10; i++) wheel(-5000); // 连续放大到最小视图
+    wheel(0, 10000);                           // 向右平移把 viewStart 拉回中间（留出左移空间）
+    check('前置：视图可平移（viewStart 在中间且 viewCount < dataLen）',
+      API.getViewStart() > 0 && API.getViewStart() < API.dataLen() - API.getViewCount() &&
+      API.getViewCount() < API.dataLen(),
+      'vs=' + API.getViewStart().toFixed(1) + ' vc=' + API.getViewCount() + ' len=' + API.dataLen());
+
+    // 方向：双指向左滑（deltaX<0，自然滚动）→ 看更早 → viewStart 增大
+    const vs0 = API.getViewStart();
+    wheel(0, -300); // 仅横向分量，纵向=0
+    const vs1 = API.getViewStart();
+    check('双指向左滑=看更早（viewStart 增大）', vs1 > vs0, vs0.toFixed(1) + ' -> ' + vs1.toFixed(1));
+
+    // 方向：双指向右滑（deltaX>0）→ 看更近 → viewStart 减小
+    wheel(0, 300);
+    const vs2 = API.getViewStart();
+    check('双指向右滑=看更近（viewStart 减小）', vs2 < vs1, vs1.toFixed(1) + ' -> ' + vs2.toFixed(1));
+
+    // 换算与拖拽一致：ΔviewStart ≈ Δpx / xW（xW = plotW / viewCount）
+    const vcP = API.getViewCount();
+    const xW = 1200 / vcP;
+    const vsA = API.getViewStart();
+    wheel(0, -120); // 向左 120px
+    const vsB = API.getViewStart();
+    const expectPan = Math.abs(vsB - vsA);
+    check('平移换算≈拖拽同公式（120px ≈ 120/xW）', Math.abs(expectPan - 120 / xW) <= 2,
+      'actual ' + expectPan.toFixed(2) + ' expect ' + (120 / xW).toFixed(2));
+
+    // 纵向分量不影响平移：deltaY 仍缩放、deltaX 平移互不干扰
+    // （缩放右边缘锚定会重置 viewStart，故只断言缩放分量生效 + 状态合法）
+    const vcBefore = API.getViewCount();
+    const vsBefore = API.getViewStart();
+    wheel(120, -120); // 纵向向下（缩小）+ 横向向左（看更近）
+    const vcAfter = API.getViewCount();
+    const vsAfter = API.getViewStart();
+    check('双指斜滑：缩放分量生效（viewCount 增大）',
+      vcAfter > vcBefore, 'vc ' + vcBefore + ' -> ' + vcAfter);
+    check('双指斜滑后状态合法（viewStart 不越界）',
+      vsAfter >= 0 && vsAfter <= len - vcAfter,
+      'vs=' + vsAfter.toFixed(1) + ' vc=' + vcAfter);
+
+    // 边界钳制：疯狂向左平移不越界（≥0）
+    for (let i = 0; i < 200; i++) wheel(0, -10000);
+    check('连续向左平移钳制 >= 0', API.getViewStart() >= 0, '' + API.getViewStart().toFixed(1));
+    // 疯狂向右平移不越界（≤ len - viewCount）
+    for (let i = 0; i < 200; i++) wheel(0, 10000);
+    check('连续向右平移钳制 <= len-vc', API.getViewStart() <= len - API.getViewCount(),
+      API.getViewStart().toFixed(1) + ' <= ' + (len - API.getViewCount()));
+    // 纯平移不改 viewCount
+    const vcF = API.getViewCount();
+    wheel(0, 120); wheel(0, -120);
+    check('纯平移不改 viewCount', API.getViewCount() === vcF, vcF + ' -> ' + API.getViewCount());
   }
 
   // ============ 6. 成交量分隔条 ============
