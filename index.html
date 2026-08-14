@@ -2020,13 +2020,15 @@ function applyZoom(delta) {
   redrawSoon(); scheduleViewSave();
 }
 
-// 双指横向滑动平移：与拖拽平移（viewStart -= dx / xW）同一换算公式，
-// 方向一致（双指向左滑=看更早=viewStart 增大）。纯像素，无指数。
+// 双指横向滑动平移（v1.3 方向修正：左滑=看更早=viewStart 减小）。
+// 与拖拽平移同量纲（像素→K线：px / xW），符号相反：
+//   deltaX<0（左滑）→ viewStart -= |px|/xW（看更早）
+//   deltaX>0（右滑）→ viewStart += |px|/xW（看更近）
 function applyPan(px) {
   const len = dataLen();
   const plotW = canvas.clientWidth - PAD_L - PAD_R;
   const xW = plotW / viewCount;
-  viewStart = Math.max(0, Math.min(len - viewCount, viewStart - px / xW));
+  viewStart = Math.max(0, Math.min(len - viewCount, viewStart + px / xW));
   DS.ensure(Math.max(0, Math.floor(viewStart) - 200), Math.floor(viewStart) + viewCount);
   redrawSoon(); scheduleViewSave();
 }

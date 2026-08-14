@@ -282,31 +282,31 @@ const sy = p => API.priceToY(p);
 
     // 前置：恢复到可平移的中间视图（§5.5 末尾疯狂缩小把视图推到极限，viewStart 被钳死）
     for (let i = 0; i < 10; i++) wheel(-5000); // 连续放大到最小视图
-    wheel(0, 10000);                           // 向右平移把 viewStart 拉回中间（留出左移空间）
+    wheel(0, -10000);                          // 左滑把 viewStart 拉回中间（留出右移空间；v1.3 方向翻转）
     check('前置：视图可平移（viewStart 在中间且 viewCount < dataLen）',
       API.getViewStart() > 0 && API.getViewStart() < API.dataLen() - API.getViewCount() &&
       API.getViewCount() < API.dataLen(),
       'vs=' + API.getViewStart().toFixed(1) + ' vc=' + API.getViewCount() + ' len=' + API.dataLen());
 
-    // 方向：双指向左滑（deltaX<0，自然滚动）→ 看更早 → viewStart 增大
+    // 方向（v1.3 修正）：双指向左滑（deltaX<0，自然滚动）→ 看更早 → viewStart 减小
     const vs0 = API.getViewStart();
     wheel(0, -300); // 仅横向分量，纵向=0
     const vs1 = API.getViewStart();
-    check('双指向左滑=看更早（viewStart 增大）', vs1 > vs0, vs0.toFixed(1) + ' -> ' + vs1.toFixed(1));
+    check('双指向左滑=看更早（viewStart 减小）', vs1 < vs0, vs0.toFixed(1) + ' -> ' + vs1.toFixed(1));
 
-    // 方向：双指向右滑（deltaX>0）→ 看更近 → viewStart 减小
+    // 方向：双指向右滑（deltaX>0）→ 看更近 → viewStart 增大
     wheel(0, 300);
     const vs2 = API.getViewStart();
-    check('双指向右滑=看更近（viewStart 减小）', vs2 < vs1, vs1.toFixed(1) + ' -> ' + vs2.toFixed(1));
+    check('双指向右滑=看更近（viewStart 增大）', vs2 > vs1, vs1.toFixed(1) + ' -> ' + vs2.toFixed(1));
 
-    // 换算与拖拽一致：ΔviewStart ≈ Δpx / xW（xW = plotW / viewCount）
+    // 换算与拖拽一致：ΔviewStart ≈ Δpx / xW（xW = plotW / viewCount；v1.3 方向翻转）
     const vcP = API.getViewCount();
     const xW = 1200 / vcP;
     const vsA = API.getViewStart();
-    wheel(0, -120); // 向左 120px
+    wheel(0, -120); // 向左 120px → 看更早 → viewStart 减小 120/xW
     const vsB = API.getViewStart();
-    const expectPan = Math.abs(vsB - vsA);
-    check('平移换算≈拖拽同公式（120px ≈ 120/xW）', Math.abs(expectPan - 120 / xW) <= 2,
+    const expectPan = vsA - vsB;
+    check('平移换算≈-Δpx/xW（120px 左滑 = 120/xW 减小）', Math.abs(expectPan - 120 / xW) <= 2,
       'actual ' + expectPan.toFixed(2) + ' expect ' + (120 / xW).toFixed(2));
 
     // 纵向分量不影响平移：deltaY 仍缩放、deltaX 平移互不干扰
