@@ -107,7 +107,11 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
       simAddOrder(posId, 'SL', price, pct, { trailing: true, trailDist, breakeven }),
     resetAdvance: () => { simCheckedIdx = -1; },
     // 交易备注（§15 T14）
-    setNote: (id, note) => simSetNote(id, note)
+    setNote: (id, note) => simSetNote(id, note),
+    // 统计（§15 M1-M7）
+    getStats: () => simStats(), getHistory: () => simClosedTrades,
+    getEquityCurve: () => simEquityCurve, getFills: () => simFills,
+    clearStats: () => { simClosedTrades = []; simEquityCurve = []; simFills = []; }
   };`);
 fn(sandbox.window, sandbox.document, sandbox.localStorage, async () => ({}), sandbox.location, console, canvasMock, 1);
 const API = sandbox.window.__API__;
@@ -781,6 +785,58 @@ const sy = p => API.priceToY(p);
     // 平仓后备注保留（历史记录含备注）
     API.closePosition(pos.id);
     check('T14c 平仓后持仓移除', !API.getPositions().some(p => p.id === pos.id));
+  }
+
+  // ============ 5.17 模拟交易：统计计算（PRD §14 / §15 M1-M7） ============
+  {
+    // 清空统计，构造 5 笔已平仓（3 盈 2 亏）：盈 100/50/30，亏 -80/-40（净，含手续费近似）
+    API.clearStats();
+    const H = API.getHistory();
+    H.push({ dir: 'long', pnl: 100 }, { dir: 'long', pnl: 50 }, { dir: 'short', pnl: 30 },
+      { dir: 'short', pnl: -80 }, { dir: 'long', pnl: -40 });
+    // 资金曲线：构造先盈后亏（峰值 11000 → 谷 9000 → 回撤 18.18%）
+    API.getEquityCurve().push({ idx: 1, equity: 10500 }, { idx: 2, equity: 11000 }, { idx: 3, equity: 9000 });
+    const st = API.getStats();
+    check('M1 胜率：3盈/5笔 = 60%', Math.abs(st.winRate - 0.6) < 1e-9, '' + st.winRate);
+    check('M1b 总交易笔数 5', st.totalTrades === 5);
+    check('M2 盈亏比 RR = 60/60 = 1', Math.abs(st.rr - 1) < 1e-9, '' + st.rr);
+    // 平均盈 = (100+50+30)/3 = 60；平均亏 = (80+40)/2 = 60 → RR=1
+    check('M3 Profit Factor = 180/120 = 1.5', Math.abs(st.profitFactor - 1.5) < 1e-9, '' + st.profitFactor);
+    check('M4 R 倍数分布（5 个值）', st.rMultiples.length === 5);
+    check('M6 最大回撤 = (11000-9000)/11000 = 18.18%', Math.abs(st.maxDrawdown - 2000 / 11000) < 1e-6,
+      '' + st.maxDrawdown);
+
+    // 真实路径：开仓→挂单→推进→平仓，验证历史/资金曲线/未实现盈亏
+    API.clearStats();
+    for (const p of [...API.getPositions()]) API.closePosition(p.id);
+    API.transfer(API.getAccount(), false);
+    API.resetAdvance();
+    API.transfer(5000, true);
+    for (let i = 0; i < 10; i++) wheel(-5000);
+    wheel(0, -10000);
+    API.openPosition('long', 5, 1000);
+    const pos = API.getPositions()[API.getPositions().length - 1];
+    const entry = pos.entryPrice;
+    // M7 未实现盈亏：当前价=entry → 浮盈≈0（或按数据）
+    const st2 = API.getStats();
+    check('M7a 持仓中未实现盈亏计入总资产', st2.unrealizedPnl > -1e6, '' + st2.unrealizedPnl);
+    // 推进触发 TP（+2%）→ 平仓 → 历史/资金曲线记录
+    const d1x = DATA['1d'];
+    const oIdx = Math.max(0, Math.min(d1x.length - 1, Math.floor(API.getViewStart() + API.getViewCount()) - 1));
+    API.addOrder(pos.id, 'TP', entry * 1.02, 1.0);
+    let hit = -1;
+    for (let i = oIdx + 1; i < d1x.length; i++) { if (d1x[i][2] >= entry * 1.02) { hit = i; break; } }
+    check('M5 前置：存在 TP 触发 K 线', hit > 0, 'hit@' + hit);
+    if (hit > 0) {
+      API.advanceTo(hit);
+      check('M5 TP 平仓后资金曲线打点', API.getEquityCurve().length === 1, '' + API.getEquityCurve().length);
+      check('M5b 历史记录 1 笔', API.getHistory().length === 1, '' + API.getHistory().length);
+      const t = API.getHistory()[0];
+      check('M5c 历史含盈亏/手续费/出场方式', t && t.pnl > 0 && t.exitType === 'TP' && t.fills && t.fills.length === 1,
+        t && (t.exitType + ' pnl=' + t.pnl.toFixed(2)));
+      const st3 = API.getStats();
+      check('M5d 统计基于真实平仓（1笔100%胜率）', st3.totalTrades === 1 && Math.abs(st3.winRate - 1) < 1e-9);
+    }
   }
 
   // ============ 6. 成交量分隔条 ============

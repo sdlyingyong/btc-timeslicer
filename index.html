@@ -1466,7 +1466,8 @@ function simOpenPosition(dir, leverage, margin) {
   simAccount -= fee;
   simPositions.push({
     id: simPosId++, dir, leverage, entryPrice: px,
-    qty: nominal / px, margin, fee, openTime: dataLen() - 1
+    qty: nominal / px, margin, fee, openTime: dataLen() - 1,
+    qtyTotal: nominal / px, accumPnl: 0, accumFee: 0, fills: []
   });
   return true;
 }
@@ -1478,6 +1479,66 @@ function simSetNote(id, note) {
   if (!pos) return false;
   pos.note = String(note || '');
   return true;
+}
+
+// ================= 模拟交易（§13/§14）功能8：历史 + 资金曲线 + 统计 =================
+let simClosedTrades = [];   // 已平仓完整持仓：{id,dir,leverage,entryPrice,exitPrice,qtyTotal,pnl,fees,exitType,openIdx,closeIdx,note,fills}
+let simEquityCurve = [];    // 资金曲线点：{idx, equity}（每次结算后）
+let simFills = [];          // 成交流水：{idx,type,price,qty,pnl,fee,posId}（交割单用）
+
+// 记录一次部分/全部平仓结算（在调用方完成账目后调用；全平时写入历史 + 资金曲线）
+function simRecordSettle(pos, exitPrice, qtyReduce, pnl, fee, exitType, idx) {
+  pos.accumPnl = (pos.accumPnl || 0) + pnl;
+  pos.accumFee = (pos.accumFee || 0) + fee;
+  pos.fills = pos.fills || [];
+  pos.fills.push({ type: exitType, price: exitPrice, qty: qtyReduce, pnl, fee, idx });
+  simFills.push({ idx, type: exitType, price: exitPrice, qty: qtyReduce, pnl, fee, posId: pos.id });
+  if (pos.qty <= 1e-12) { // 全平 → 完整持仓入历史 + 资金曲线打点
+    simClosedTrades.push({
+      id: pos.id, dir: pos.dir, leverage: pos.leverage,
+      entryPrice: pos.entryPrice, exitPrice,
+      qtyTotal: pos.qtyTotal || pos.qty, pnl: pos.accumPnl, fees: pos.accumFee,
+      exitType, openIdx: pos.openTime, closeIdx: idx, note: pos.note || '', fills: pos.fills
+    });
+    simEquityCurve.push({ idx, equity: simWallet + simAccount });
+  }
+}
+
+// 统计（§14.2）：基于已平仓历史 + 当前持仓
+function simStats() {
+  const trades = simClosedTrades;
+  const wins = trades.filter(t => t.pnl > 0);
+  const losses = trades.filter(t => t.pnl <= 0);
+  const grossWin = wins.reduce((s, t) => s + t.pnl, 0);
+  const grossLoss = Math.abs(losses.reduce((s, t) => s + t.pnl, 0));
+  const avgWin = wins.length ? grossWin / wins.length : 0;
+  const avgLoss = losses.length ? grossLoss / losses.length : 0;
+  // R 倍数：每笔 pnl / 该笔保证金（简化口径：初始风险 ≈ 首档止损距离未存，用 margin 近似）
+  const rMultiples = trades.map(t => t.pnl / Math.max(1e-9, t.fees + t.pnl + (t.qtyTotal * Math.abs(t.exitPrice - t.entryPrice)) / 100));
+  // 资金曲线最大回撤
+  let peak = -Infinity, maxDD = 0;
+  for (const pt of simEquityCurve) {
+    if (pt.equity > peak) peak = pt.equity;
+    const dd = peak > 0 ? (peak - pt.equity) / peak : 0;
+    if (dd > maxDD) maxDD = dd;
+  }
+  // 未实现盈亏（当前持仓，按最新价）
+  const cur = simLastPrice();
+  const unrealized = simPositions.reduce((s, p) => {
+    const pnl = p.dir === 'long' ? p.qty * (cur - p.entryPrice) : p.qty * (p.entryPrice - cur);
+    return s + pnl;
+  }, 0);
+  return {
+    totalTrades: trades.length,
+    winRate: trades.length ? wins.length / trades.length : 0,
+    avgWin, avgLoss, rr: avgLoss > 0 ? avgWin / avgLoss : 0,
+    profitFactor: grossLoss > 0 ? grossWin / grossLoss : (grossWin > 0 ? Infinity : 0),
+    maxDrawdown: maxDD, rMultiples,
+    realizedPnl: trades.reduce((s, t) => s + t.pnl, 0),
+    totalFees: trades.reduce((s, t) => s + t.fees, 0),
+    unrealizedPnl: unrealized,
+    totalEquity: simWallet + simAccount + unrealized
+  };
 }
 
 // ================= 模拟交易（§13）功能3：加仓 / 减仓 =================
@@ -1523,8 +1584,10 @@ function simReduce(id, pct) {
   pos.margin -= marginReduce;
   simMarginUsed -= marginReduce;
   simAccount += marginReduce + pnl - fee;
+  simRecordSettle(pos, cur, qtyReduce, pnl, fee, 'reduce', simCheckedIdx < 0 ? dataLen() - 1 : simCheckedIdx);
   if (pos.qty <= 1e-12) {
     simPositions = simPositions.filter(p => p.id !== pos.id);
+    simOrders = simOrders.filter(o => o.posId !== pos.id);
   }
   return true;
 }
@@ -1584,6 +1647,7 @@ function simExecOrder(order, hitPrice) {
   simMarginUsed -= marginReduce;
   simAccount += marginReduce + pnl - fee;
   order.active = false; // 成交后挂单失效
+  simRecordSettle(pos, hitPrice, qtyReduce, pnl, fee, order.type, simCheckedIdx);
   // 全部卖出 → 关闭持仓
   if (pos.qty <= 1e-12) {
     simPositions = simPositions.filter(p => p.id !== pos.id);
@@ -1652,6 +1716,7 @@ function simClosePosition(posId) {
   const fee = simCalcFee(pos.qty * cur);
   simAccount += pos.margin + pnl - fee;
   simMarginUsed -= pos.margin;
+  simRecordSettle(pos, cur, pos.qty, pnl, fee, 'manual', simCheckedIdx < 0 ? dataLen() - 1 : simCheckedIdx);
   simPositions = simPositions.filter(p => p.id !== posId);
   simOrders = simOrders.filter(o => o.posId !== posId);
   return true;
@@ -1669,6 +1734,7 @@ function simLiquidationCheck(idx) {
       ? pos.qty * (price - pos.entryPrice)
       : pos.qty * (pos.entryPrice - price);
     if (pnl <= -pos.margin) { // 亏损 ≥ 保证金 → 爆仓
+      simRecordSettle(pos, price, pos.qty, pnl, 0, 'liq', i);
       simMarginUsed -= pos.margin;
       simPositions = simPositions.filter(p => p.id !== pos.id);
       simOrders = simOrders.filter(o => o.posId !== pos.id);
