@@ -113,7 +113,9 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     getEquityCurve: () => simEquityCurve, getFills: () => simFills,
     clearStats: () => { simClosedTrades = []; simEquityCurve = []; simFills = []; },
     // 分组/持仓时间/频率（§15 M8-M12）
-    groupStats: () => simGroupStats()
+    groupStats: () => simGroupStats(),
+    // 交割单/持久化（§15 M13/M16）
+    exportCSV: () => simExportCSV(), saveState: () => simSaveState(), loadState: () => simLoadState()
   };`);
 fn(sandbox.window, sandbox.document, sandbox.localStorage, async () => ({}), sandbox.location, console, canvasMock, 1);
 const API = sandbox.window.__API__;
@@ -871,6 +873,49 @@ const sy = p => API.priceToY(p);
     // M12 交易频率：4 笔，跨度 = 401-100 = 301 根（1d 周期 1440min/根 → 301×1440min/1440/24天）
     // 简化口径：跨度（分钟）= (maxClose-minOpen) × 该笔周期分钟 —— 用天数 = (closeIdx-openIdx) 跨度
     check('M12 交易频率（4笔/覆盖天数）', g.tradeFreq > 0 && g.tradeFreq <= 4, '' + g.tradeFreq);
+  }
+
+  // ============ 5.19 模拟交易：交割单导出 + 买卖点 + 持久化（PRD §13.5.2/§13.5.1/§13.5 / §15 M13/M14/M16） ============
+  {
+    // 前置：清理，开一笔真实交易（开仓→TP 平仓）产生流水
+    API.clearStats();
+    for (const p of [...API.getPositions()]) API.closePosition(p.id);
+    API.transfer(API.getAccount(), false);
+    API.resetAdvance();
+    API.transfer(5000, true);
+    for (let i = 0; i < 10; i++) wheel(-5000);
+    wheel(0, -10000);
+    API.openPosition('long', 5, 1000);
+    const pos = API.getPositions()[API.getPositions().length - 1];
+    const entry = pos.entryPrice;
+    const d1x = DATA['1d'];
+    const oIdx = Math.max(0, Math.min(d1x.length - 1, Math.floor(API.getViewStart() + API.getViewCount()) - 1));
+    API.addOrder(pos.id, 'TP', entry * 1.02, 1.0);
+    let hit = -1;
+    for (let i = oIdx + 1; i < d1x.length; i++) { if (d1x[i][2] >= entry * 1.02) { hit = i; break; } }
+    if (hit > 0) API.advanceTo(hit);
+
+    // M14 买卖点：fills 含开仓点 + 平仓点
+    const fills = API.getFills();
+    check('M14 买卖点数据：开仓点+TP平仓点', fills.some(f => f.type === 'open') && fills.some(f => f.type === 'TP'),
+      JSON.stringify(fills.map(f => f.type)));
+
+    // M13 交割单导出 CSV：表头 + 全部流水 + 手续费列
+    const csv = API.exportCSV();
+    check('M13 CSV 以 BOM 开头', csv.charCodeAt(0) === 0xFEFF);
+    const lines = csv.split('\n');
+    check('M13 CSV 表头含字段', lines[0].includes('序号') && lines[0].includes('手续费') && lines[0].includes('累计权益'));
+    check('M13 CSV 含开仓+平仓行', lines.length >= 3 && lines.some(l => l.includes('"open"')) && lines.some(l => l.includes('"TP"')),
+      'lines=' + lines.length);
+
+    // M16 持久化：保存 → 重置内存 → 恢复
+    API.saveState();
+    const before = { w: API.getWallet(), a: API.getAccount(), h: API.getHistory().length, f: API.getFills().length };
+    API.transfer(API.getWallet(), true); // 转移全部到账户（改变 wallet）
+    API.loadState();
+    check('M16 持久化恢复（save→load 往返一致）', API.getWallet() === before.w && API.getAccount() === before.a &&
+      API.getHistory().length === before.h && API.getFills().length === before.f,
+      'before=' + JSON.stringify(before) + ' afterWallet=' + API.getWallet());
   }
 
   // ============ 6. 成交量分隔条 ============

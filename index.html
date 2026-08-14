@@ -1469,6 +1469,9 @@ function simOpenPosition(dir, leverage, margin) {
     qty: nominal / px, margin, fee, openTime: dataLen() - 1,
     qtyTotal: nominal / px, accumPnl: 0, accumFee: 0, fills: [], period: cur
   });
+  // 成交流水（交割单）：开仓
+  simFills.push({ idx: dataLen() - 1, type: 'open', price: px, qty: nominal / px, pnl: 0, fee,
+    posId: simPosId - 1, period: cur, dir, leverage, margin });
   return true;
 }
 
@@ -1492,7 +1495,8 @@ function simRecordSettle(pos, exitPrice, qtyReduce, pnl, fee, exitType, idx) {
   pos.accumFee = (pos.accumFee || 0) + fee;
   pos.fills = pos.fills || [];
   pos.fills.push({ type: exitType, price: exitPrice, qty: qtyReduce, pnl, fee, idx });
-  simFills.push({ idx, type: exitType, price: exitPrice, qty: qtyReduce, pnl, fee, posId: pos.id });
+  simFills.push({ idx, type: exitType, price: exitPrice, qty: qtyReduce, pnl, fee, posId: pos.id,
+    period: pos.period || cur, dir: pos.dir, leverage: pos.leverage, margin: 0, note: pos.note || '' });
   if (pos.qty <= 1e-12) { // 全平 → 完整持仓入历史 + 资金曲线打点
     simClosedTrades.push({
       id: pos.id, dir: pos.dir, leverage: pos.leverage,
@@ -1545,6 +1549,51 @@ function simGroupStats() {
     byExit: Object.fromEntries(Object.entries(byExit).map(([k, v]) => [k, agg(v)])),
     avgHoldMin, tradeFreq: trades.length ? trades.length / days : 0
   };
+}
+
+// ================= 模拟交易（§13/§14）功能10：交割单导出 + 持久化 =================
+// 交割单 CSV（§13.5.2）：成交流水（开仓/加仓/减仓/平仓各一行），含手续费，UTF-8 BOM。
+function simExportCSV() {
+  const rows = [['序号', '时间', '类型', '方向', '杠杆', '价格', '数量', '名义价值', '保证金', '手续费', '盈亏', '累计权益', '备注']];
+  let cumEquity = SIM_INIT_WALLET;
+  simFills.forEach((f, i) => {
+    cumEquity += (f.pnl || 0) - (f.fee || 0);
+    let ts = '';
+    const pd = (window.BTCFUT_DATA || {})[f.period || '1d'];
+    if (pd && f.idx != null && pd[f.idx]) ts = new Date(pd[f.idx][0] * 60000).toISOString().slice(0, 16).replace('T', ' ');
+    rows.push([
+      i + 1, ts, f.type, f.dir || '', f.leverage || '',
+      (f.price || 0).toFixed(2), (f.qty || 0).toFixed(6), ((f.qty || 0) * (f.price || 0)).toFixed(2),
+      (f.margin || 0).toFixed(2), (f.fee || 0).toFixed(4), (f.pnl || 0).toFixed(4),
+      cumEquity.toFixed(2), f.note || ''
+    ]);
+  });
+  return '\uFEFF' + rows.map(r => r.map(v => '"' + String(v).replace(/"/g, '""') + '"').join(',')).join('\n');
+}
+
+// 持久化（§13.5）：localStorage sim_trade_v1
+function simSaveState() {
+  try {
+    localStorage.setItem('sim_trade_v1', JSON.stringify({
+      wallet: simWallet, account: simAccount, marginUsed: simMarginUsed, feeRate: simFeeRate,
+      positions: simPositions, orders: simOrders, closedTrades: simClosedTrades,
+      equityCurve: simEquityCurve, fills: simFills, posId: simPosId, orderId: simOrderId
+    }));
+    return true;
+  } catch (e) { return false; }
+}
+function simLoadState() {
+  try {
+    const raw = localStorage.getItem('sim_trade_v1');
+    if (!raw) return false;
+    const s = JSON.parse(raw);
+    simWallet = s.wallet; simAccount = s.account; simMarginUsed = s.marginUsed || 0;
+    if (typeof s.feeRate === 'number') simFeeRate = s.feeRate;
+    simPositions = s.positions || []; simOrders = s.orders || [];
+    simClosedTrades = s.closedTrades || []; simEquityCurve = s.equityCurve || []; simFills = s.fills || [];
+    simPosId = s.posId || 1; simOrderId = s.orderId || 1;
+    return true;
+  } catch (e) { return false; }
 }
 
 // 统计（§14.2）：基于已平仓历史 + 当前持仓
@@ -1602,9 +1651,12 @@ function simAddMargin(id, add) {
   const newQty = pos.qty + addQty;
   pos.entryPrice = (pos.qty * pos.entryPrice + addQty * px) / newQty;
   pos.qty = newQty;
+  pos.qtyTotal = (pos.qtyTotal || pos.qty) + addQty;
   pos.margin += add;
   simAccount -= add + fee;
   simMarginUsed += add;
+  simFills.push({ idx: dataLen() - 1, type: 'add', price: px, qty: addQty, pnl: 0, fee,
+    posId: pos.id, period: pos.period || cur, dir: pos.dir, leverage: pos.leverage, margin: add });
   return true;
 }
 
