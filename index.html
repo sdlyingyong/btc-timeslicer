@@ -1431,18 +1431,22 @@ function drawLines() {
         drawHandle(dataXToScreenX(ln.x2), priceToY(ln.y2));
       }
     } else if (ln.type === 'channel') {
-      // 通道：基线(A→B)与平行线(过C)，均自各自左侧锚点向右延伸成射线
+      // 通道：基线(A→B)与平行线(过C)，各自从自己的左侧锚点向右延伸成射线
       const idxR = SCALE.viewStart + SCALE.plotW / SCALE.xW - 0.5;
       const tdx = ln.x2 - ln.x1;
       const k = tdx !== 0 ? (ln.y2 - ln.y1) / tdx : 0;
-      const xL1 = Math.max(ln.x1, ln.x3, SCALE.viewStart - 0.5);
-      const xR = Math.max(idxR, xL1);
-      const b1x = dataXToScreenX(xL1), b1y = priceToY(ln.y1 + k * (xL1 - ln.x1));
+      const vL = SCALE.viewStart - 0.5;
+      const bL = Math.max(ln.x1, vL), pL = Math.max(ln.x3, vL);   // 基线/平行线各自起点
+      const aL = Math.max(bL, pL);                                 // 填充区域起点（两线公共段）
+      const xR = Math.max(idxR, aL);
+      const b1x = dataXToScreenX(bL), b1y = priceToY(ln.y1 + k * (bL - ln.x1));
       const b2x = dataXToScreenX(xR), b2y = priceToY(ln.y1 + k * (xR - ln.x1));
-      const p1x = dataXToScreenX(xL1), p1y = priceToY(ln.y3 + k * (xL1 - ln.x3));
+      const p1x = dataXToScreenX(pL), p1y = priceToY(ln.y3 + k * (pL - ln.x3));
       const p2x = dataXToScreenX(xR), p2y = priceToY(ln.y3 + k * (xR - ln.x3));
+      const f1x = dataXToScreenX(aL), f1y = priceToY(ln.y1 + k * (aL - ln.x1));
+      const f2x = dataXToScreenX(aL), f2y = priceToY(ln.y3 + k * (aL - ln.x3));
       ctx.fillStyle = isSel ? 'rgba(255,93,93,0.10)' : 'rgba(177,140,255,0.07)';
-      ctx.beginPath(); ctx.moveTo(b1x, b1y); ctx.lineTo(b2x, b2y); ctx.lineTo(p2x, p2y); ctx.lineTo(p1x, p1y); ctx.closePath(); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(f1x, f1y); ctx.lineTo(b2x, b2y); ctx.lineTo(p2x, p2y); ctx.lineTo(f2x, f2y); ctx.closePath(); ctx.fill();
       ctx.strokeStyle = isSel ? '#ff5d5d' : '#b18cff';
       ctx.lineWidth = isSel ? 2 : 1.4;
       ctx.beginPath(); ctx.moveTo(b1x, b1y); ctx.lineTo(b2x, b2y); ctx.stroke();
@@ -1699,11 +1703,12 @@ function hitTest(mx, my) {
       if (dist(mx, my, dataXToScreenX(ln.x2), priceToY(ln.y2)) < 7) return { line: ln, handle: 'p2' };
       if (dist(mx, my, dataXToScreenX(ln.x3), priceToY(ln.y3)) < 7) return { line: ln, handle: 'p3' };
       const k = (ln.x2 - ln.x1) !== 0 ? (ln.y2 - ln.y1) / (ln.x2 - ln.x1) : 0;
-      const xL = Math.max(ln.x1, ln.x3, idxL), xR = idxR;
-      const b1 = { x: dataXToScreenX(xL), y: priceToY(ln.y1 + k * (xL - ln.x1)) };
-      const b2 = { x: dataXToScreenX(xR), y: priceToY(ln.y1 + k * (xR - ln.x1)) };
-      const p1 = { x: dataXToScreenX(xL), y: priceToY(ln.y3 + k * (xL - ln.x3)) };
-      const p2 = { x: dataXToScreenX(xR), y: priceToY(ln.y3 + k * (xR - ln.x3)) };
+      const idxL = SCALE.viewStart - 0.5, idxR = SCALE.viewStart + SCALE.plotW / SCALE.xW - 0.5;
+      const bL = Math.max(ln.x1, idxL), pL = Math.max(ln.x3, idxL);   // 各自射线起点
+      const b1 = { x: dataXToScreenX(bL), y: priceToY(ln.y1 + k * (bL - ln.x1)) };
+      const b2 = { x: dataXToScreenX(idxR), y: priceToY(ln.y1 + k * (idxR - ln.x1)) };
+      const p1 = { x: dataXToScreenX(pL), y: priceToY(ln.y3 + k * (pL - ln.x3)) };
+      const p2 = { x: dataXToScreenX(idxR), y: priceToY(ln.y3 + k * (idxR - ln.x3)) };
       const dB = ptSegDist(mx, my, b1.x, b1.y, b2.x, b2.y);
       const dP = ptSegDist(mx, my, p1.x, p1.y, p2.x, p2.y);
       if (dB < 5 || dP < 5) return { line: ln, handle: 'body' };
