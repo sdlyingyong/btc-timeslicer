@@ -401,6 +401,35 @@ const sy = p => API.priceToY(p);
       t1dRight + ' -> ' + t1dBack + ' (Δ' + Math.abs(t1dBack - t1dRight) + 'min)');
   }
 
+  // ============ 5.9 缩放右边缘严格锚定（PRD §12：右侧价格贴框稳定） ============
+  {
+    // 场景1：小缩放（bkt=1）单次缩放偏差 ≤ 0.5 根（亚像素浮点容差）
+    for (let i = 0; i < 10; i++) wheel(-5000); // 放大到最小
+    wheel(0, -10000);                          // 左滑到中间（留出缩放空间）
+    const vsA = API.getViewStart(), vcA = API.getViewCount();
+    const rightA = vsA + vcA;
+    wheel(-120); // 放大一格（viewCount 减小，右边缘应锚定）
+    const rightB = API.getViewStart() + API.getViewCount();
+    check('小缩放右边缘锚定（偏差≤0.5）', Math.abs(rightA - rightB) <= 0.5,
+      rightA.toFixed(3) + ' -> ' + rightB.toFixed(3));
+
+    // 场景2（核心）：从全量（viewCount=len，bkt>1）开始连续放大，
+    // 右边缘必须恒锚定（当前实现桶对齐量化在奇数 viewStart 时破坏锚定）
+    for (let i = 0; i < 30; i++) wheel(5000);  // 缩小到全量（viewCount=len）
+    const anchor = API.dataLen();
+    let ok = true, firstFail = '';
+    for (let i = 0; i < 10; i++) {
+      wheel(-120); // 连续放大（vc 从 len 递减，经过 bkt>1 区间）
+      const edge = API.getViewStart() + API.getViewCount();
+      if (Math.abs(edge - anchor) > 0.5) { ok = false; firstFail = 'edge=' + edge.toFixed(1) + ' @' + i; break; }
+    }
+    check('大缩放区间连续放大右边缘恒锚定（偏差≤0.5）', ok, firstFail || '10 次全锚定');
+
+    // 边界钳制回归：缩放后状态合法
+    check('缩放后状态合法', API.getViewStart() >= 0 && API.getViewCount() >= 20 &&
+      API.getViewStart() <= API.dataLen() - API.getViewCount());
+  }
+
   // ============ 6. 成交量分隔条 ============
   {
     const vf0 = API.getVolFrac();

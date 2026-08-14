@@ -2022,9 +2022,11 @@ function applyZoom(delta) {
   viewCount = nc;
   // 缩放只改变左侧可见历史量，右侧（最新K线）始终钉住，避免露出右侧未来空白
   viewStart = Math.max(0, Math.min(len - viewCount, rightEdge - viewCount));
-  // 桶对齐：缩放后量化 viewStart，桶边界稳定不跳
+  // §12 桶对齐保护：量化 viewStart 到桶边界（防柱子跳），但仅在
+  // 量化后右边缘**严格不变**时才采用（右侧贴框优先，偏差 0）。
   const bkt = Math.max(1, Math.round(viewCount / Math.max(1, plotW)));
-  viewStart = Math.round(Math.floor(viewStart / bkt) * bkt);
+  const vsQ = Math.round(Math.floor(viewStart / bkt) * bkt);
+  if (Math.abs((vsQ + viewCount) - rightEdge) <= 1e-6) viewStart = vsQ;
   DS.ensure(Math.max(0, Math.floor(viewStart) - 200), Math.floor(viewStart) + viewCount);
   redrawSoon(); scheduleViewSave();
 }
