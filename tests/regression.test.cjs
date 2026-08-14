@@ -87,7 +87,10 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     getWallet: () => simWallet, getAccount: () => simAccount, getMarginUsed: () => simMarginUsed,
     getFeeRate: () => simFeeRate, setFeeRate: r => { simFeeRate = r; },
     calcFee: n => simCalcFee(n),
-    transfer: (amount, toAccount) => simTransfer(amount, toAccount)
+    transfer: (amount, toAccount) => simTransfer(amount, toAccount),
+    // 开仓（§15 S8-S12）
+    openPosition: (dir, leverage, margin) => simOpenPosition(dir, leverage, margin),
+    getPositions: () => simPositions, getLastPrice: () => simLastPrice()
   };`);
 fn(sandbox.window, sandbox.document, sandbox.localStorage, async () => ({}), sandbox.location, console, canvasMock, 1);
 const API = sandbox.window.__API__;
@@ -462,6 +465,40 @@ const sy = p => API.priceToY(p);
     // 恢复初始（避免污染后续）：清空账户余额回钱包
     API.transfer(API.getAccount(), false);
     check('S-恢复：账户余额归零', API.getWallet() === 10000 && API.getAccount() === 0);
+  }
+
+  // ============ 5.11 模拟交易：开仓（PRD §13.3 / §15 S8-S12） ============
+  {
+    // 准备资金：划 2000 到账户
+    API.transfer(2000, true);
+    const px = API.getLastPrice();
+    check('S-前置：获取最新价', px > 0, 'px=' + px);
+
+    // S8 开多 5x，保证金 500
+    const r8 = API.openPosition('long', 5, 500);
+    check('S8 开多 5x 成功', r8 === true && API.getPositions().length === 1, '' + r8);
+    const p = API.getPositions()[0];
+    check('S8 持仓字段：方向/杠杆/开仓价/数量', p && p.dir === 'long' && p.leverage === 5 &&
+      Math.abs(p.entryPrice - px) < 1e-9 && Math.abs(p.qty - (500 * 5 / px)) < 1e-9,
+      'qty=' + (p && p.qty));
+    check('S8 账户扣保证金 + 开仓手续费', Math.abs(API.getMarginUsed() - 500) < 1e-9 &&
+      Math.abs(API.getAccount() - (2000 - 500 - API.calcFee(500 * 5))) < 1e-9,
+      'account=' + API.getAccount() + ' margin=' + API.getMarginUsed());
+
+    // S9 开空 10x，保证金 300
+    const r9 = API.openPosition('short', 10, 300);
+    check('S9 开空 10x 成功', r9 === true && API.getPositions().length === 2);
+    const p2 = API.getPositions()[1];
+    check('S9 空头方向正确', p2 && p2.dir === 'short' && p2.leverage === 10);
+    check('S9 已占用保证金 = 800', Math.abs(API.getMarginUsed() - 800) < 1e-9, '' + API.getMarginUsed());
+
+    // S10 保证金不足拒绝
+    const n0 = API.getPositions().length;
+    const r10 = API.openPosition('long', 5, 99999);
+    check('S10 保证金不足拒绝开仓', r10 === false && API.getPositions().length === n0);
+
+    // S12 图表仓位线（开仓价 = 最新收盘价）——由 openPosition 返回位置验证
+    check('S12 开仓价 = 最新 K 线收盘价', Math.abs(p.entryPrice - px) < 1e-9);
   }
 
   // ============ 6. 成交量分隔条 ============

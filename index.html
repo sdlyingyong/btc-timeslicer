@@ -1432,6 +1432,44 @@ function simTransfer(amount, toAccount) {
   return true;
 }
 
+// ================= 模拟交易（§13）功能2：开仓 =================
+// 开仓价 = 当前视图最新 K 线收盘价（§13.3）；真实合约：仓位价值 = 保证金×杠杆。
+// 持仓：{ id, dir:'long'|'short', leverage, entryPrice, qty(BTC), margin, fee, openTime }
+let simPosId = 1;
+
+// 当前视图最新 K 线收盘价（最新一根已加载 K 线）
+function simLastPrice() {
+  const len = dataLen();
+  if (len <= 0) return NaN;
+  const r = getBar(len - 1);
+  return r ? +r[4] : NaN;
+}
+
+// 开仓：dir=long/short，leverage 5|10，margin ≤ 账户可用。
+// 扣保证金 + 开仓手续费（名义价值 = margin×leverage × 费率）。
+// 成功返回 true；失败返回 false（保证金不足/参数非法）。
+function simOpenPosition(dir, leverage, margin) {
+  margin = Number(margin) || 0;
+  leverage = Number(leverage) || 0;
+  if (dir !== 'long' && dir !== 'short') return false;
+  if ((leverage !== 5 && leverage !== 10) || margin <= 0) return false;
+  if (margin > simAccount) return false;
+  const px = simLastPrice();
+  if (!(px > 0)) return false;
+  const nominal = margin * leverage;
+  const fee = simCalcFee(nominal);
+  if (fee > simAccount - margin) return false; // 手续费也不够
+  simAccount -= margin;
+  simMarginUsed += margin;
+  // 手续费从账户扣除（§13.2.3：开仓手续费计入成本）
+  simAccount -= fee;
+  simPositions.push({
+    id: simPosId++, dir, leverage, entryPrice: px,
+    qty: nominal / px, margin, fee, openTime: dataLen() - 1
+  });
+  return true;
+}
+
 // ---------- 画线逻辑 ----------
 function priceToY(p) { return SCALE.yP(p); }function yToPrice(y) { return SCALE.pY(y); }
 function dataXToScreenX(dx) { return PAD_L + (dx - SCALE.viewStart + 0.5) * SCALE.xW; }
