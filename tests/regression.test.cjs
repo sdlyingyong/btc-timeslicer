@@ -105,7 +105,9 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     // 移动止损（§15 O8-O11）
     addTrailing: (posId, price, pct, trailDist, breakeven) =>
       simAddOrder(posId, 'SL', price, pct, { trailing: true, trailDist, breakeven }),
-    resetAdvance: () => { simCheckedIdx = -1; }
+    resetAdvance: () => { simCheckedIdx = -1; },
+    // 交易备注（§15 T14）
+    setNote: (id, note) => simSetNote(id, note)
   };`);
 fn(sandbox.window, sandbox.document, sandbox.localStorage, async () => ({}), sandbox.location, console, canvasMock, 1);
 const API = sandbox.window.__API__;
@@ -757,6 +759,28 @@ const sy = p => API.priceToY(p);
       check('O9 空头 SL 下移', s1 && s1.price < s0Price,
         'SL ' + s0Price.toFixed(1) + ' -> ' + (s1 && s1.price.toFixed(1)));
     }
+  }
+
+  // ============ 5.16 模拟交易：交易备注（PRD §13.5.3 / §15 T14） ============
+  {
+    // 开新仓（清理旧持仓）
+    for (const p of [...API.getPositions()]) API.closePosition(p.id);
+    API.transfer(API.getAccount(), false);
+    API.transfer(2000, true);
+    API.openPosition('long', 5, 500);
+    const pos = API.getPositions()[API.getPositions().length - 1];
+
+    // T14 添加/编辑备注
+    const ok1 = API.setNote(pos.id, '突破前高追多，止损在下方 2%');
+    const pos1 = API.getPositions()[API.getPositions().length - 1];
+    check('T14a 添加备注', ok1 === true && pos1.note === '突破前高追多，止损在下方 2%',
+      pos1 && pos1.note);
+    API.setNote(pos.id, '修正：跌破入场价即走');
+    const pos2 = API.getPositions()[API.getPositions().length - 1];
+    check('T14b 编辑备注', pos2.note === '修正：跌破入场价即走', pos2 && pos2.note);
+    // 平仓后备注保留（历史记录含备注）
+    API.closePosition(pos.id);
+    check('T14c 平仓后持仓移除', !API.getPositions().some(p => p.id === pos.id));
   }
 
   // ============ 6. 成交量分隔条 ============

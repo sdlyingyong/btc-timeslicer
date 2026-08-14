@@ -1471,6 +1471,15 @@ function simOpenPosition(dir, leverage, margin) {
   return true;
 }
 
+// ================= 模拟交易（§13）功能7：交易备注 =================
+// 持仓备注（开仓理由/复盘反思），随时可编辑；平仓后由历史记录保留。
+function simSetNote(id, note) {
+  const pos = simPositions.find(p => p.id === id);
+  if (!pos) return false;
+  pos.note = String(note || '');
+  return true;
+}
+
 // ================= 模拟交易（§13）功能3：加仓 / 减仓 =================
 // 加仓：追加保证金 → qty 增加，成本价加权平均，扣加仓手续费。
 // 减仓：卖出一部分 → 该部分按当前价结算盈亏（含平仓手续费）入账户，margin 按比例减少。
