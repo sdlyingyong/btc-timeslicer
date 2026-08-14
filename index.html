@@ -1437,11 +1437,12 @@ function simTransfer(amount, toAccount) {
 // 持仓：{ id, dir:'long'|'short', leverage, entryPrice, qty(BTC), margin, fee, openTime }
 let simPosId = 1;
 
-// 当前视图最新 K 线收盘价（最新一根已加载 K 线）
+// 当前视图最右可见 K 线收盘价（= 视图右边缘，开仓价与推进触发的基础）
 function simLastPrice() {
   const len = dataLen();
   if (len <= 0) return NaN;
-  const r = getBar(len - 1);
+  const idx = Math.max(0, Math.min(len - 1, Math.floor(viewStart + viewCount) - 1));
+  const r = getBar(idx);
   return r ? +r[4] : NaN;
 }
 
@@ -1545,6 +1546,104 @@ function simDelOrder(oid) {
   if (i < 0) return false;
   simOrders.splice(i, 1);
   return true;
+}
+
+// ================= 模拟交易（§13）功能5：推进触发 + 分批结算 =================
+// simAdvanceTo(targetIdx)：从 lastCheckedIdx+1 到 targetIdx 逐根 K 线检查挂单穿越
+// （K 线 high/low 触及即成交）。成交按挂单 pct 卖出对应仓位（动态比例），
+// 剩余继续持有；全部卖出 → 持仓关闭。
+let simCheckedIdx = -1; // 最近检查过的 K 线索引（推进检测起点）
+
+// 执行一个挂单：按 pct 卖出该持仓一部分，触发价为挂单价（K 线触及）
+function simExecOrder(order, hitPrice) {
+  const pos = simPositions.find(p => p.id === order.posId);
+  if (!pos || !order.active) return;
+  const qtyReduce = pos.qty * order.pct;
+  if (qtyReduce <= 0) { order.active = false; return; }
+  const pnl = pos.dir === 'long'
+    ? qtyReduce * (hitPrice - pos.entryPrice)
+    : qtyReduce * (pos.entryPrice - hitPrice);
+  const fee = simCalcFee(qtyReduce * hitPrice);
+  const marginReduce = pos.margin * order.pct;
+  pos.qty -= qtyReduce;
+  pos.margin -= marginReduce;
+  simMarginUsed -= marginReduce;
+  simAccount += marginReduce + pnl - fee;
+  order.active = false; // 成交后挂单失效
+  // 全部卖出 → 关闭持仓
+  if (pos.qty <= 1e-12) {
+    simPositions = simPositions.filter(p => p.id !== pos.id);
+    simOrders = simOrders.filter(o => o.posId !== pos.id);
+  }
+}
+
+// 推进到 targetIdx（含），检查并触发穿越的挂单；同根 K 线内 TP 先于 SL
+function simAdvanceTo(targetIdx) {
+  const len = dataLen();
+  targetIdx = Math.max(0, Math.min(len - 1, Math.floor(targetIdx) || 0));
+  if (simCheckedIdx < 0) simCheckedIdx = targetIdx - 1;
+  const from = Math.min(simCheckedIdx + 1, len - 1);
+  if (targetIdx < from) { simCheckedIdx = targetIdx; return; }
+  for (let i = from; i <= targetIdx; i++) {
+    const bar = getBar(i);
+    if (!bar) continue;
+    const hi = +bar[2], lo = +bar[3];
+    const actives = simOrders.filter(o => o.active);
+    // TP 优先（同价位时先止盈）
+    const tps = actives.filter(o => o.type === 'TP').sort((a, b) => a.price - b.price);
+    const sls = actives.filter(o => o.type === 'SL');
+    for (const o of tps) {
+      if (!o.active) continue;
+      const pos = simPositions.find(p => p.id === o.posId);
+      if (!pos) continue;
+      const hit = pos.dir === 'long' ? hi >= o.price : lo <= o.price;
+      if (hit) simExecOrder(o, o.price);
+    }
+    for (const o of sls) {
+      if (!o.active) continue;
+      const pos = simPositions.find(p => p.id === o.posId);
+      if (!pos) continue;
+      const hit = pos.dir === 'long' ? lo <= o.price : hi >= o.price;
+      if (hit) simExecOrder(o, o.price);
+    }
+    simCheckedIdx = i;
+  }
+}
+
+// 手动平仓：按当前视图价全部卖出（§13.4.4）
+function simClosePosition(posId) {
+  const pos = simPositions.find(p => p.id === posId);
+  if (!pos) return false;
+  const cur = simLastPrice();
+  if (!(cur > 0)) return false;
+  const pnl = pos.dir === 'long'
+    ? pos.qty * (cur - pos.entryPrice)
+    : pos.qty * (pos.entryPrice - cur);
+  const fee = simCalcFee(pos.qty * cur);
+  simAccount += pos.margin + pnl - fee;
+  simMarginUsed -= pos.margin;
+  simPositions = simPositions.filter(p => p.id !== posId);
+  simOrders = simOrders.filter(o => o.posId !== posId);
+  return true;
+}
+
+// 爆仓（§13.2.2 简化）：浮动亏损 ≥ 保证金 → 全平，该笔保证金归零
+function simLiquidationCheck(idx) {
+  const len = dataLen();
+  const i = Math.max(0, Math.min(len - 1, idx == null ? simCheckedIdx : idx));
+  const bar = getBar(i);
+  if (!bar) return;
+  const price = +bar[4];
+  for (const pos of [...simPositions]) {
+    const pnl = pos.dir === 'long'
+      ? pos.qty * (price - pos.entryPrice)
+      : pos.qty * (pos.entryPrice - price);
+    if (pnl <= -pos.margin) { // 亏损 ≥ 保证金 → 爆仓
+      simMarginUsed -= pos.margin;
+      simPositions = simPositions.filter(p => p.id !== pos.id);
+      simOrders = simOrders.filter(o => o.posId !== pos.id);
+    }
+  }
 }
 
 // ---------- 画线逻辑 ----------

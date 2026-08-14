@@ -97,7 +97,11 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     // 挂单（§15 O1-O7）
     addOrder: (posId, type, price, pct) => simAddOrder(posId, type, price, pct),
     delOrder: (oid) => simDelOrder(oid),
-    getOrders: () => simOrders
+    getOrders: () => simOrders,
+    // 推进触发/平仓/爆仓（§15 O12-O17）
+    advanceTo: (idx) => simAdvanceTo(idx),
+    closePosition: (id) => simClosePosition(id),
+    liquidationCheck: (idx) => simLiquidationCheck(idx)
   };`);
 fn(sandbox.window, sandbox.document, sandbox.localStorage, async () => ({}), sandbox.location, console, canvasMock, 1);
 const API = sandbox.window.__API__;
@@ -592,6 +596,90 @@ const sy = p => API.priceToY(p);
     const delId = tpOrder.id;
     const ok7 = API.delOrder(delId);
     check('O7 删除挂单', ok7 === true && !API.getOrders().some(o => o.id === delId));
+  }
+
+  // ============ 5.14 模拟交易：推进触发 + 分批结算（PRD §13.4.3 / §15 O12-O17） ============
+  {
+    // 前置：清理既有持仓/挂单，划转资金
+    for (const p of [...API.getPositions()]) API.closePosition(p.id);
+    API.transfer(API.getAccount(), false);
+    API.transfer(5000, true); // 账户 5000
+
+    // 在历史中间开多（视图移到 1d 数据中部，开仓价 = 该处收盘）
+    // 先把视图推到历史中部：放大后左滑
+    for (let i = 0; i < 10; i++) wheel(-5000);
+    wheel(0, -10000); // 左滑到历史中间
+    const px = API.getLastPrice();
+    check('O-前置：历史视图开仓价有效', px > 0, 'px=' + px);
+
+    const okOpen = API.openPosition('long', 5, 1000); // 1000U 多5x
+    check('O-前置：历史处开仓成功', okOpen === true, '' + okOpen);
+    const pos = API.getPositions()[0];
+    const entry = pos.entryPrice;
+
+    // O12 推进触发：找后续第一根 high >= entry×1.02 的 K 线
+    const tpPrice = entry * 1.02;
+    API.addOrder(pos.id, 'TP', tpPrice, 0.5); // TP 卖 50%
+    const d1 = DATA['1d'];
+    let hitIdx = -1;
+    for (let i = 0; i < d1.length; i++) {
+      const ts = d1[i][0];
+      const tEntry = entry; // entry 是分钟 epoch？entry 是价格不是时间！
+      void ts; void tEntry;
+    }
+    // 用索引近似：entry 对应开仓时的视图索引 = floor(viewStart+viewCount)-1
+    // 从该索引之后找 high >= tpPrice 的 K 线
+    const openIdx = Math.max(0, Math.min(d1.length - 1, Math.floor(API.getViewStart() + API.getViewCount()) - 1));
+    for (let i = openIdx + 1; i < d1.length; i++) {
+      if (d1[i][2] >= tpPrice) { hitIdx = i; break; } // high >= TP
+    }
+    check('O-前置：存在可触发 TP 的后续 K 线', hitIdx > openIdx, 'hit@' + hitIdx + ' open@' + openIdx);
+    if (hitIdx > openIdx) {
+      const qtyBefore = pos.qty;
+      API.advanceTo(hitIdx);
+      const orders = API.getOrders();
+      const tpDone = orders.some(o => o.id === undefined) || !orders.some(o => o.type === 'TP' && o.active && o.posId === pos.id);
+      check('O12 TP 触发（advanceTo 后 TP 失效）', tpDone);
+      const posAfter = API.getPositions()[0];
+      check('O14 分批：TP 只卖该档，剩余持有', posAfter && Math.abs(posAfter.qty - qtyBefore * 0.5) < 1e-9,
+        posAfter ? 'qty ' + qtyBefore.toFixed(6) + ' -> ' + posAfter.qty.toFixed(6) : 'closed');
+      check('O12 TP 按触发价结算（账户变化）', API.getAccount() > 4000);
+    }
+
+    // O15 最后一档成交 → 持仓关闭：给剩余挂 SL（跌 2%）并推进到数据末尾（必触发）
+    const pos2 = API.getPositions()[0];
+    if (pos2) {
+      API.addOrder(pos2.id, 'SL', entry * 0.98, 1.0); // SL 卖全部
+      API.advanceTo(d1.length - 1); // 推进到最新，期间 SL 必被触及
+      check('O15 最后档成交 → 持仓关闭', !API.getPositions().some(p => p.id === pos2.id));
+      check('O15 挂单随持仓清理', !API.getOrders().some(o => o.posId === pos2.id));
+    }
+
+    // O16 手动平仓：开新仓立即手动平
+    API.transfer(1000, true);
+    const okOpen2 = API.openPosition('short', 10, 500);
+    const pos3 = API.getPositions()[API.getPositions().length - 1];
+    const nPos = API.getPositions().length;
+    check('O16 手动平仓', okOpen2 === true && API.closePosition(pos3.id) === true &&
+      API.getPositions().length === nPos - 1);
+
+    // O17 爆仓：开仓后 liquidationCheck 于深亏价位（构造：开仓后价格远低于成本，亏损≥保证金）
+    const okOpen3 = API.openPosition('long', 10, 500);
+    const pos4 = API.getPositions()[API.getPositions().length - 1];
+    // 找一根 K 线 price <= entry×(1 - 1/10×0.99)（跌幅≥10% 触发爆仓）
+    const liqIdx = (function () {
+      const entry4 = pos4.entryPrice;
+      for (let i = 0; i < d1.length; i++) {
+        if (d1[i][4] <= entry4 * 0.89) return i; // 收盘跌超 11% → 亏损>10x杠杆下保证金
+      }
+      return -1;
+    })();
+    check('O17 爆仓前置：存在深跌 K 线', okOpen3 === true && liqIdx >= 0, 'liq@' + liqIdx);
+    if (okOpen3 && liqIdx >= 0) {
+      API.advanceTo(liqIdx); // 先推进（触发可能挂单，但无挂单）
+      API.liquidationCheck(liqIdx);
+      check('O17 爆仓：亏损≥保证金自动平仓', !API.getPositions().some(p => p.id === pos4.id));
+    }
   }
 
   // ============ 6. 成交量分隔条 ============
