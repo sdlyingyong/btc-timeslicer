@@ -1519,6 +1519,34 @@ function simReduce(id, pct) {
   return true;
 }
 
+// ================= 模拟交易（§13）功能4：挂单系统 =================
+// 挂单：{ id, posId, type:'TP'|'SL', price, pct(相对当前持仓动态比例), active }
+// 方向校验（§13.4.1）：多头 TP>成本、SL<成本；空头 TP<成本、SL>成本。
+let simOrderId = 1;
+let simOrders = [];
+
+function simAddOrder(posId, type, price, pct) {
+  price = Number(price) || 0;
+  pct = Number(pct) || 0;
+  if (type !== 'TP' && type !== 'SL') return false;
+  if (!(price > 0) || pct <= 0 || pct > 1) return false;
+  const pos = simPositions.find(p => p.id === posId);
+  if (!pos) return false;
+  const okDir = pos.dir === 'long'
+    ? (type === 'TP' ? price > pos.entryPrice : price < pos.entryPrice)
+    : (type === 'TP' ? price < pos.entryPrice : price > pos.entryPrice);
+  if (!okDir) return false;
+  simOrders.push({ id: simOrderId++, posId, type, price, pct, active: true });
+  return true;
+}
+
+function simDelOrder(oid) {
+  const i = simOrders.findIndex(o => o.id === oid);
+  if (i < 0) return false;
+  simOrders.splice(i, 1);
+  return true;
+}
+
 // ---------- 画线逻辑 ----------
 function priceToY(p) { return SCALE.yP(p); }function yToPrice(y) { return SCALE.pY(y); }
 function dataXToScreenX(dx) { return PAD_L + (dx - SCALE.viewStart + 0.5) * SCALE.xW; }

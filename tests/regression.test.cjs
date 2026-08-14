@@ -93,7 +93,11 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     getPositions: () => simPositions, getLastPrice: () => simLastPrice(),
     // 加仓/减仓（§15 S13-S16）
     addMargin: (id, add) => simAddMargin(id, add),
-    reduce: (id, pct) => simReduce(id, pct)
+    reduce: (id, pct) => simReduce(id, pct),
+    // 挂单（§15 O1-O7）
+    addOrder: (posId, type, price, pct) => simAddOrder(posId, type, price, pct),
+    delOrder: (oid) => simDelOrder(oid),
+    getOrders: () => simOrders
   };`);
 fn(sandbox.window, sandbox.document, sandbox.localStorage, async () => ({}), sandbox.location, console, canvasMock, 1);
 const API = sandbox.window.__API__;
@@ -544,6 +548,50 @@ const sy = p => API.priceToY(p);
       '' + API.getMarginUsed());
     // S16 减仓手续费已计入（上面断言含 feeRed）
     check('S16 减仓手续费计入', Math.abs(API.calcFee(half * cur) - feeRed) < 1e-9);
+  }
+
+  // ============ 5.13 模拟交易：挂单系统（PRD §13.4 / §15 O1-O7） ============
+  {
+    // 用 5.11 的第二个持仓（空 10x, entry=63454.7）和当前持仓1（多5x, 减仓后半仓）
+    const longPos = API.getPositions()[0]; // 多 5x（减仓后 margin=350）
+    const shortPos = API.getPositions()[1]; // 空 10x（margin=300）
+    const eLong = longPos.entryPrice, eShort = shortPos.entryPrice;
+    const up = eLong * 1.02, down = eLong * 0.98;
+
+    // O1 多头往上 = TP
+    const o1 = API.addOrder(longPos.id, 'TP', up, 0.5);
+    check('O1 多头加 TP（价>成本）成功', o1 === true && API.getOrders().length === 1, '' + o1);
+    // O2 多头往下 = SL
+    const o2 = API.addOrder(longPos.id, 'SL', down, 0.5);
+    check('O2 多头加 SL（价<成本）成功', o2 === true && API.getOrders().length === 2);
+    // 多头方向校验：往下加 TP 应拒绝；往上加 SL 应拒绝
+    check('O2b 多头 TP 必须 > 成本（反方向拒绝）', API.addOrder(longPos.id, 'TP', down, 0.3) === false);
+    check('O2c 多头 SL 必须 < 成本（反方向拒绝）', API.addOrder(longPos.id, 'SL', up, 0.3) === false);
+
+    // O3 空头：往下 = TP，往上 = SL
+    const o3a = API.addOrder(shortPos.id, 'TP', eShort * 0.98, 0.5);
+    const o3b = API.addOrder(shortPos.id, 'SL', eShort * 1.02, 0.5);
+    check('O3 空头下=TP、上=SL 成功', o3a === true && o3b === true);
+    check('O3b 空头反方向拒绝', API.addOrder(shortPos.id, 'TP', eShort * 1.02, 0.3) === false);
+
+    // O4 数量为动态比例
+    const tpOrder = API.getOrders().find(o => o.type === 'TP' && o.posId === longPos.id);
+    check('O4 挂单数量 = 动态比例 pct', tpOrder && Math.abs(tpOrder.pct - 0.5) < 1e-9, tpOrder && tpOrder.pct);
+
+    // O5 多档 TP
+    API.addOrder(longPos.id, 'TP', eLong * 1.03, 0.25);
+    const tpCount = API.getOrders().filter(o => o.type === 'TP' && o.posId === longPos.id).length;
+    check('O5 多档 TP（2档）', tpCount === 2, '' + tpCount);
+
+    // O6 多档 SL
+    API.addOrder(shortPos.id, 'SL', eShort * 1.05, 0.25);
+    const slCount = API.getOrders().filter(o => o.type === 'SL' && o.posId === shortPos.id).length;
+    check('O6 多档 SL（2档）', slCount === 2, '' + slCount);
+
+    // O7 删除挂单
+    const delId = tpOrder.id;
+    const ok7 = API.delOrder(delId);
+    check('O7 删除挂单', ok7 === true && !API.getOrders().some(o => o.id === delId));
   }
 
   // ============ 6. 成交量分隔条 ============
