@@ -76,11 +76,13 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     getDrawingMeasure: () => drawingMeasure, getTradeMode: () => tradeMode, getRrDraft: () => rrDraft,
     getDragTarget: () => dragTarget, getDragStart: () => dragStart, getDrag: () => drag,
     getSelected: () => selectedLine, getContinuousDraw: () => continuousDraw, getScale: () => SCALE,
+    getPanRubber: () => panRubber, getLastWheelAt: () => lastWheelAt,
     setTool: t => { toolMode = t; },
     setContinuousDraw: b => { continuousDraw = b; },
     setTradeMode: b => { tradeMode = b; },
     hitTest, dataXToScreenX, priceToY, xToIdx, yToPrice, closeAt, dataLen,
-    getTradePlan, exitToolMode
+    getTradePlan, exitToolMode,
+    setView, getCur: () => cur, getRightTs: () => rightTs
   };`);
 fn(sandbox.window, sandbox.document, sandbox.localStorage, async () => ({}), sandbox.location, console, canvasMock, 1);
 const API = sandbox.window.__API__;
@@ -333,6 +335,70 @@ const sy = p => API.priceToY(p);
     const vcF = API.getViewCount();
     wheel(0, 120); wheel(0, -120);
     check('纯平移不改 viewCount', API.getViewCount() === vcF, vcF + ' -> ' + API.getViewCount());
+  }
+
+  // ============ 5.7 边界橡皮筋（PRD §10：到边后仍可拖一小段） ============
+  {
+    const len = API.dataLen();
+    // 前置：先放大再左滑到左边界（viewStart=0）
+    for (let i = 0; i < 10; i++) wheel(-5000);
+    for (let i = 0; i < 50; i++) wheel(0, -10000);
+    check('前置：已到左边界（viewStart=0）', API.getViewStart() === 0, '' + API.getViewStart());
+
+    // 到边后继续左滑：viewStart 保持 0，panRubber 进入负值（橡皮筋）
+    const rb0 = API.getPanRubber();
+    wheel(0, -500); // 左边界继续左滑
+    const rb1 = API.getPanRubber();
+    check('左边界继续左滑→panRubber 负值（橡皮筋生效）', rb1 < 0 && API.getViewStart() === 0,
+      'rubber ' + rb0.toFixed(1) + ' -> ' + rb1.toFixed(1));
+    check('橡皮筋限幅 <= 90px', Math.abs(rb1) <= 90, '' + Math.abs(rb1).toFixed(1));
+
+    // 往回拖（右滑）先抵消橡皮筋，再移动 viewStart
+    for (let i = 0; i < 5; i++) wheel(0, 500);
+    check('往回拖抵消橡皮筋（panRubber 回 0 且 viewStart 增大）',
+      API.getViewStart() > 0, 'vs=' + API.getViewStart().toFixed(1) + ' rubber=' + API.getPanRubber().toFixed(1));
+
+    // 右边界对称：疯狂右滑到右边界，再继续右滑 → panRubber 正值
+    for (let i = 0; i < 50; i++) wheel(0, 10000);
+    const vsR = API.getViewStart();
+    wheel(0, 500); // 右边界继续右滑
+    check('右边界继续右滑→panRubber 正值', API.getPanRubber() > 0 && API.getViewStart() === vsR,
+      'vs=' + API.getViewStart().toFixed(1) + ' rubber=' + API.getPanRubber().toFixed(1));
+
+    // 恢复中间视图，避免污染后续测试
+    for (let i = 0; i < 10; i++) wheel(-5000);
+    wheel(0, -10000);
+    check('恢复中间视图（viewStart 在中间）', API.getViewStart() > 0 && API.getViewStart() < len - API.getViewCount());
+  }
+
+  // ============ 5.8 周期切换锚定（PRD §11：固定最右侧 K 线时间） ============
+  {
+    const len1d = DATA['1d'].length;
+    // 前置：1d 视图，放大到中间某处（非最新）
+    for (let i = 0; i < 10; i++) wheel(-5000);   // 放大（viewCount 小，可看局部）
+    wheel(0, -10000);                            // 左滑到历史中间某处
+    const vsKeep = API.getViewStart();
+    const vcKeep = API.getViewCount();
+    check('前置：1d 视图非最新（可锚定）', vsKeep + vcKeep < len1d, 'vs=' + vsKeep.toFixed(1) + ' vc=' + vcKeep);
+
+    // 切 1d → 4h：最右可见 K 线时间应锚定（viewCount 保持）
+    const t1dRight = DATA['1d'][Math.max(0, Math.min(len1d - 1, Math.floor(vsKeep + vcKeep) - 1))][0];
+    await API.setView(null, '4h');
+    const vs4h = API.getViewStart(), vc4h = API.getViewCount();
+    check('切 4h 后 viewCount 保持（不重置 260）', vc4h === vcKeep, vcKeep + ' -> ' + vc4h);
+    const len4h = DATA['4h'].length;
+    const t4hRight = DATA['4h'][Math.max(0, Math.min(len4h - 1, Math.floor(vs4h + vc4h) - 1))][0];
+    // 4h K 线间隔 240 分钟，±1 根容差
+    check('切 4h 最右时间 == 切前 1d 最右时间（±1根）', Math.abs(t4hRight - t1dRight) <= 240,
+      t1dRight + ' -> ' + t4hRight + ' (Δ' + Math.abs(t4hRight - t1dRight) + 'min)');
+
+    // 切回 1d：仍锚定原时间（右边缘时间不变）
+    await API.setView(null, '1d');
+    const vsBack = API.getViewStart(), vcBack = API.getViewCount();
+    check('切回 1d viewCount 保持', vcBack === vcKeep, vcKeep + ' -> ' + vcBack);
+    const t1dBack = DATA['1d'][Math.max(0, Math.min(len1d - 1, Math.floor(vsBack + vcBack) - 1))][0];
+    check('切回 1d 最右时间不变（±1根）', Math.abs(t1dBack - t1dRight) <= 240,
+      t1dRight + ' -> ' + t1dBack + ' (Δ' + Math.abs(t1dBack - t1dRight) + 'min)');
   }
 
   // ============ 6. 成交量分隔条 ============

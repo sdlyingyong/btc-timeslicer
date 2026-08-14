@@ -837,7 +837,7 @@ async function fetchChunk(meta, ci) {
 function redrawSoon() {
   if (drawScheduled) return;
   drawScheduled = true;
-  requestAnimationFrame(() => { drawScheduled = false; draw(); });
+  requestAnimationFrame(() => { drawScheduled = false; draw(); rubberBounce(); });
 }
 
 // EMA（在已加载区间增量计算；缺口处重置，避免错位）
@@ -1007,9 +1007,10 @@ async function setView(sym, period) {
   }
 
   // 切换前捕获"右侧边缘时间"：切周期/标的时按此日期对齐右边缘（保持日期对齐，不跳来跳去）
+  // §11 R1 修正：取真正最右可见根（e-1），而非可见区外第一根（viewStart+viewCount）
   let rightTs = null;
   if (DS && dataLen() > 0) {
-    const rIdx = Math.min(dataLen() - 1, Math.floor(viewStart + viewCount));
+    const rIdx = Math.max(0, Math.min(dataLen() - 1, Math.floor(viewStart + viewCount) - 1));
     const rBar = getBar(rIdx);
     if (rBar) rightTs = rBar[0];
   }
@@ -1022,7 +1023,9 @@ async function setView(sym, period) {
   if (Array.isArray(v)) DS = makeInlineDS(v);
   else DS = makeChunkedDS(v);   // 分块描述对象（含 __chunked）
   const len = DS.len;
-  viewCount = Math.min(260, len);
+  // §11：viewCount 仅在首次启动（=0）或超界时设默认 260；
+  // 周期切换/切标的时保持用户当前缩放级别（避免右侧时间对齐后视觉跳变）。
+  if (viewCount <= 0 || viewCount > len) viewCount = Math.min(260, len);
 
   // 首次启动：恢复上次浏览位置（仅当标的+周期一致）
   if (RESTORE && RESTORE.sym === curSym && RESTORE.period === cur) {
@@ -1043,7 +1046,9 @@ async function setView(sym, period) {
     if (rightTs) {
       const ni = await findIdxByTime(rightTs);
       if (ni >= 0) {
-        viewStart = Math.max(0, Math.min(len - viewCount, ni - viewCount));
+        // §11 R1 修正：ni 显示在最右可见位置（viewStart = ni - viewCount + 1），
+        // 避免 ni 落在不可见 e 位置导致最右可见偏 1 根
+        viewStart = Math.max(0, Math.min(len - viewCount, ni - viewCount + 1));
       } else {
         viewStart = Math.max(0, len - viewCount);
       }
@@ -1124,6 +1129,9 @@ function draw() {
     bgGradW = W; bgGradH = H;
   }
   ctx.fillStyle = bgGrad; ctx.fillRect(0, 0, W, H);
+  // §10 橡皮筋：内容整体横向偏移（背景不动，露出边界外空白）
+  ctx.save();
+  if (panRubber !== 0) ctx.translate(panRubber, 0);
   const plotW = W - PAD_L - PAD_R;
   const volH = H * volFrac, gap = 8;
   const mainTop = PAD_T, mainBot = PAD_T + (H - PAD_T - PAD_B - volH - gap);
@@ -1395,6 +1403,7 @@ function draw() {
       ctx.textAlign = 'left';
     }
   }
+  ctx.restore(); // §10 橡皮筋 translate 还原
 }
 
 // ---------- 画线逻辑 ----------
@@ -2024,13 +2033,44 @@ function applyZoom(delta) {
 // 与拖拽平移同量纲（像素→K线：px / xW），符号相反：
 //   deltaX<0（左滑）→ viewStart -= |px|/xW（看更早）
 //   deltaX>0（右滑）→ viewStart += |px|/xW（看更近）
+// §10 橡皮筋：到边界后继续拖，viewStart 保持边界值，剩余像素进入 panRubber
+// （纯显示偏移，draw 时 translate），松手自动回弹。
+const PAN_RUBBER_MAX = 90;      // 橡皮筋最大偏移（像素）
+let panRubber = 0;              // 显示偏移（像素，正=内容右移）
+let lastWheelAt = 0;            // 最近一次 wheel 时间戳（回弹判定）
+
 function applyPan(px) {
   const len = dataLen();
   const plotW = canvas.clientWidth - PAD_L - PAD_R;
   const xW = plotW / viewCount;
-  viewStart = Math.max(0, Math.min(len - viewCount, viewStart + px / xW));
+  lastWheelAt = Date.now();
+
+  let pxRemain = px; // 像素
+  // 1) 往回拖时先抵消橡皮筋（方向相反则先"吃掉"）
+  if (panRubber !== 0 && pxRemain !== 0 && Math.sign(pxRemain) !== Math.sign(panRubber)) {
+    const absorb = Math.min(Math.abs(panRubber), Math.abs(pxRemain));
+    panRubber -= Math.sign(panRubber) * absorb;
+    pxRemain -= Math.sign(pxRemain) * absorb;
+  }
+  // 2) 剩余量移动 viewStart（仍 clamp 合法范围）
+  const vs0 = viewStart;
+  viewStart = Math.max(0, Math.min(len - viewCount, viewStart + pxRemain / xW));
+  // 3) 被边界吃掉的量进橡皮筋（限幅）
+  const leftoverPx = pxRemain - (viewStart - vs0) * xW;
+  if (leftoverPx !== 0) {
+    panRubber = Math.max(-PAN_RUBBER_MAX, Math.min(PAN_RUBBER_MAX, panRubber + leftoverPx));
+  }
   DS.ensure(Math.max(0, Math.floor(viewStart) - 200), Math.floor(viewStart) + viewCount);
   redrawSoon(); scheduleViewSave();
+}
+
+// 橡皮筋回弹：wheel 停止 ≥120ms 后逐帧衰减 panRubber 至 0
+function rubberBounce() {
+  if (panRubber === 0) return;
+  if (Date.now() - lastWheelAt < 120) return; // 还在拖动
+  const next = panRubber * 0.85;
+  panRubber = Math.abs(next) < 0.5 ? 0 : next;
+  redrawSoon();
 }
 
 canvas.addEventListener('wheel', e => {
