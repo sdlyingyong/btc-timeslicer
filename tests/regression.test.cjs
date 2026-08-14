@@ -90,7 +90,10 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     transfer: (amount, toAccount) => simTransfer(amount, toAccount),
     // 开仓（§15 S8-S12）
     openPosition: (dir, leverage, margin) => simOpenPosition(dir, leverage, margin),
-    getPositions: () => simPositions, getLastPrice: () => simLastPrice()
+    getPositions: () => simPositions, getLastPrice: () => simLastPrice(),
+    // 加仓/减仓（§15 S13-S16）
+    addMargin: (id, add) => simAddMargin(id, add),
+    reduce: (id, pct) => simReduce(id, pct)
   };`);
 fn(sandbox.window, sandbox.document, sandbox.localStorage, async () => ({}), sandbox.location, console, canvasMock, 1);
 const API = sandbox.window.__API__;
@@ -499,6 +502,48 @@ const sy = p => API.priceToY(p);
 
     // S12 图表仓位线（开仓价 = 最新收盘价）——由 openPosition 返回位置验证
     check('S12 开仓价 = 最新 K 线收盘价', Math.abs(p.entryPrice - px) < 1e-9);
+  }
+
+  // ============ 5.12 模拟交易：加仓 / 减仓（PRD §13.3.1 / §15 S13-S16） ============
+  {
+    // 沿用 5.11 的两个持仓（500U 多5x + 300U 空10x），账户余额 = 2000-800-手续费(1.25+1.5)=1197.25
+    const pos = API.getPositions()[0]; // 多 5x
+    const px0 = pos.entryPrice, qty0 = pos.qty;
+
+    // S13 加仓：追加 200U → 数量增加，成本价加权平均
+    const accBefore = API.getAccount();
+    const ok13 = API.addMargin(pos.id, 200);
+    const posA = API.getPositions()[0];
+    const qtyNew = (200 * 5) / px0; // 加仓 qty（同价）
+    const expectQty = qty0 + qtyNew;
+    const expectEntry = (qty0 * px0 + qtyNew * px0) / expectQty; // 同价加权 = px0
+    check('S13 加仓成功且数量增加', ok13 === true && Math.abs(posA.qty - expectQty) < 1e-9,
+      'qty ' + qty0.toFixed(6) + ' -> ' + posA.qty.toFixed(6));
+    check('S13 成本价加权平均', Math.abs(posA.entryPrice - expectEntry) < 1e-9,
+      '' + posA.entryPrice);
+    check('S13 保证金增加 + 加仓手续费', Math.abs(API.getMarginUsed() - 1000) < 1e-9 &&
+      Math.abs(API.getAccount() - (accBefore - 200 - API.calcFee(200 * 5))) < 1e-9,
+      'margin=' + API.getMarginUsed() + ' account=' + API.getAccount());
+
+    // S14 减仓：卖 50% → 数量减半，该部分按当前价结算盈亏入账
+    const accB = API.getAccount();
+    const cur = API.getLastPrice();
+    const qtyBefore = posA.qty;
+    const marginBefore = posA.margin; // 注意：posA 是引用，reduce 会改它，先存
+    const half = qtyBefore / 2;
+    const pnl = (cur - posA.entryPrice) / posA.entryPrice * (half * posA.entryPrice); // 多头盈亏（名义=half×entry）
+    const feeRed = half * cur * API.getFeeRate(); // 平仓手续费
+    const ok14 = API.reduce(pos.id, 0.5);
+    const posB = API.getPositions()[0];
+    check('S14 减仓成功且数量减半', ok14 === true && Math.abs(posB.qty - half) < 1e-9,
+      'qty ' + qtyBefore.toFixed(6) + ' -> ' + posB.qty.toFixed(6));
+    check('S14 减仓盈亏+返还保证金入账（含平仓手续费）',
+      Math.abs(API.getAccount() - (accB + marginBefore * 0.5 + pnl - feeRed)) < 1e-6,
+      'pnl=' + pnl.toFixed(4) + ' fee=' + feeRed.toFixed(4) + ' acc=' + API.getAccount().toFixed(4));
+    check('S14 已占用保证金按比例减少（1000→650）', Math.abs(API.getMarginUsed() - 650) < 1e-9,
+      '' + API.getMarginUsed());
+    // S16 减仓手续费已计入（上面断言含 feeRed）
+    check('S16 减仓手续费计入', Math.abs(API.calcFee(half * cur) - feeRed) < 1e-9);
   }
 
   // ============ 6. 成交量分隔条 ============

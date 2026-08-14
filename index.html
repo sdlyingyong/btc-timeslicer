@@ -1470,6 +1470,55 @@ function simOpenPosition(dir, leverage, margin) {
   return true;
 }
 
+// ================= 模拟交易（§13）功能3：加仓 / 减仓 =================
+// 加仓：追加保证金 → qty 增加，成本价加权平均，扣加仓手续费。
+// 减仓：卖出一部分 → 该部分按当前价结算盈亏（含平仓手续费）入账户，margin 按比例减少。
+function simAddMargin(id, add) {
+  add = Number(add) || 0;
+  if (add <= 0 || add > simAccount) return false;
+  const pos = simPositions.find(p => p.id === id);
+  if (!pos) return false;
+  const px = simLastPrice();
+  if (!(px > 0)) return false;
+  const addNominal = add * pos.leverage;
+  const fee = simCalcFee(addNominal);
+  if (fee > simAccount - add) return false;
+  const addQty = addNominal / px;
+  // 加权平均成本：新成本 = (旧qty×旧价 + 新qty×新价) / 新qty
+  const newQty = pos.qty + addQty;
+  pos.entryPrice = (pos.qty * pos.entryPrice + addQty * px) / newQty;
+  pos.qty = newQty;
+  pos.margin += add;
+  simAccount -= add + fee;
+  simMarginUsed += add;
+  return true;
+}
+
+function simReduce(id, pct) {
+  pct = Number(pct) || 0;
+  if (pct <= 0 || pct > 1) return false;
+  const pos = simPositions.find(p => p.id === id);
+  if (!pos) return false;
+  const cur = simLastPrice();
+  if (!(cur > 0)) return false;
+  const qtyReduce = pos.qty * pct;
+  // 盈亏（真实合约）：多头 qty×(cur−entry)；空头 qty×(entry−cur)
+  const pnl = pos.dir === 'long'
+    ? qtyReduce * (cur - pos.entryPrice)
+    : qtyReduce * (pos.entryPrice - cur);
+  const fee = simCalcFee(qtyReduce * cur); // 平仓手续费（名义 = 卖出数量×当前价）
+  // 结算：盈亏+返还保证金进账户（扣除手续费）
+  const marginReduce = pos.margin * pct;
+  pos.qty -= qtyReduce;
+  pos.margin -= marginReduce;
+  simMarginUsed -= marginReduce;
+  simAccount += marginReduce + pnl - fee;
+  if (pos.qty <= 1e-12) {
+    simPositions = simPositions.filter(p => p.id !== pos.id);
+  }
+  return true;
+}
+
 // ---------- 画线逻辑 ----------
 function priceToY(p) { return SCALE.yP(p); }function yToPrice(y) { return SCALE.pY(y); }
 function dataXToScreenX(dx) { return PAD_L + (dx - SCALE.viewStart + 0.5) * SCALE.xW; }
