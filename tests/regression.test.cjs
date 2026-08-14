@@ -19,7 +19,7 @@ function check(name, cond, extra) {
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps;
 
 // ---------- mock 环境 ----------
-let md = null, mm = null, ml = null, wmm = null, wkd = null, wmu = null;
+let md = null, mm = null, ml = null, wmm = null, wkd = null, wmu = null, wl = null;
 const ctx2d = new Proxy({
   measureText: () => ({ width: 40 }),
   createRadialGradient: () => ({ addColorStop() {} })
@@ -33,6 +33,7 @@ const canvasMock = {
     if (type === 'mousedown') md = cb;
     if (type === 'mousemove') mm = cb;
     if (type === 'mouseleave') ml = cb;
+    if (type === 'wheel') wl = cb;
   }
 };
 const node = {
@@ -91,6 +92,7 @@ const move = (x, y) => mm({ clientX: x, clientY: y });
 const wmove = (x, y) => wmm({ clientX: x, clientY: y });
 const up = () => wmu({});
 const key = (k) => wkd({ key: k, preventDefault() {} });
+const wheel = (dy) => wl({ deltaY: dy, preventDefault() {} });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 // 屏幕坐标 <-> 逻辑坐标（依赖 SCALE 建立后）
 const sx = idx => API.dataXToScreenX(idx);
@@ -223,6 +225,55 @@ const sy = p => API.priceToY(p);
     const vs1 = API.getViewStart();
     down(200, H - 20); // 底部时间轴左侧
     check('时间轴点击跳转视图', API.getViewStart() !== vs1);
+  }
+
+  // ============ 5.5 滚轮缩放（PRD §8：macOS 灵敏度优化） ============
+  {
+    const len = DATA['15m'].length;
+
+    // 方向：向上滚一格（deltaY<0）→ 放大（viewCount 减小）
+    const vc0 = API.getViewCount();
+    wheel(-120);
+    const vc1 = API.getViewCount();
+    check('滚轮向上=放大（viewCount 减小）', vc1 < vc0, vc0 + ' -> ' + vc1);
+    // 方向：向下滚一格（deltaY>0）→ 缩小（viewCount 增大）
+    wheel(120);
+    const vc2 = API.getViewCount();
+    check('滚轮向下=缩小（viewCount 增大）', vc2 > vc1, vc1 + ' -> ' + vc2);
+
+    // 右边缘锚定：单次缩放前后 viewStart+viewCount 应保持（桶对齐允许 ±bkt 误差）
+    const vsX = API.getViewStart(), vcX = API.getViewCount();
+    const eX = vsX + vcX;
+    wheel(-120);
+    const eY = API.getViewStart() + API.getViewCount();
+    const bktX = Math.max(1, Math.round(vcX / 1200));
+    check('单次缩放右边缘锚定（容差桶对齐）', Math.abs(eX - eY) <= bktX + 2,
+      'edge ' + eX.toFixed(1) + ' vs ' + eY.toFixed(1));
+
+    // 幅度参与换算：滚 2 格（-240）≈ 数学期望 viewCount × 1.15^-2（连续而非固定步进）
+    const vcS = API.getViewCount();
+    wheel(-240);
+    const vcT = API.getViewCount();
+    const expect = Math.round(vcS * Math.pow(1.15, -2));
+    check('幅度参与换算（2格 ≈ ×1.15^-2）', Math.abs(vcT - expect) <= 2, vcS + ' -> ' + vcT + ' (期望 ' + expect + ')');
+
+    // 小幅滚动：1/6 格（-20）也生效（连续缩放），且变化量明显小于整格
+    const vcU = API.getViewCount();
+    wheel(-20);
+    const vcV = API.getViewCount();
+    check('小幅滚动生效（连续缩放）', vcV < vcU, vcU + ' -> ' + vcV);
+    check('小幅变化量 < 整格变化量', (vcU - vcV) < Math.round(vcU * 0.10),
+      'delta ' + (vcU - vcV) + ' < ' + Math.round(vcU * 0.10));
+
+    // 钳制：疯狂放大不越界（≥20）
+    for (let i = 0; i < 60; i++) wheel(-5000);
+    check('连续放大钳制 >= 20', API.getViewCount() >= 20, '' + API.getViewCount());
+    // 钳制：疯狂缩小不越界（≤ len）
+    for (let i = 0; i < 60; i++) wheel(5000);
+    check('连续缩小钳制 <= len', API.getViewCount() <= len, API.getViewCount() + ' <= ' + len);
+    // viewStart 始终在合法范围
+    check('viewStart 不越界', API.getViewStart() >= 0 && API.getViewStart() <= len - API.getViewCount(),
+      'vs=' + API.getViewStart().toFixed(0) + ' vc=' + API.getViewCount());
   }
 
   // ============ 6. 成交量分隔条 ============

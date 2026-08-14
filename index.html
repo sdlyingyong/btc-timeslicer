@@ -1991,14 +1991,21 @@ window.addEventListener('keydown', e => {
   redrawSoon(); scheduleViewSave();
 });
 
-// 滚轮缩放
-canvas.addEventListener('wheel', e => {
-  e.preventDefault();
+// 滚轮缩放（delta 累积 + 指数缩放 + rAF 节流）
+// 解决 macOS 触控板缩放过于灵敏：高频小 delta 事件先累积，帧内一次性换算，
+// 缩放幅度与滚动量成正比（连续可精细控制），而非每事件固定 15% 步进。
+const ZOOM_SENSITIVITY = 1.15;  // 指数底数：一格标准滚动(120)的缩放倍数；越小越"钝"
+const DELTA_NORM = 120;         // 鼠标一格的标准 delta，用于归一化触控板/鼠标
+let wheelAccum = 0;             // delta 累积器（像素归一化单位）
+let wheelScheduled = false;     // rAF 是否已排程（节流）
+
+function applyZoom(delta) {
   const len = dataLen();
-  const rect = canvas.getBoundingClientRect();
-  const mx = e.clientX - rect.left;
   const plotW = canvas.clientWidth - PAD_L - PAD_R;
-  let nc = Math.round(viewCount * (e.deltaY > 0 ? 1.15 : 0.87));
+  // 连续指数缩放：delta=+1（向下滚一格）→ ×1.15（缩小视图，看到更多K线）；
+  // delta=-1（向上滚一格）→ ×0.87（放大视图）。方向与原有语义保持一致。
+  const factor = Math.pow(ZOOM_SENSITIVITY, delta);
+  let nc = Math.round(viewCount * factor);
   nc = Math.max(20, Math.min(len, nc));
   const rightEdge = viewStart + viewCount;   // 缩放前右边缘作为锚点（=最新K线侧，固定不动）
   viewCount = nc;
@@ -2009,6 +2016,21 @@ canvas.addEventListener('wheel', e => {
   viewStart = Math.round(Math.floor(viewStart / bkt) * bkt);
   DS.ensure(Math.max(0, Math.floor(viewStart) - 200), Math.floor(viewStart) + viewCount);
   redrawSoon(); scheduleViewSave();
+}
+
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  // 触控板：高频小 delta（像素）；鼠标：一格≈120。归一化后累积。
+  wheelAccum += e.deltaY / DELTA_NORM;
+  if (wheelScheduled) return;             // 帧内只排一次 rAF（节流）
+  wheelScheduled = true;
+  requestAnimationFrame(() => {
+    wheelScheduled = false;
+    if (wheelAccum === 0) return;
+    const d = wheelAccum;                 // 取帧内累积量
+    wheelAccum = 0;
+    applyZoom(d);
+  });
 }, { passive: false });
 
 // 工具栏绑定
