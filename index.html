@@ -1526,7 +1526,7 @@ function simReduce(id, pct) {
 let simOrderId = 1;
 let simOrders = [];
 
-function simAddOrder(posId, type, price, pct) {
+function simAddOrder(posId, type, price, pct, opts) {
   price = Number(price) || 0;
   pct = Number(pct) || 0;
   if (type !== 'TP' && type !== 'SL') return false;
@@ -1537,7 +1537,12 @@ function simAddOrder(posId, type, price, pct) {
     ? (type === 'TP' ? price > pos.entryPrice : price < pos.entryPrice)
     : (type === 'TP' ? price < pos.entryPrice : price > pos.entryPrice);
   if (!okDir) return false;
-  simOrders.push({ id: simOrderId++, posId, type, price, pct, active: true });
+  opts = opts || {};
+  simOrders.push({
+    id: simOrderId++, posId, type, price, pct, active: true,
+    // §13.4.5 移动止损
+    trailing: !!opts.trailing, trailDist: Number(opts.trailDist) || 0, breakeven: !!opts.breakeven
+  });
   return true;
 }
 
@@ -1599,12 +1604,28 @@ function simAdvanceTo(targetIdx) {
       const hit = pos.dir === 'long' ? hi >= o.price : lo <= o.price;
       if (hit) simExecOrder(o, o.price);
     }
+    // SL 判定用"当前 SL"（trailing 更新前的位置），避免同一根 K 线自触发
     for (const o of sls) {
       if (!o.active) continue;
       const pos = simPositions.find(p => p.id === o.posId);
       if (!pos) continue;
       const hit = pos.dir === 'long' ? lo <= o.price : hi >= o.price;
       if (hit) simExecOrder(o, o.price);
+    }
+    // §13.4.5 移动止损：判定后更新 trailing SL（只朝有利方向，含保本）
+    for (const o of simOrders) {
+      if (!o.active || !o.trailing) continue;
+      const pos = simPositions.find(p => p.id === o.posId);
+      if (!pos) continue;
+      if (pos.dir === 'long') {
+        const cand = hi - o.trailDist;
+        if (cand > o.price) o.price = cand;
+        if (o.breakeven && o.price < pos.entryPrice && hi >= pos.entryPrice) o.price = pos.entryPrice;
+      } else {
+        const cand = lo + o.trailDist;
+        if (cand < o.price) o.price = cand;
+        if (o.breakeven && o.price > pos.entryPrice && lo <= pos.entryPrice) o.price = pos.entryPrice;
+      }
     }
     simCheckedIdx = i;
   }

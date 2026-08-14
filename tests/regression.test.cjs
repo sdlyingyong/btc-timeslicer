@@ -101,7 +101,11 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     // 推进触发/平仓/爆仓（§15 O12-O17）
     advanceTo: (idx) => simAdvanceTo(idx),
     closePosition: (id) => simClosePosition(id),
-    liquidationCheck: (idx) => simLiquidationCheck(idx)
+    liquidationCheck: (idx) => simLiquidationCheck(idx),
+    // 移动止损（§15 O8-O11）
+    addTrailing: (posId, price, pct, trailDist, breakeven) =>
+      simAddOrder(posId, 'SL', price, pct, { trailing: true, trailDist, breakeven }),
+    resetAdvance: () => { simCheckedIdx = -1; }
   };`);
 fn(sandbox.window, sandbox.document, sandbox.localStorage, async () => ({}), sandbox.location, console, canvasMock, 1);
 const API = sandbox.window.__API__;
@@ -679,6 +683,79 @@ const sy = p => API.priceToY(p);
       API.advanceTo(liqIdx); // 先推进（触发可能挂单，但无挂单）
       API.liquidationCheck(liqIdx);
       check('O17 爆仓：亏损≥保证金自动平仓', !API.getPositions().some(p => p.id === pos4.id));
+    }
+  }
+
+  // ============ 5.15 模拟交易：移动止损 Trailing SL（PRD §13.4.5 / §15 O8-O11） ============
+  {
+    // 前置：清理持仓/挂单，重置推进检查点，划转资金
+    for (const p of [...API.getPositions()]) API.closePosition(p.id);
+    API.transfer(API.getAccount(), false);
+    API.resetAdvance();
+    API.transfer(5000, true);
+    // 历史中部开多
+    for (let i = 0; i < 10; i++) wheel(-5000);
+    wheel(0, -10000);
+    API.openPosition('long', 5, 1000);
+    const pos = API.getPositions()[API.getPositions().length - 1];
+    const entry = pos.entryPrice;
+    const openIdx = Math.max(0, Math.min(DATA['1d'].length - 1, Math.floor(API.getViewStart() + API.getViewCount()) - 1));
+    const trailDist = entry * 0.01; // 跟踪距离 1%
+
+    // 挂 trailing SL：初始价 entry×0.97，跟踪 1%，保本开
+    const okT = API.addTrailing(pos.id, entry * 0.97, 1.0, trailDist, true);
+    check('O8 前置：挂 trailing SL', okT === true, '' + okT);
+    const sl0 = API.getOrders().find(o => o.trailing && o.posId === pos.id);
+
+    // O8 多头跟踪：推进到一根 K 线（high 上涨），SL 上移
+    let advIdx = -1;
+    for (let i = openIdx + 1; i < DATA['1d'].length; i++) {
+      if (DATA['1d'][i][2] > entry * 1.05) { advIdx = i; break; } // 涨超 5% 的 K 线
+    }
+    check('O8 前置：存在上涨 K 线', advIdx > 0, 'adv@' + advIdx);
+    if (advIdx > 0) {
+      const sl0Price = sl0.price; // 快照（sl0 是引用，advanceTo 会原地更新）
+      API.advanceTo(advIdx);
+      const sl1 = API.getOrders().find(o => o.trailing && o.posId === pos.id);
+      check('O8 多头 SL 上移（跟住最高价−距离）', sl1 && sl1.price > sl0Price,
+        'SL ' + sl0Price.toFixed(1) + ' -> ' + (sl1 && sl1.price.toFixed(1)));
+      // 保本：price 至少 >= entry
+      check('O10 保本移动：SL >= 开仓价', sl1 && sl1.price >= entry, '' + (sl1 && sl1.price.toFixed(1)));
+    }
+
+    // O11 回落触发：继续推进（之后某根 K 线 low <= 移动后 SL → 触发平仓）
+    const slNow = API.getOrders().find(o => o.trailing && o.posId === pos.id);
+    if (slNow) {
+      let hit = -1;
+      for (let i = advIdx + 1; i < DATA['1d'].length; i++) {
+        if (DATA['1d'][i][3] <= slNow.price) { hit = i; break; }
+      }
+      check('O11 前置：存在回落至 SL 的 K 线', hit > 0, 'hit@' + hit);
+      if (hit > 0) {
+        API.advanceTo(hit);
+        check('O11 回落触发 trailing SL 平仓', !API.getPositions().some(p => p.id === pos.id));
+      }
+    }
+
+    // O9 空头跟踪：开空，SL 只下移（先重置推进检查点，避开 O8/O11 已检查区间）
+    API.resetAdvance();
+    API.openPosition('short', 5, 1000);
+    const sp = API.getPositions()[API.getPositions().length - 1];
+    const eS = sp.entryPrice;
+    const sIdx = Math.max(0, Math.min(DATA['1d'].length - 1, Math.floor(API.getViewStart() + API.getViewCount()) - 1));
+    API.addTrailing(sp.id, eS * 1.03, 1.0, eS * 0.01, false);
+    const s0 = API.getOrders().find(o => o.trailing && o.posId === sp.id);
+    let sAdv = -1;
+    for (let i = sIdx + 1; i < DATA['1d'].length; i++) {
+      if (DATA['1d'][i][3] < eS * 0.95) { sAdv = i; break; } // 开仓后跌超 5%
+    }
+    check('O9 前置：存在下跌 K 线', sAdv > 0, 'sAdv@' + sAdv);
+    if (sAdv > 0) {
+      const s0Price = s0.price; // 快照
+      API.advanceTo(sAdv);
+      const s1 = API.getOrders().find(o => o.trailing && o.posId === sp.id);
+      check('O9 空头 SL 下移', s1 && s1.price < s0Price,
+        'SL ' + s0Price.toFixed(1) + ' -> ' + (s1 && s1.price.toFixed(1)));
     }
   }
 
