@@ -1467,7 +1467,7 @@ function simOpenPosition(dir, leverage, margin) {
   simPositions.push({
     id: simPosId++, dir, leverage, entryPrice: px,
     qty: nominal / px, margin, fee, openTime: dataLen() - 1,
-    qtyTotal: nominal / px, accumPnl: 0, accumFee: 0, fills: []
+    qtyTotal: nominal / px, accumPnl: 0, accumFee: 0, fills: [], period: cur
   });
   return true;
 }
@@ -1498,10 +1498,53 @@ function simRecordSettle(pos, exitPrice, qtyReduce, pnl, fee, exitType, idx) {
       id: pos.id, dir: pos.dir, leverage: pos.leverage,
       entryPrice: pos.entryPrice, exitPrice,
       qtyTotal: pos.qtyTotal || pos.qty, pnl: pos.accumPnl, fees: pos.accumFee,
-      exitType, openIdx: pos.openTime, closeIdx: idx, note: pos.note || '', fills: pos.fills
+      exitType, openIdx: pos.openTime, closeIdx: idx, note: pos.note || '', fills: pos.fills,
+      period: pos.period || cur
     });
     simEquityCurve.push({ idx, equity: simWallet + simAccount });
   }
+}
+
+// 分组统计 + 持仓时间/频率（§14.2.5/§14.2.6）
+const PERIOD_MIN = { '1d': 1440, '4h': 240, '1h': 60, '15m': 15 };
+function simGroupStats() {
+  const trades = simClosedTrades;
+  const byDir = {}, byPeriod = {}, byExit = {};
+  const agg = arr => {
+    const n = arr.length, pnl = arr.reduce((s, t) => s + t.pnl, 0);
+    const wins = arr.filter(t => t.pnl > 0).length;
+    return { n, pnl, winRate: n ? wins / n : 0 };
+  };
+  for (const t of trades) {
+    (byDir[t.dir] = byDir[t.dir] || []).push(t);
+    (byPeriod[t.period || '1d'] = byPeriod[t.period || '1d'] || []).push(t);
+    (byExit[t.exitType] = byExit[t.exitType] || []).push(t);
+  }
+  // 平均持仓时间（分钟）：每笔 (closeIdx-openIdx) × 该笔周期分钟
+  let holdSum = 0;
+  for (const t of trades) {
+    const minPerBar = PERIOD_MIN[t.period] || PERIOD_MIN['1d'];
+    holdSum += Math.max(0, (t.closeIdx - t.openIdx)) * minPerBar;
+  }
+  const avgHoldMin = trades.length ? holdSum / trades.length : 0;
+  // 交易频率：总笔数 / 覆盖天数（首开仓到末平仓的时间跨度，按各自周期分钟换算）
+  let spanMin = 0;
+  if (trades.length >= 2) {
+    const minOpen = Math.min(...trades.map(t => t.openIdx));
+    const maxClose = Math.max(...trades.map(t => t.closeIdx));
+    // 用最大周期近似跨度分钟（简化口径）
+    const maxPer = Math.max(...trades.map(t => PERIOD_MIN[t.period] || PERIOD_MIN['1d']));
+    spanMin = Math.max(1, (maxClose - minOpen)) * maxPer;
+  } else if (trades.length === 1) {
+    spanMin = 1;
+  }
+  const days = Math.max(1, spanMin / 1440);
+  return {
+    byDir: Object.fromEntries(Object.entries(byDir).map(([k, v]) => [k, agg(v)])),
+    byPeriod: Object.fromEntries(Object.entries(byPeriod).map(([k, v]) => [k, agg(v)])),
+    byExit: Object.fromEntries(Object.entries(byExit).map(([k, v]) => [k, agg(v)])),
+    avgHoldMin, tradeFreq: trades.length ? trades.length / days : 0
+  };
 }
 
 // 统计（§14.2）：基于已平仓历史 + 当前持仓

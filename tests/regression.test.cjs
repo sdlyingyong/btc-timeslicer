@@ -111,7 +111,9 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     // 统计（§15 M1-M7）
     getStats: () => simStats(), getHistory: () => simClosedTrades,
     getEquityCurve: () => simEquityCurve, getFills: () => simFills,
-    clearStats: () => { simClosedTrades = []; simEquityCurve = []; simFills = []; }
+    clearStats: () => { simClosedTrades = []; simEquityCurve = []; simFills = []; },
+    // 分组/持仓时间/频率（§15 M8-M12）
+    groupStats: () => simGroupStats()
   };`);
 fn(sandbox.window, sandbox.document, sandbox.localStorage, async () => ({}), sandbox.location, console, canvasMock, 1);
 const API = sandbox.window.__API__;
@@ -837,6 +839,38 @@ const sy = p => API.priceToY(p);
       const st3 = API.getStats();
       check('M5d 统计基于真实平仓（1笔100%胜率）', st3.totalTrades === 1 && Math.abs(st3.winRate - 1) < 1e-9);
     }
+  }
+
+  // ============ 5.18 模拟交易：分组统计 + 持仓时间/频率（PRD §14.2.5/§14.2.6 / §15 M8-M12） ============
+  {
+    // 构造混合历史：2 笔多（1盈1亏）、2 笔空（1盈1亏）、不同出场方式、不同持仓时长
+    API.clearStats();
+    const H = API.getHistory();
+    const PERIOD_MIN = { '1d': 1440, '4h': 240, '1h': 60, '15m': 15 };
+    H.push(
+      { id: 1, dir: 'long', pnl: 100, exitType: 'TP', period: '1d', openIdx: 100, closeIdx: 105 },
+      { id: 2, dir: 'long', pnl: -50, exitType: 'SL', period: '1d', openIdx: 200, closeIdx: 201 },
+      { id: 3, dir: 'short', pnl: 80, exitType: 'TP', period: '4h', openIdx: 300, closeIdx: 312 },
+      { id: 4, dir: 'short', pnl: -30, exitType: 'manual', period: '15m', openIdx: 400, closeIdx: 401 }
+    );
+    const g = API.groupStats();
+    // M9 按方向分组
+    check('M9 多头 2 笔盈亏 50', g.byDir.long && g.byDir.long.n === 2 && Math.abs(g.byDir.long.pnl - 50) < 1e-9,
+      JSON.stringify(g.byDir.long));
+    check('M9 空头 2 笔盈亏 50', g.byDir.short && g.byDir.short.n === 2 && Math.abs(g.byDir.short.pnl - 50) < 1e-9);
+    // M8 按周期分组
+    check('M8 1d 周期 2 笔', g.byPeriod['1d'] && g.byPeriod['1d'].n === 2, JSON.stringify(g.byPeriod['1d']));
+    check('M8 4h 周期 1 笔', g.byPeriod['4h'] && g.byPeriod['4h'].n === 1);
+    // M10 按出场方式分组
+    check('M10 TP 出场 2 笔', g.byExit.TP && g.byExit.TP.n === 2, JSON.stringify(g.byExit.TP));
+    check('M10 manual 出场 1 笔', g.byExit.manual && g.byExit.manual.n === 1);
+    // M11 平均持仓时间（分钟）
+    // 持仓时长：1d 5根×1440=7200；1d 1根=1440；4h 12根×240=2880；15m 1根=15
+    check('M11 平均持仓时间 = (7200+1440+2880+15)/4 = 2883.75min',
+      Math.abs(g.avgHoldMin - (7200 + 1440 + 2880 + 15) / 4) < 1e-6, '' + g.avgHoldMin);
+    // M12 交易频率：4 笔，跨度 = 401-100 = 301 根（1d 周期 1440min/根 → 301×1440min/1440/24天）
+    // 简化口径：跨度（分钟）= (maxClose-minOpen) × 该笔周期分钟 —— 用天数 = (closeIdx-openIdx) 跨度
+    check('M12 交易频率（4笔/覆盖天数）', g.tradeFreq > 0 && g.tradeFreq <= 4, '' + g.tradeFreq);
   }
 
   // ============ 6. 成交量分隔条 ============
