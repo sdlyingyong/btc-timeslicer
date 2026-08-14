@@ -82,7 +82,12 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     setTradeMode: b => { tradeMode = b; },
     hitTest, dataXToScreenX, priceToY, xToIdx, yToPrice, closeAt, dataLen,
     getTradePlan, exitToolMode,
-    setView, getCur: () => cur, getRightTs: () => rightTs
+    setView, getCur: () => cur, getRightTs: () => rightTs,
+    // 模拟交易：资金/手续费（§15 S1-S7）
+    getWallet: () => simWallet, getAccount: () => simAccount, getMarginUsed: () => simMarginUsed,
+    getFeeRate: () => simFeeRate, setFeeRate: r => { simFeeRate = r; },
+    calcFee: n => simCalcFee(n),
+    transfer: (amount, toAccount) => simTransfer(amount, toAccount)
   };`);
 fn(sandbox.window, sandbox.document, sandbox.localStorage, async () => ({}), sandbox.location, console, canvasMock, 1);
 const API = sandbox.window.__API__;
@@ -428,6 +433,35 @@ const sy = p => API.priceToY(p);
     // 边界钳制回归：缩放后状态合法
     check('缩放后状态合法', API.getViewStart() >= 0 && API.getViewCount() >= 20 &&
       API.getViewStart() <= API.dataLen() - API.getViewCount());
+  }
+
+  // ============ 5.10 模拟交易：资金 + 手续费（PRD §13.2 / §15 S1-S7） ============
+  {
+    // S1 初始资金
+    check('S1 初始资金：钱包 10000 / 账户 0', API.getWallet() === 10000 && API.getAccount() === 0,
+      'wallet=' + API.getWallet() + ' account=' + API.getAccount());
+    // S2 划转到账户
+    API.transfer(3000, true);
+    check('S2 划转 3000 到账户', API.getWallet() === 7000 && API.getAccount() === 3000,
+      'wallet=' + API.getWallet() + ' account=' + API.getAccount());
+    // S3 划转回钱包
+    API.transfer(500, false);
+    check('S3 划转回钱包 500', API.getWallet() === 7500 && API.getAccount() === 2500,
+      'wallet=' + API.getWallet() + ' account=' + API.getAccount());
+    // S4 超额划转拒绝
+    const w0 = API.getWallet(), a0 = API.getAccount();
+    API.transfer(99999, true);
+    check('S4 超额划转被拒绝（余额不变）', API.getWallet() === w0 && API.getAccount() === a0);
+    // S5 手续费 = 名义价值 × 费率（默认 0.05%）
+    check('S5 手续费：5000U 名义价值 × 0.05% = 2.5U', Math.abs(API.calcFee(5000) - 2.5) < 1e-9,
+      '' + API.calcFee(5000));
+    // S6 费率可配置
+    API.setFeeRate(0.001); // 0.1%
+    check('S6 费率可配置：5000 × 0.1% = 5U', Math.abs(API.calcFee(5000) - 5) < 1e-9, '' + API.calcFee(5000));
+    API.setFeeRate(0.0005);
+    // 恢复初始（避免污染后续）：清空账户余额回钱包
+    API.transfer(API.getAccount(), false);
+    check('S-恢复：账户余额归零', API.getWallet() === 10000 && API.getAccount() === 0);
   }
 
   // ============ 6. 成交量分隔条 ============

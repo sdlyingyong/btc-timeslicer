@@ -1406,9 +1406,34 @@ function draw() {
   ctx.restore(); // §10 橡皮筋 translate 还原
 }
 
+// ================= 模拟交易（§13）功能1：资金模型 + 手续费 =================
+// 钱包/交易账户分离 + 双向划转；手续费按名义价值（保证金×杠杆）× 费率收取。
+const SIM_INIT_WALLET = 10000;   // 初始模拟资金 USDT（§13.2.1）
+let simWallet = SIM_INIT_WALLET; // 钱包余额
+let simAccount = 0;              // 交易账户可用
+let simMarginUsed = 0;           // 已占用保证金（持仓）
+let simFeeRate = 0.0005;         // 手续费率 0.05%（taker，可配置 §13.2.3）
+let simPositions = [];           // 持仓列表（后续功能填充）
+
+// 手续费 = 名义价值 × 费率（名义价值 = 保证金 × 杠杆，真实合约口径）
+function simCalcFee(nominal) { return nominal * simFeeRate; }
+
+// 划转：toAccount=true 钱包→账户；false 账户→钱包。超额/非法拒绝返回 false。
+function simTransfer(amount, toAccount) {
+  amount = Number(amount) || 0;
+  if (amount <= 0) return false;
+  if (toAccount) {
+    if (amount > simWallet) return false;
+    simWallet -= amount; simAccount += amount;
+  } else {
+    if (amount > simAccount) return false;
+    simAccount -= amount; simWallet += amount;
+  }
+  return true;
+}
+
 // ---------- 画线逻辑 ----------
-function priceToY(p) { return SCALE.yP(p); }
-function yToPrice(y) { return SCALE.pY(y); }
+function priceToY(p) { return SCALE.yP(p); }function yToPrice(y) { return SCALE.pY(y); }
 function dataXToScreenX(dx) { return PAD_L + (dx - SCALE.viewStart + 0.5) * SCALE.xW; }
 function xToIdx(x) { return SCALE.viewStart + (x - PAD_L) / SCALE.xW - 0.5; }
 
