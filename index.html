@@ -174,6 +174,9 @@
     <button data-tool="trend" title="趋势线：点两点画趋势，自动向两端延长">
       <svg class="btn-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18L20 6"/><path d="M14 6h6v6"/></svg>趋势线
     </button>
+    <button data-tool="channel" title="价格通道：点三点画平行通道（A/B 定基线，C 定平行线）">
+      <svg class="btn-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18L20 10"/><path d="M4 12L20 4"/></svg>通道
+    </button>
     <button data-tool="measure" title="测量%：点两点测量涨跌幅">
       <svg class="btn-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 19L19 5"/><path d="M5 19v-3M9 15v-3M13 11v-3M17 7v-3"/></svg>测量%
     </button>
@@ -273,6 +276,7 @@ let continuousDraw = false;
 let lines = [];
 let drawingTrend = null;
 let drawingMeasure = null;
+let drawingChannel = null;   // 价格通道草稿 {phase:1定A,2定B,3定C, x1,y1,x2,y2}
 let selectedLine = null;
 let dragTarget = null;
 let keepCursorTime = false;   // 切换标的/周期时保留鼠标所在K线时间，不跳最新
@@ -1011,7 +1015,7 @@ async function setView(sym, period) {
   }
 
   // 每个 标的|周期 拥有独立画线记忆；切换时恢复各自画线
-  selectedLine = null; drawingTrend = null; drawingMeasure = null;
+  selectedLine = null; drawingTrend = null; drawingMeasure = null; drawingChannel = null;
   lines = Array.isArray(linesStore[curSym + '|' + cur]) ? linesStore[curSym + '|' + cur] : [];
   const s = SYMBOLS[curSym];
   const v = s.data[s.map[cur]];
@@ -1426,6 +1430,38 @@ function drawLines() {
         drawHandle(dataXToScreenX(ln.x1), priceToY(ln.y1));
         drawHandle(dataXToScreenX(ln.x2), priceToY(ln.y2));
       }
+    } else if (ln.type === 'channel') {
+      // 通道：基线(A→B)与平行线(过C)，均自各自左侧锚点向右延伸成射线
+      const idxR = SCALE.viewStart + SCALE.plotW / SCALE.xW - 0.5;
+      const tdx = ln.x2 - ln.x1;
+      const k = tdx !== 0 ? (ln.y2 - ln.y1) / tdx : 0;
+      const xL1 = Math.max(ln.x1, ln.x3, SCALE.viewStart - 0.5);
+      const xR = Math.max(idxR, xL1);
+      const b1x = dataXToScreenX(xL1), b1y = priceToY(ln.y1 + k * (xL1 - ln.x1));
+      const b2x = dataXToScreenX(xR), b2y = priceToY(ln.y1 + k * (xR - ln.x1));
+      const p1x = dataXToScreenX(xL1), p1y = priceToY(ln.y3 + k * (xL1 - ln.x3));
+      const p2x = dataXToScreenX(xR), p2y = priceToY(ln.y3 + k * (xR - ln.x3));
+      ctx.fillStyle = isSel ? 'rgba(255,93,93,0.10)' : 'rgba(177,140,255,0.07)';
+      ctx.beginPath(); ctx.moveTo(b1x, b1y); ctx.lineTo(b2x, b2y); ctx.lineTo(p2x, p2y); ctx.lineTo(p1x, p1y); ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = isSel ? '#ff5d5d' : '#b18cff';
+      ctx.lineWidth = isSel ? 2 : 1.4;
+      ctx.beginPath(); ctx.moveTo(b1x, b1y); ctx.lineTo(b2x, b2y); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(p1x, p1y); ctx.lineTo(p2x, p2y); ctx.stroke();
+      if (isSel) {
+        drawHandle(dataXToScreenX(ln.x1), priceToY(ln.y1));
+        drawHandle(dataXToScreenX(ln.x2), priceToY(ln.y2));
+        drawHandle(dataXToScreenX(ln.x3), priceToY(ln.y3));
+      } else {
+        const w = Math.abs((ln.y3 - ln.y1) - k * (ln.x3 - ln.x1));
+        const cy = (b2y + p2y) / 2;
+        const txt = '通道 ' + fmtPrice(w);
+        ctx.font = 'bold 11px system-ui, sans-serif';
+        ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+        const tw = ctx.measureText(txt).width + 12, th = 16;
+        ctx.fillStyle = 'rgba(12,18,28,0.85)'; ctx.strokeStyle = '#b18cff'; ctx.lineWidth = 1;
+        roundRect(b2x - tw, cy - th / 2, tw, th, 3); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = '#b18cff'; ctx.fillText(txt, b2x - 5, cy);
+      }
     } else if (ln.type === 'measure') {
       const x1 = dataXToScreenX(ln.x1), y1 = priceToY(ln.y1);
       const x2 = dataXToScreenX(ln.x2), y2 = priceToY(ln.y2);
@@ -1443,6 +1479,21 @@ function drawLines() {
     const x1 = dataXToScreenX(drawingTrend.x1), y1 = priceToY(drawingTrend.y1);
     ctx.strokeStyle = '#b18cff'; ctx.setLineDash([4, 3]); ctx.lineWidth = 1.2;
     ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(hover.x, hover.y); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  if (toolMode === 'channel' && drawingChannel) {
+    const d = drawingChannel;
+    const hx = hover.x, hy = hover.y;
+    ctx.strokeStyle = '#b18cff'; ctx.setLineDash([4, 3]); ctx.lineWidth = 1.2;
+    if (d.phase === 1) {
+      ctx.beginPath(); ctx.moveTo(dataXToScreenX(d.x1), priceToY(d.y1)); ctx.lineTo(hx, hy); ctx.stroke();
+    } else if (d.phase === 2) {
+      const k = (d.x2 - d.x1) !== 0 ? (d.y2 - d.y1) / (d.x2 - d.x1) : 0;
+      ctx.beginPath(); ctx.moveTo(dataXToScreenX(d.x1), priceToY(d.y1)); ctx.lineTo(dataXToScreenX(d.x2), priceToY(d.y2)); ctx.stroke();
+      const idxR = SCALE.viewStart + SCALE.plotW / SCALE.xW - 0.5;
+      const yHover = yToPrice(hy);
+      ctx.beginPath(); ctx.moveTo(hx, hy); ctx.lineTo(dataXToScreenX(idxR), priceToY(yHover + k * (idxR - xToIdx(hx)))); ctx.stroke();
+    }
     ctx.setLineDash([]);
   }
   if (toolMode === 'measure' && drawingMeasure) {
@@ -1643,6 +1694,21 @@ function hitTest(mx, my) {
       if (dist(mx, my, dataXToScreenX(ln.x1), priceToY(ln.y1)) < 7) return { line: ln, handle: 'p1' };
       if (dist(mx, my, dataXToScreenX(ln.x2), priceToY(ln.y2)) < 7) return { line: ln, handle: 'p2' };
       if (ptSegDist(mx, my, dataXToScreenX(idxL), priceToY(ln.y1 + k * (idxL - ln.x1)), dataXToScreenX(idxR), priceToY(ln.y1 + k * (idxR - ln.x1))) < 5) return { line: ln, handle: 'body' };
+    } else if (ln.type === 'channel') {
+      if (dist(mx, my, dataXToScreenX(ln.x1), priceToY(ln.y1)) < 7) return { line: ln, handle: 'p1' };
+      if (dist(mx, my, dataXToScreenX(ln.x2), priceToY(ln.y2)) < 7) return { line: ln, handle: 'p2' };
+      if (dist(mx, my, dataXToScreenX(ln.x3), priceToY(ln.y3)) < 7) return { line: ln, handle: 'p3' };
+      const k = (ln.x2 - ln.x1) !== 0 ? (ln.y2 - ln.y1) / (ln.x2 - ln.x1) : 0;
+      const xL = Math.max(ln.x1, ln.x3, idxL), xR = idxR;
+      const b1 = { x: dataXToScreenX(xL), y: priceToY(ln.y1 + k * (xL - ln.x1)) };
+      const b2 = { x: dataXToScreenX(xR), y: priceToY(ln.y1 + k * (xR - ln.x1)) };
+      const p1 = { x: dataXToScreenX(xL), y: priceToY(ln.y3 + k * (xL - ln.x3)) };
+      const p2 = { x: dataXToScreenX(xR), y: priceToY(ln.y3 + k * (xR - ln.x3)) };
+      const dB = ptSegDist(mx, my, b1.x, b1.y, b2.x, b2.y);
+      const dP = ptSegDist(mx, my, p1.x, p1.y, p2.x, p2.y);
+      if (dB < 5 || dP < 5) return { line: ln, handle: 'body' };
+      const wPx = Math.hypot(b2.x - p2.x, b2.y - p2.y);
+      if (dB + dP <= wPx + 8) return { line: ln, handle: 'body' };
     } else if (ln.type === 'measure') {
       const x1 = dataXToScreenX(ln.x1), y1 = priceToY(ln.y1);
       const x2 = dataXToScreenX(ln.x2), y2 = priceToY(ln.y2);
@@ -1711,6 +1777,18 @@ canvas.addEventListener('mousedown', e => {
     }
     return;
   }
+  if (toolMode === 'channel') {
+    const dx = xToIdx(mx), price = yToPrice(my);
+    if (!drawingChannel) drawingChannel = { phase: 1, x1: dx, y1: price };
+    else if (drawingChannel.phase === 1) { drawingChannel.x2 = dx; drawingChannel.y2 = price; drawingChannel.phase = 2; }
+    else {
+      lines.push({ type: 'channel', x1: drawingChannel.x1, y1: drawingChannel.y1, x2: drawingChannel.x2, y2: drawingChannel.y2, x3: dx, y3: price });
+      selectedLine = lines[lines.length - 1];
+      drawingChannel = null; draw(); scheduleSessionSave(); if (!continuousDraw) exitToolMode();
+    }
+    draw();
+    return;
+  }
   if (toolMode === 'measure') {
     const dx = xToIdx(mx), price = yToPrice(my);
     if (!drawingMeasure) { drawingMeasure = { x1: dx, y1: price }; draw(); }
@@ -1750,6 +1828,8 @@ canvas.addEventListener('mousedown', e => {
     dragTarget = hit;
     if (hit.line.type === 'trend' && hit.handle === 'body') {
       dragStart = { mx: e.clientX, my: e.clientY, y1: hit.line.y1, y2: hit.line.y2, line: hit.line };
+    } else if (hit.line.type === 'channel' && hit.handle === 'body') {
+      dragStart = { mx: e.clientX, my: e.clientY, y1: hit.line.y1, y2: hit.line.y2, y3: hit.line.y3, line: hit.line };
     } else if (hit.line.type === 'trade' && hit.handle === 'move') {
       const idx0 = (typeof hit.line.idx === 'number') ? hit.line.idx : (hit.line.cx ?? 0.5) * viewCount + SCALE.viewStart;
       dragStart = { mx: e.clientX, my: e.clientY, entry: hit.line.entry, tp: hit.line.tp, sl: hit.line.sl, idx: idx0, line: hit.line };
@@ -1767,7 +1847,7 @@ canvas.addEventListener('mousemove', e => {
   const rect = canvas.getBoundingClientRect();
   hover.x = e.clientX - rect.left; hover.y = e.clientY - rect.top;
 
-  if (toolMode === 'hline' || toolMode === 'trend') { redrawSoon(); return; }
+  if (toolMode === 'hline' || toolMode === 'trend' || toolMode === 'channel') { redrawSoon(); return; }
 
   // 盈亏比创建：拖动预览 TP/SL
   if (tradeMode && rrDraft && !getTradePlan()) {
@@ -1780,10 +1860,11 @@ canvas.addEventListener('mousemove', e => {
     const ln = dragTarget.line;
     if (ln.type === 'hline') {
       if (dragTarget.handle === 'body') ln.price = yToPrice(hover.y);
-    } else if (ln.type === 'trend' || ln.type === 'measure') {
+    } else if (ln.type === 'trend' || ln.type === 'measure' || ln.type === 'channel') {
       const price = yToPrice(hover.y), idx = xToIdx(hover.x);
       if (dragTarget.handle === 'p1') { ln.x1 = idx; ln.y1 = price; }
       else if (dragTarget.handle === 'p2') { ln.x2 = idx; ln.y2 = price; }
+      else if (dragTarget.handle === 'p3') { ln.x3 = idx; ln.y3 = price; }
     } else if (ln.type === 'trade') {
       if (dragTarget.handle === 'entry') {
         // 拖入场手柄 = 换入场K线：idx 指向光标所在K线，entry 铆钉其收盘
@@ -1845,10 +1926,12 @@ window.addEventListener('mousemove', e => {
     const dLog = dy / (SCALE.mainBot - SCALE.mainTop) * (logP(SCALE.pmax) - logP(SCALE.pmin));
     dragStart.line.y1 = Math.exp(logP(dragStart.y1) + dLog);
     dragStart.line.y2 = Math.exp(logP(dragStart.y2) + dLog);
+    if (dragStart.line.type === 'channel') dragStart.line.y3 = Math.exp(logP(dragStart.y3) + dLog);
   } else {
     const dPrice = dy / (SCALE.mainBot - SCALE.mainTop) * (SCALE.pmax - SCALE.pmin);
     dragStart.line.y1 = dragStart.y1 + dPrice;
     dragStart.line.y2 = dragStart.y2 + dPrice;
+    if (dragStart.line.type === 'channel') dragStart.line.y3 = dragStart.y3 + dPrice;
   }
   redrawSoon();
 });
@@ -1944,12 +2027,12 @@ document.querySelectorAll('.tools button[data-tool]').forEach(b => {
     document.querySelectorAll('.tools button[data-tool]').forEach(x => x.classList.remove('active'));
     b.classList.add('active');
     toolMode = b.dataset.tool;
-    selectedLine = null; drawingTrend = null; drawingMeasure = null;
+    selectedLine = null; drawingTrend = null; drawingMeasure = null; drawingChannel = null;
     canvas.style.cursor = 'crosshair';
   });
 });
 document.getElementById('clearLines').addEventListener('click', () => {
-  lines = []; selectedLine = null; drawingTrend = null; drawingMeasure = null;
+  lines = []; selectedLine = null; drawingTrend = null; drawingMeasure = null; drawingChannel = null;
   linesStore[sessionKey()] = []; saveSessionNow(); draw();
 });
 // 盈亏比工具：开/关 + 多空方向 + 拖拽创建（按下定入场 → 拖出 TP/SL）
@@ -1981,7 +2064,7 @@ document.querySelectorAll('#tradeDirSeg .seg-btn').forEach(b => {
 // 重置刷新：清空全部记忆（所有周期的画线+浏览位置），回到最新K线
 document.getElementById('resetSession').addEventListener('click', () => {
   try { localStorage.removeItem(SESSION_KEY); } catch (e) {}
-  linesStore = {}; viewStore = {}; lines = []; selectedLine = null; drawingTrend = null; drawingMeasure = null;
+  linesStore = {}; viewStore = {}; lines = []; selectedLine = null; drawingTrend = null; drawingMeasure = null; drawingChannel = null;
   RESTORE = null;
   const len = dataLen();
   viewCount = Math.min(260, len);
