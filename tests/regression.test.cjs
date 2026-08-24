@@ -104,7 +104,7 @@ const sy = p => API.priceToY(p);
   await sleep(30); // 等待初始化 setView 完成
 
   // ============ 0. 环境 ============
-  check('数据加载：15m 根数 242905', DATA['15m'].length === 242905, '' + DATA['15m'].length);
+  check('数据加载：15m 根数 243961', DATA['15m'].length === 243961, '' + DATA['15m'].length);
   check('SCALE 已建立', API.getScale().plotW > 0 && API.getScale().xW > 0, 'xW=' + API.getScale().xW.toFixed(3));
   check('默认周期 1d、工具 cursor', API.getTool() === 'cursor');
 
@@ -497,8 +497,8 @@ const sy = p => API.priceToY(p);
       for (let i = 1; i < DATA[p].length; i++) if (DATA[p][i][0] <= DATA[p][i - 1][0]) { mono = false; break; }
       check(p + ' 时间戳递增', mono);
     }
-    check('15m 末根 = 2026-08-12 23:45',
-      DATA['15m'][DATA['15m'].length - 1][0] === Math.floor(Date.UTC(2026, 7, 12, 23, 45) / 60000));
+    check('15m 末根 = 2026-08-23 23:45',
+      DATA['15m'][DATA['15m'].length - 1][0] === Math.floor(Date.UTC(2026, 7, 23, 23, 45) / 60000));
   }
 
   // ============ 11. 持久化 ============
