@@ -922,6 +922,61 @@ async function findIdxByTime(ts) {
   return lo;
 }
 
+// ---------- 日期输入解析：支持 23-7-17 / 20230717 / 7-17 / ISO 等 ----------
+function parseDateInput(s) {
+  s = s.trim();
+  const now = new Date();
+  const Y = now.getUTCFullYear();
+
+  // 已有 T 分隔（ISO）直接走 Date.parse
+  if (/^\d{4}[-./]\d{1,2}[-./]\d{1,2}[T ]\d{1,2}/.test(s)) {
+    const t = Date.parse(s.replace(/\//g, '-'));
+    return isNaN(t) ? null : t;
+  }
+
+  // 紧凑 8 位：20230717 / 230717
+  const compact = s.replace(/[^0-9]/g, '');
+  if (/^(\d{4})(\d{2})(\d{2})$/.test(compact)) {
+    const y = +compact.slice(0,4), m = +compact.slice(4,6), d = +compact.slice(6,8);
+    if (m < 1 || m > 12 || d < 1 || d > 31) return null;
+    return Date.UTC(y, m - 1, d);
+  }
+  if (/^(\d{2})(\d{2})(\d{2})$/.test(compact)) {
+    const y = +compact.slice(0,2) < 50 ? 2000 + +compact.slice(0,2) : 1900 + +compact.slice(0,2);
+    const m = +compact.slice(2,4), d = +compact.slice(4,6);
+    if (m < 1 || m > 12 || d < 1 || d > 31) return null;
+    return Date.UTC(y, m - 1, d);
+  }
+
+  // 短横线/斜杠/点分隔：23-7-17 / 2023-7-17 / 7-17-23
+  const parts = s.split(/[-./]/);
+  if (parts.length === 3) {
+    let [a, b, c] = parts.map(Number);
+    if (!a || !b || !c || isNaN(a) || isNaN(b) || isNaN(c)) return null;
+    let y, m, d;
+    if (a > 31) { y = a; m = b; d = c; }          // YYYY-M-D
+    else if (c > 31) { y = c; m = a; d = b; }     // M-D-YYYY
+    else {                                           // 三数均 ≤31：默认 YY-M-D
+      y = a; m = b; d = c;
+      // 若月份 >12 无效，尝试 M-D-YY 作为后备
+      if (m < 1 || m > 12 || d < 1 || d > 31) { y = c; m = a; d = b; }
+    }
+    if (y < 100) y = y < 50 ? 2000 + y : 1900 + y;
+    if (m < 1 || m > 12 || d < 1 || d > 31) return null;
+    return Date.UTC(y, m - 1, d);
+  }
+  if (parts.length === 2) {
+    let [m, d] = parts.map(Number);
+    if (!m || !d || isNaN(m) || isNaN(d) || m < 1 || m > 12 || d < 1 || d > 31) return null;
+    return Date.UTC(Y, m - 1, d);
+  }
+  if (parts.length === 1) {
+    const t = Date.parse(s);
+    return isNaN(t) ? null : t;
+  }
+  return null;
+}
+
 // ---------- 日期快速跳转（G 键 + 时间轴点击） ----------
 function showGoToDialog() {
   if (goToOpen) return;
@@ -935,16 +990,21 @@ function showGoToDialog() {
   title.textContent = '跳转到日期';
   title.style.cssText = 'font-size:15px;font-weight:700;color:#f0f3fa;margin-bottom:4px;';
   const sub = document.createElement('div');
-  sub.textContent = '输入日期时间，视图将居中到最近的K线';
+  sub.textContent = '支持格式：23-7-17 / 20230717 / 7-17 / 2023-07-17';
   sub.style.cssText = 'font-size:11.5px;color:#5e6b82;margin-bottom:14px;';
   const input = document.createElement('input');
-  input.type = 'datetime-local';
+  input.type = 'text';
+  input.placeholder = '如 23-7-17 / 20230717 / 7-17';
   input.style.cssText = 'width:100%;background:#0e1220;border:1px solid #2a3142;color:#cdd3e0;border-radius:8px;padding:10px 12px;font-size:14px;font-family:Consolas,monospace;outline:none;box-sizing:border-box;';
   input.addEventListener('keydown', e => { if (e.key === 'Enter') doJump(); });
   input.addEventListener('keydown', e => { if (e.key === 'Escape') closeGoTo(); });
   const ci = Math.max(0, Math.min(dataLen() - 1, Math.floor(viewStart + viewCount / 2)));
   const bar = getBar(ci);
-  if (bar) input.value = tsStr(bar[0]).replace(' ', 'T').slice(0, 16);
+  if (bar) {
+    const s = tsStr(bar[0]).slice(0, 10); // YYYY-MM-DD
+    const parts = s.split('-');
+    input.value = parts[0].slice(2) + '-' + +parts[1] + '-' + +parts[2];
+  }
   const btns = document.createElement('div');
   btns.style.cssText = 'display:flex;gap:8px;margin-top:16px;justify-content:flex-end;';
   const btnCancel = document.createElement('button');
@@ -962,10 +1022,10 @@ function showGoToDialog() {
   document.body.appendChild(mask);
   input.focus();
   async function doJump() {
-    const v = input.value;
+    const v = input.value.trim();
     if (!v) return;
-    const t = Date.parse(v);
-    if (isNaN(t)) { setLoading('日期格式无效'); return; }
+    const t = parseDateInput(v);
+    if (!t) { setLoading('日期格式无效'); return; }
     const idx = await findIdxByTime(t / 60000);
     if (idx < 0) return;
     viewStart = Math.max(0, Math.min(dataLen() - viewCount, idx - viewCount / 2));

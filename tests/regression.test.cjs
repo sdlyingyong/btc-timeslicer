@@ -82,7 +82,8 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     setTradeMode: b => { tradeMode = b; },
     hitTest, dataXToScreenX, priceToY, xToIdx, yToPrice, closeAt, dataLen,
     getTradePlan, exitToolMode,
-    setView, getCur: () => cur, getRightTs: () => rightTs
+    setView, getCur: () => cur, getRightTs: () => rightTs,
+    parseDateInput
   };`);
 fn(sandbox.window, sandbox.document, sandbox.localStorage, async () => ({}), sandbox.location, console, canvasMock, 1);
 const API = sandbox.window.__API__;
@@ -510,6 +511,22 @@ const sy = p => API.priceToY(p);
     check('画线写入 localStorage', !!saved && saved.includes('channel'));
     check('清除画线', clearLines());
     check('重置刷新', resetSession());
+  }
+
+  // ============ 12. 日期跳转解析 ============
+  {
+    const pd = API.parseDateInput;
+    const D = (y, m, d) => Date.UTC(y, m - 1, d);
+    check('23-7-17 → 2023-07-17',    pd('23-7-17')   === D(2023,7,17));
+    check('2023-7-17 → 2023-07-17',  pd('2023-7-17') === D(2023,7,17));
+    check('230717 → 2023-07-17',      pd('230717')    === D(2023,7,17));
+    check('20230717 → 2023-07-17',    pd('20230717')  === D(2023,7,17));
+    check('7-17 → 今年7-17',          pd('7-17')      === D(2026,7,17));
+    check('2025/03/13 → 2025-03-13', pd('2025/03/13') === D(2025,3,13));
+    check('ISO 2024-01-01',           pd('2024-01-01') === D(2024,1,1));
+    check('无效输入返回 null',        pd('xyz')        === null);
+    check('无效月份返回 null',        pd('2023-13-01') === null);
+    check('空串返回 null',            pd('')            === null);
   }
 
   // ============ 汇总 ============
