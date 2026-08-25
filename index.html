@@ -1028,7 +1028,7 @@ function showGoToDialog() {
     if (!t) { setLoading('日期格式无效'); return; }
     const idx = await findIdxByTime(t / 60000);
     if (idx < 0) return;
-    viewStart = Math.max(0, Math.min(dataLen() - viewCount, idx - viewCount / 2));
+    viewStart = Math.max(0, Math.min(dataLen() - viewCount, idx - viewCount + 1));
     DS.ensure(Math.max(0, Math.floor(viewStart) - 200), Math.floor(viewStart) + viewCount);
     closeGoTo();
     redrawSoon(); scheduleViewSave();
