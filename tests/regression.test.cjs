@@ -82,6 +82,8 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     setTradeMode: b => { tradeMode = b; },
     hitTest, dataXToScreenX, priceToY, xToIdx, yToPrice, closeAt, dataLen,
     getTradePlan, exitToolMode,
+    findIdxSync, lnIdx, barTs,
+    clearLines: () => { lines = []; linesStore[lineKey()] = []; saveSessionNow(); },
     setView, getCur: () => cur, getRightTs: () => rightTs,
     parseDateInput
   };`);
@@ -100,6 +102,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 // 屏幕坐标 <-> 逻辑坐标（依赖 SCALE 建立后）
 const sx = idx => API.dataXToScreenX(idx);
 const sy = p => API.priceToY(p);
+const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏幕X（线坐标现在以时间戳存储）
 
 (async () => {
   await sleep(30); // 等待初始化 setView 完成
@@ -133,12 +136,12 @@ const sy = p => API.priceToY(p);
     check('trend 两点创建', !!t && t.type === 'trend');
     check('trend 自动退出工具', API.getTool() === 'cursor');
     // 手柄命中
-    const hp1 = API.hitTest(sx(t.x1), sy(t.y1));
+    const hp1 = API.hitTest(sxT(t.x1), sy(t.y1));
     check('trend p1 命中', !!hp1 && hp1.handle === 'p1');
-    const hp2 = API.hitTest(sx(t.x2), sy(t.y2));
+    const hp2 = API.hitTest(sxT(t.x2), sy(t.y2));
     check('trend p2 命中', !!hp2 && hp2.handle === 'p2');
     // body 命中 + 整体平移（window mousemove）
-    const midX = sx((t.x1 + t.x2) / 2), midY = sy((t.y1 + t.y2) / 2);
+    const midX = sxT((t.x1 + t.x2) / 2), midY = sy((t.y1 + t.y2) / 2);
     const hb = API.hitTest(midX, midY);
     check('trend body 命中', !!hb && hb.handle === 'body');
     const before = { y1: t.y1, y2: t.y2 };
@@ -147,7 +150,7 @@ const sy = p => API.priceToY(p);
     up(); move(-1, -1);
     // p1 手柄拖拽
     const bp1 = { x1: t.x1, y1: t.y1 };
-    down(sx(t.x1), sy(t.y1)); move(500, 300);
+    down(sxT(t.x1), sy(t.y1)); move(500, 300);
     check('trend p1 拖拽生效', t.x1 !== bp1.x1 || t.y1 !== bp1.y1);
     up(); move(-1, -1);
     check('trend 删除', deleteLine('trend', t));
@@ -160,11 +163,11 @@ const sy = p => API.priceToY(p);
     const m = API.getLines()[API.getLines().length - 1];
     check('measure 两点创建', !!m && m.type === 'measure');
     check('measure 自动退出', API.getTool() === 'cursor');
-    const hp1 = API.hitTest(sx(m.x1), sy(m.y1));
+    const hp1 = API.hitTest(sxT(m.x1), sy(m.y1));
     check('measure p1 命中', !!hp1 && hp1.handle === 'p1');
     // 拖动 p2
     const bp2 = { x2: m.x2, y2: m.y2 };
-    down(sx(m.x2), sy(m.y2)); move(500, 500);
+    down(sxT(m.x2), sy(m.y2)); move(500, 500);
     check('measure p2 拖拽生效', m.x2 !== bp2.x2 || m.y2 !== bp2.y2);
     up(); move(-1, -1);
     // 绘制不崩（draw 已自动调用）
@@ -183,24 +186,24 @@ const sy = p => API.priceToY(p);
     // 关键回归：存在 channel 时 hitTest 不得抛异常（此前 idxL/idxR 未定义导致所有拖拽失效）
     let threw = null;
     try {
-      API.hitTest(300, 400); API.hitTest(sx(c.x1), sy(c.y1)); API.hitTest(600, 300);
+      API.hitTest(300, 400); API.hitTest(sxT(c.x1), sy(c.y1)); API.hitTest(600, 300);
     } catch (e) { threw = e.message; }
     check('channel 存在时 hitTest 不抛异常（bug回归）', threw === null, threw || '');
-    const hp1 = API.hitTest(sx(c.x1), sy(c.y1));
+    const hp1 = API.hitTest(sxT(c.x1), sy(c.y1));
     check('channel p1 命中', !!hp1 && hp1.handle === 'p1');
-    const hp3 = API.hitTest(sx(c.x3), sy(c.y3));
+    const hp3 = API.hitTest(sxT(c.x3), sy(c.y3));
     check('channel p3 命中', !!hp3 && hp3.handle === 'p3');
     // p3 拖拽只改宽度（x3/y3）
     const bp3 = { x3: c.x3, y3: c.y3 };
-    down(sx(c.x3), sy(c.y3)); move(500, 250);
+    down(sxT(c.x3), sy(c.y3)); move(500, 250);
     check('channel p3 拖拽生效', c.x3 !== bp3.x3 || c.y3 !== bp3.y3);
     up(); move(-1, -1);
     // body 整体平移（三点同移，斜率不变）
-    const bodyHit = API.hitTest(sx((c.x1 + c.x2) / 2), sy((c.y1 + c.y2) / 2)) || API.hitTest(sx(c.x2), sy(c.y2));
+    const bodyHit = API.hitTest(sxT((c.x1 + c.x2) / 2), sy((c.y1 + c.y2) / 2)) || API.hitTest(sxT(c.x2), sy(c.y2));
     check('channel body 命中', !!bodyHit && bodyHit.handle === 'body');
     if (bodyHit) {
       const bb = { y1: c.y1, y2: c.y2, y3: c.y3 };
-      down(sx((c.x1 + c.x2) / 2), sy((c.y1 + c.y2) / 2)); wmove(400, 500);
+      down(sxT((c.x1 + c.x2) / 2), sy((c.y1 + c.y2) / 2)); wmove(400, 500);
       check('channel body 整体平移（y3 同步）', !near(c.y1, bb.y1) &&
         near(c.y1 - bb.y1, c.y2 - bb.y2, 1e-6) && near(c.y1 - bb.y1, c.y3 - bb.y3, 1e-6));
       up(); move(-1, -1);
@@ -478,9 +481,9 @@ const sy = p => API.priceToY(p);
     down(200, 400); down(400, 300);
     const t = API.getLines()[API.getLines().length - 1];
     check('trend 创建（键盘删除前置）', !!t);
-    API.hitTest(sx(t.x1), sy(t.y1));
+    API.hitTest(sxT(t.x1), sy(t.y1));
     // 模拟点击选中
-    down(sx(t.x1), sy(t.y1));
+    down(sxT(t.x1), sy(t.y1));
     key('Delete');
     check('Del 删除选中对象', !API.getLines().includes(t));
     up(); move(-1, -1);
@@ -529,6 +532,27 @@ const sy = p => API.priceToY(p);
     check('空串返回 null',            pd('')            === null);
   }
 
+  // ============ 13. 画线跨周期显示（时间戳锚定） ============
+  {
+    API.setTool('trend');
+    down(300, 500); down(500, 400);
+    const t = API.getLines()[API.getLines().length - 1];
+    check('日线创建趋势线', !!t);
+    const ts1 = t.x1;
+    // 切到 15m：线随标的共享（lineKey=symbol），时间戳可在 15m 定位
+    await API.setView(null, '15m');
+    check('切换15m后线仍在', API.getLines().includes(t));
+    const i15 = API.lnIdx(t, 'x1');
+    check('15m 中能定位到该线时间戳', i15 >= 0 && i15 < API.dataLen());
+    // 切回日线仍可见，且时间戳未变（锚定同一根）
+    await API.setView(null, '1d');
+    check('切回日线线仍在', API.getLines().includes(t));
+    check('时间戳锚定未变', t.x1 === ts1);
+    // 清理
+    API.setTool('cursor');
+    check('清理跨周期测试线', (API.clearLines(), API.getLines().length === 0));
+  }
+
   // ============ 汇总 ============
   console.log('\n======== 结果: ' + pass + ' PASS / ' + fail + ' FAIL ========');
   if (errors.length) { console.log('失败项:\n  ' + errors.join('\n  ')); process.exit(1); }
@@ -541,7 +565,7 @@ function deleteLine(type, obj) {
   let px, py;
   if (type === 'hline') { px = 8 + 400; py = sy(obj.price); }
   else if (type === 'trade') { px = 600; py = sy(obj.entry); }
-  else { px = sx(obj.x1); py = sy(obj.y1); }
+  else { px = sx(API.lnIdx(obj, 'x1')); py = sy(obj.y1); }
   down(px, py);
   const sel = API.getSelected() === obj;
   up(); // 释放拖拽，避免 dragTarget 残留
@@ -549,8 +573,8 @@ function deleteLine(type, obj) {
   return sel && !API.getLines().includes(obj);
 }
 function clearLines() {
-  const n0 = API.getLines().length;
-  // 触发 清除画线 按钮逻辑（直接清空）
+  // 触发 清除画线 逻辑（含按标的存储的画线）
+  API.clearLines && API.clearLines();
   for (const k in store) if (k.startsWith('kline_')) delete store[k];
   return true;
 }

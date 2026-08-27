@@ -493,11 +493,12 @@ function savePrefs() {
 }
 // ---------- 会话持久化：画线 + 浏览位置（按 标的|周期 分开记忆） ----------
 const SESSION_KEY = 'kline_session_v1';
-let linesStore = {};          // "SYM|period" -> 画线数组
+let linesStore = {};          // 标的 -> 画线数组（X 以时间戳存储，跨周期共享显示）
 let viewStore = {};           // "SYM|period" -> {viewStart, viewCount}  浏览位置（按周期独立记忆）
 let RESTORE = null;           // 首次启动待恢复的 {sym,period,viewStart,viewCount}
 let sessSaveTimer = null;
-function sessionKey() { return curSym + '|' + cur; }
+function sessionKey() { return curSym + '|' + cur; }   // 浏览位置：按 标的|周期 独立记忆
+function lineKey() { return curSym; }                    // 画线：按 标的 共享（时间戳锚定，跨周期显示）
 function loadSession() {
   try {
     const raw = localStorage.getItem(SESSION_KEY);
@@ -515,7 +516,7 @@ function loadSession() {
 }
 function saveSessionNow() {
   try {
-    linesStore[sessionKey()] = lines;
+    linesStore[lineKey()] = lines;
     viewStore[sessionKey()] = { viewStart: Math.floor(viewStart), viewCount: viewCount };
     localStorage.setItem(SESSION_KEY, JSON.stringify({
       sym: curSym, period: cur,
@@ -1044,7 +1045,7 @@ async function setView(sym, period) {
   for (const k in emaFull) delete emaFull[k];
   for (const k in emaFullLen) delete emaFullLen[k];
   if (DS) {   // 离开前保存当前画线 + 浏览位置
-    linesStore[sessionKey()] = lines;
+    linesStore[lineKey()] = lines;
     viewStore[sessionKey()] = { viewStart: Math.floor(viewStart), viewCount: viewCount };
   }
   if (sym) curSym = sym;
@@ -1075,9 +1076,9 @@ async function setView(sym, period) {
     if (rBar) rightTs = rBar[0];
   }
 
-  // 每个 标的|周期 拥有独立画线记忆；切换时恢复各自画线
+  // 画线按 标的 共享（时间戳锚定），切换周期/标的均保持显示；浏览位置按 标的|周期 独立记忆
   selectedLine = null; drawingTrend = null; drawingMeasure = null; drawingChannel = null;
-  lines = Array.isArray(linesStore[curSym + '|' + cur]) ? linesStore[curSym + '|' + cur] : [];
+  lines = Array.isArray(linesStore[curSym]) ? linesStore[curSym] : [];
   const s = SYMBOLS[curSym];
   const v = s.data[s.map[cur]];
   if (Array.isArray(v)) DS = makeInlineDS(v);
@@ -1471,6 +1472,31 @@ function priceToY(p) { return SCALE.yP(p); }
 function yToPrice(y) { return SCALE.pY(y); }
 function dataXToScreenX(dx) { return PAD_L + (dx - SCALE.viewStart + 0.5) * SCALE.xW; }
 function xToIdx(x) { return SCALE.viewStart + (x - PAD_L) / SCALE.xW - 0.5; }
+// 画线以"时间戳(分钟)"存储 X，从而跨周期/跨标的保持锚定同一日期
+function _tsMin(v) { return typeof v === 'string' ? Date.parse(v.replace(' ', 'T')) / 60000 : v; }
+function barTs(i) { const b = getBar(Math.round(i)); return b ? b[0] : null; }
+function findIdxSync(ts) {
+  const len = dataLen();
+  if (len === 0) return -1;
+  const tT = _tsMin(ts);
+  const b0 = getBar(0), b1 = getBar(len - 1);
+  if (!b0 || !b1) return -1;
+  const t0 = _tsMin(b0[0]), t1 = _tsMin(b1[0]);
+  if (tT <= t0) return 0;
+  if (tT >= t1) return len - 1;
+  let lo = 0, hi = len - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const b = getBar(mid);
+    if (!b) return -1;
+    const tm = _tsMin(b[0]);
+    if (tm < tT) lo = mid + 1;
+    else if (tm > tT) hi = mid - 1;
+    else return mid;
+  }
+  return lo;
+}
+function lnIdx(ln, key) { return findIdxSync(ln[key]); }
 
 function drawLines() {
   for (const ln of lines) {
@@ -1487,33 +1513,35 @@ function drawLines() {
       if (isSel) drawHandle(PAD_L + SCALE.plotW - 4, y);
     } else if (ln.type === 'trend') {
       // 延长线：直线两端延伸至绘图区左右边缘（price 随 bar 索引线性外推）
+      const i1 = lnIdx(ln, 'x1'), i2 = lnIdx(ln, 'x2');
       const idxL = SCALE.viewStart - 0.5, idxR = SCALE.viewStart + SCALE.plotW / SCALE.xW - 0.5;
-      const tdx = ln.x2 - ln.x1;
+      const tdx = i2 - i1;
       const k = tdx !== 0 ? (ln.y2 - ln.y1) / tdx : 0;
-      const x1 = dataXToScreenX(idxL), y1 = priceToY(ln.y1 + k * (idxL - ln.x1));
-      const x2 = dataXToScreenX(idxR), y2 = priceToY(ln.y1 + k * (idxR - ln.x1));
+      const x1 = dataXToScreenX(idxL), y1 = priceToY(ln.y1 + k * (idxL - i1));
+      const x2 = dataXToScreenX(idxR), y2 = priceToY(ln.y1 + k * (idxR - i1));
       ctx.strokeStyle = isSel ? '#ff5d5d' : '#b18cff';
       ctx.lineWidth = isSel ? 2 : 1.4;
       ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
       if (isSel) {
-        drawHandle(dataXToScreenX(ln.x1), priceToY(ln.y1));
-        drawHandle(dataXToScreenX(ln.x2), priceToY(ln.y2));
+        drawHandle(dataXToScreenX(i1), priceToY(ln.y1));
+        drawHandle(dataXToScreenX(i2), priceToY(ln.y2));
       }
     } else if (ln.type === 'channel') {
       // 通道：基线(A→B)与平行线(过C)，各自从自己的左侧锚点向右延伸成射线
+      const i1 = lnIdx(ln, 'x1'), i2 = lnIdx(ln, 'x2'), i3 = lnIdx(ln, 'x3');
       const idxR = SCALE.viewStart + SCALE.plotW / SCALE.xW - 0.5;
-      const tdx = ln.x2 - ln.x1;
+      const tdx = i2 - i1;
       const k = tdx !== 0 ? (ln.y2 - ln.y1) / tdx : 0;
       const vL = SCALE.viewStart - 0.5;
-      const bL = Math.max(ln.x1, vL), pL = Math.max(ln.x3, vL);   // 基线/平行线各自起点
+      const bL = Math.max(i1, vL), pL = Math.max(i3, vL);   // 基线/平行线各自起点
       const aL = Math.max(bL, pL);                                 // 填充区域起点（两线公共段）
       const xR = Math.max(idxR, aL);
-      const b1x = dataXToScreenX(bL), b1y = priceToY(ln.y1 + k * (bL - ln.x1));
-      const b2x = dataXToScreenX(xR), b2y = priceToY(ln.y1 + k * (xR - ln.x1));
-      const p1x = dataXToScreenX(pL), p1y = priceToY(ln.y3 + k * (pL - ln.x3));
-      const p2x = dataXToScreenX(xR), p2y = priceToY(ln.y3 + k * (xR - ln.x3));
-      const f1x = dataXToScreenX(aL), f1y = priceToY(ln.y1 + k * (aL - ln.x1));
-      const f2x = dataXToScreenX(aL), f2y = priceToY(ln.y3 + k * (aL - ln.x3));
+      const b1x = dataXToScreenX(bL), b1y = priceToY(ln.y1 + k * (bL - i1));
+      const b2x = dataXToScreenX(xR), b2y = priceToY(ln.y1 + k * (xR - i1));
+      const p1x = dataXToScreenX(pL), p1y = priceToY(ln.y3 + k * (pL - i3));
+      const p2x = dataXToScreenX(xR), p2y = priceToY(ln.y3 + k * (xR - i3));
+      const f1x = dataXToScreenX(aL), f1y = priceToY(ln.y1 + k * (aL - i1));
+      const f2x = dataXToScreenX(aL), f2y = priceToY(ln.y3 + k * (aL - i3));
       ctx.fillStyle = isSel ? 'rgba(255,93,93,0.10)' : 'rgba(177,140,255,0.07)';
       ctx.beginPath(); ctx.moveTo(f1x, f1y); ctx.lineTo(b2x, b2y); ctx.lineTo(p2x, p2y); ctx.lineTo(f2x, f2y); ctx.closePath(); ctx.fill();
       ctx.strokeStyle = isSel ? '#ff5d5d' : '#b18cff';
@@ -1521,11 +1549,11 @@ function drawLines() {
       ctx.beginPath(); ctx.moveTo(b1x, b1y); ctx.lineTo(b2x, b2y); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(p1x, p1y); ctx.lineTo(p2x, p2y); ctx.stroke();
       if (isSel) {
-        drawHandle(dataXToScreenX(ln.x1), priceToY(ln.y1));
-        drawHandle(dataXToScreenX(ln.x2), priceToY(ln.y2));
-        drawHandle(dataXToScreenX(ln.x3), priceToY(ln.y3));
+        drawHandle(dataXToScreenX(i1), priceToY(ln.y1));
+        drawHandle(dataXToScreenX(i2), priceToY(ln.y2));
+        drawHandle(dataXToScreenX(i3), priceToY(ln.y3));
       } else {
-        const w = Math.abs((ln.y3 - ln.y1) - k * (ln.x3 - ln.x1));
+        const w = Math.abs((ln.y3 - ln.y1) - k * (i3 - i1));
         const cy = (b2y + p2y) / 2;
         const txt = '通道 ' + fmtPrice(w);
         ctx.font = 'bold 11px system-ui, sans-serif';
@@ -1536,20 +1564,20 @@ function drawLines() {
         ctx.fillStyle = '#b18cff'; ctx.fillText(txt, b2x - 5, cy);
       }
     } else if (ln.type === 'measure') {
-      const x1 = dataXToScreenX(ln.x1), y1 = priceToY(ln.y1);
-      const x2 = dataXToScreenX(ln.x2), y2 = priceToY(ln.y2);
+      const x1 = dataXToScreenX(lnIdx(ln, 'x1')), y1 = priceToY(ln.y1);
+      const x2 = dataXToScreenX(lnIdx(ln, 'x2')), y2 = priceToY(ln.y2);
       ctx.strokeStyle = isSel ? '#ff5d5d' : '#3fd0ff';
       ctx.lineWidth = isSel ? 2 : 1.4;
       ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
       if (isSel) { drawHandle(x1, y1); drawHandle(x2, y2); }
-      else drawMeasureLabel(x1, y1, x2, y2, ln.y1, ln.y2, ln.x1, ln.x2);
+      else drawMeasureLabel(x1, y1, x2, y2, ln.y1, ln.y2, lnIdx(ln, 'x1'), lnIdx(ln, 'x2'));
     } else if (ln.type === 'trade') {
       drawTrade(ln, isSel);
     }
     ctx.restore();
   }
   if (toolMode === 'trend' && drawingTrend) {
-    const x1 = dataXToScreenX(drawingTrend.x1), y1 = priceToY(drawingTrend.y1);
+    const x1 = dataXToScreenX(lnIdx(drawingTrend, 'x1')), y1 = priceToY(drawingTrend.y1);
     ctx.strokeStyle = '#b18cff'; ctx.setLineDash([4, 3]); ctx.lineWidth = 1.2;
     ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(hover.x, hover.y); ctx.stroke();
     ctx.setLineDash([]);
@@ -1559,10 +1587,11 @@ function drawLines() {
     const hx = hover.x, hy = hover.y;
     ctx.strokeStyle = '#b18cff'; ctx.setLineDash([4, 3]); ctx.lineWidth = 1.2;
     if (d.phase === 1) {
-      ctx.beginPath(); ctx.moveTo(dataXToScreenX(d.x1), priceToY(d.y1)); ctx.lineTo(hx, hy); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(dataXToScreenX(lnIdx(d, 'x1')), priceToY(d.y1)); ctx.lineTo(hx, hy); ctx.stroke();
     } else if (d.phase === 2) {
-      const k = (d.x2 - d.x1) !== 0 ? (d.y2 - d.y1) / (d.x2 - d.x1) : 0;
-      ctx.beginPath(); ctx.moveTo(dataXToScreenX(d.x1), priceToY(d.y1)); ctx.lineTo(dataXToScreenX(d.x2), priceToY(d.y2)); ctx.stroke();
+      const di1 = lnIdx(d, 'x1'), di2 = lnIdx(d, 'x2');
+      const k = (di2 - di1) !== 0 ? (d.y2 - d.y1) / (di2 - di1) : 0;
+      ctx.beginPath(); ctx.moveTo(dataXToScreenX(di1), priceToY(d.y1)); ctx.lineTo(dataXToScreenX(di2), priceToY(d.y2)); ctx.stroke();
       const idxR = SCALE.viewStart + SCALE.plotW / SCALE.xW - 0.5;
       const yHover = yToPrice(hy);
       ctx.beginPath(); ctx.moveTo(hx, hy); ctx.lineTo(dataXToScreenX(idxR), priceToY(yHover + k * (idxR - xToIdx(hx)))); ctx.stroke();
@@ -1570,11 +1599,11 @@ function drawLines() {
     ctx.setLineDash([]);
   }
   if (toolMode === 'measure' && drawingMeasure) {
-    const x1 = dataXToScreenX(drawingMeasure.x1), y1 = priceToY(drawingMeasure.y1);
+    const x1 = dataXToScreenX(lnIdx(drawingMeasure, 'x1')), y1 = priceToY(drawingMeasure.y1);
     ctx.strokeStyle = '#3fd0ff'; ctx.setLineDash([4, 3]); ctx.lineWidth = 1.2;
     ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(hover.x, hover.y); ctx.stroke();
     ctx.setLineDash([]);
-    drawMeasureLabel(x1, y1, hover.x, hover.y, drawingMeasure.y1, yToPrice(hover.y), drawingMeasure.x1, xToIdx(hover.x));
+    drawMeasureLabel(x1, y1, hover.x, hover.y, drawingMeasure.y1, yToPrice(hover.y), lnIdx(drawingMeasure, 'x1'), xToIdx(hover.x));
   }
 }
 // 测量标签：显示价格差、涨跌幅%、跨越K线根数
@@ -1761,31 +1790,33 @@ function hitTest(mx, my) {
       if (Math.abs(my - y) < 6) return { line: ln, handle: 'body' };
     } else if (ln.type === 'trend') {
       // 端点手柄按原始两点判定；body 命中按延长后的直线判定
+      const i1 = lnIdx(ln, 'x1'), i2 = lnIdx(ln, 'x2');
       const idxL = SCALE.viewStart - 0.5, idxR = SCALE.viewStart + SCALE.plotW / SCALE.xW - 0.5;
-      const tdx = ln.x2 - ln.x1;
+      const tdx = i2 - i1;
       const k = tdx !== 0 ? (ln.y2 - ln.y1) / tdx : 0;
-      if (dist(mx, my, dataXToScreenX(ln.x1), priceToY(ln.y1)) < 7) return { line: ln, handle: 'p1' };
-      if (dist(mx, my, dataXToScreenX(ln.x2), priceToY(ln.y2)) < 7) return { line: ln, handle: 'p2' };
-      if (ptSegDist(mx, my, dataXToScreenX(idxL), priceToY(ln.y1 + k * (idxL - ln.x1)), dataXToScreenX(idxR), priceToY(ln.y1 + k * (idxR - ln.x1))) < 5) return { line: ln, handle: 'body' };
+      if (dist(mx, my, dataXToScreenX(i1), priceToY(ln.y1)) < 7) return { line: ln, handle: 'p1' };
+      if (dist(mx, my, dataXToScreenX(i2), priceToY(ln.y2)) < 7) return { line: ln, handle: 'p2' };
+      if (ptSegDist(mx, my, dataXToScreenX(idxL), priceToY(ln.y1 + k * (idxL - i1)), dataXToScreenX(idxR), priceToY(ln.y1 + k * (idxR - i1))) < 5) return { line: ln, handle: 'body' };
     } else if (ln.type === 'channel') {
-      if (dist(mx, my, dataXToScreenX(ln.x1), priceToY(ln.y1)) < 7) return { line: ln, handle: 'p1' };
-      if (dist(mx, my, dataXToScreenX(ln.x2), priceToY(ln.y2)) < 7) return { line: ln, handle: 'p2' };
-      if (dist(mx, my, dataXToScreenX(ln.x3), priceToY(ln.y3)) < 7) return { line: ln, handle: 'p3' };
-      const k = (ln.x2 - ln.x1) !== 0 ? (ln.y2 - ln.y1) / (ln.x2 - ln.x1) : 0;
+      const i1 = lnIdx(ln, 'x1'), i2 = lnIdx(ln, 'x2'), i3 = lnIdx(ln, 'x3');
+      if (dist(mx, my, dataXToScreenX(i1), priceToY(ln.y1)) < 7) return { line: ln, handle: 'p1' };
+      if (dist(mx, my, dataXToScreenX(i2), priceToY(ln.y2)) < 7) return { line: ln, handle: 'p2' };
+      if (dist(mx, my, dataXToScreenX(i3), priceToY(ln.y3)) < 7) return { line: ln, handle: 'p3' };
+      const k = (i2 - i1) !== 0 ? (ln.y2 - ln.y1) / (i2 - i1) : 0;
       const idxL = SCALE.viewStart - 0.5, idxR = SCALE.viewStart + SCALE.plotW / SCALE.xW - 0.5;
-      const bL = Math.max(ln.x1, idxL), pL = Math.max(ln.x3, idxL);   // 各自射线起点
-      const b1 = { x: dataXToScreenX(bL), y: priceToY(ln.y1 + k * (bL - ln.x1)) };
-      const b2 = { x: dataXToScreenX(idxR), y: priceToY(ln.y1 + k * (idxR - ln.x1)) };
-      const p1 = { x: dataXToScreenX(pL), y: priceToY(ln.y3 + k * (pL - ln.x3)) };
-      const p2 = { x: dataXToScreenX(idxR), y: priceToY(ln.y3 + k * (idxR - ln.x3)) };
+      const bL = Math.max(i1, idxL), pL = Math.max(i3, idxL);   // 各自射线起点
+      const b1 = { x: dataXToScreenX(bL), y: priceToY(ln.y1 + k * (bL - i1)) };
+      const b2 = { x: dataXToScreenX(idxR), y: priceToY(ln.y1 + k * (idxR - i1)) };
+      const p1 = { x: dataXToScreenX(pL), y: priceToY(ln.y3 + k * (pL - i3)) };
+      const p2 = { x: dataXToScreenX(idxR), y: priceToY(ln.y3 + k * (idxR - i3)) };
       const dB = ptSegDist(mx, my, b1.x, b1.y, b2.x, b2.y);
       const dP = ptSegDist(mx, my, p1.x, p1.y, p2.x, p2.y);
       if (dB < 5 || dP < 5) return { line: ln, handle: 'body' };
       const wPx = Math.hypot(b2.x - p2.x, b2.y - p2.y);
       if (dB + dP <= wPx + 8) return { line: ln, handle: 'body' };
     } else if (ln.type === 'measure') {
-      const x1 = dataXToScreenX(ln.x1), y1 = priceToY(ln.y1);
-      const x2 = dataXToScreenX(ln.x2), y2 = priceToY(ln.y2);
+      const x1 = dataXToScreenX(lnIdx(ln, 'x1')), y1 = priceToY(ln.y1);
+      const x2 = dataXToScreenX(lnIdx(ln, 'x2')), y2 = priceToY(ln.y2);
       if (dist(mx, my, x1, y1) < 7) return { line: ln, handle: 'p1' };
       if (dist(mx, my, x2, y2) < 7) return { line: ln, handle: 'p2' };
       if (ptSegDist(mx, my, x1, y1, x2, y2) < 5) return { line: ln, handle: 'body' };
@@ -1842,21 +1873,21 @@ canvas.addEventListener('mousedown', e => {
     draw(); scheduleSessionSave(); exitToolMode(); return;
   }
   if (toolMode === 'trend') {
-    const dx = xToIdx(mx), price = yToPrice(my);
-    if (!drawingTrend) { drawingTrend = { x1: dx, y1: price }; draw(); }
+    const dx = xToIdx(mx), ts = barTs(dx), price = yToPrice(my);
+    if (!drawingTrend) { drawingTrend = { x1: ts, y1: price }; draw(); }
     else {
-      lines.push({ type: 'trend', x1: drawingTrend.x1, y1: drawingTrend.y1, x2: dx, y2: price });
+      lines.push({ type: 'trend', x1: drawingTrend.x1, y1: drawingTrend.y1, x2: ts, y2: price });
       selectedLine = lines[lines.length - 1];
       drawingTrend = null; draw(); scheduleSessionSave(); if (!continuousDraw) exitToolMode();   // 画完保存；非连画模式则退出
     }
     return;
   }
   if (toolMode === 'channel') {
-    const dx = xToIdx(mx), price = yToPrice(my);
-    if (!drawingChannel) drawingChannel = { phase: 1, x1: dx, y1: price };
-    else if (drawingChannel.phase === 1) { drawingChannel.x2 = dx; drawingChannel.y2 = price; drawingChannel.phase = 2; }
+    const dx = xToIdx(mx), ts = barTs(dx), price = yToPrice(my);
+    if (!drawingChannel) drawingChannel = { phase: 1, x1: ts, y1: price };
+    else if (drawingChannel.phase === 1) { drawingChannel.x2 = ts; drawingChannel.y2 = price; drawingChannel.phase = 2; }
     else {
-      lines.push({ type: 'channel', x1: drawingChannel.x1, y1: drawingChannel.y1, x2: drawingChannel.x2, y2: drawingChannel.y2, x3: dx, y3: price });
+      lines.push({ type: 'channel', x1: drawingChannel.x1, y1: drawingChannel.y1, x2: drawingChannel.x2, y2: drawingChannel.y2, x3: ts, y3: price });
       selectedLine = lines[lines.length - 1];
       drawingChannel = null; draw(); scheduleSessionSave(); if (!continuousDraw) exitToolMode();
     }
@@ -1864,10 +1895,10 @@ canvas.addEventListener('mousedown', e => {
     return;
   }
   if (toolMode === 'measure') {
-    const dx = xToIdx(mx), price = yToPrice(my);
-    if (!drawingMeasure) { drawingMeasure = { x1: dx, y1: price }; draw(); }
+    const dx = xToIdx(mx), ts = barTs(dx), price = yToPrice(my);
+    if (!drawingMeasure) { drawingMeasure = { x1: ts, y1: price }; draw(); }
     else {
-      lines.push({ type: 'measure', x1: drawingMeasure.x1, y1: drawingMeasure.y1, x2: dx, y2: price });
+      lines.push({ type: 'measure', x1: drawingMeasure.x1, y1: drawingMeasure.y1, x2: ts, y2: price });
       selectedLine = lines[lines.length - 1];
       drawingMeasure = null; draw(); scheduleSessionSave(); if (!continuousDraw) exitToolMode();
     }
@@ -1935,10 +1966,10 @@ canvas.addEventListener('mousemove', e => {
     if (ln.type === 'hline') {
       if (dragTarget.handle === 'body') ln.price = yToPrice(hover.y);
     } else if (ln.type === 'trend' || ln.type === 'measure' || ln.type === 'channel') {
-      const price = yToPrice(hover.y), idx = xToIdx(hover.x);
-      if (dragTarget.handle === 'p1') { ln.x1 = idx; ln.y1 = price; }
-      else if (dragTarget.handle === 'p2') { ln.x2 = idx; ln.y2 = price; }
-      else if (dragTarget.handle === 'p3') { ln.x3 = idx; ln.y3 = price; }
+      const price = yToPrice(hover.y), ts = barTs(xToIdx(hover.x));
+      if (dragTarget.handle === 'p1') { ln.x1 = ts; ln.y1 = price; }
+      else if (dragTarget.handle === 'p2') { ln.x2 = ts; ln.y2 = price; }
+      else if (dragTarget.handle === 'p3') { ln.x3 = ts; ln.y3 = price; }
     } else if (ln.type === 'trade') {
       if (dragTarget.handle === 'entry') {
         // 拖入场手柄 = 换入场K线：idx 指向光标所在K线，entry 铆钉其收盘
@@ -2178,7 +2209,7 @@ document.querySelectorAll('.tools button[data-tool]').forEach(b => {
 });
 document.getElementById('clearLines').addEventListener('click', () => {
   lines = []; selectedLine = null; drawingTrend = null; drawingMeasure = null; drawingChannel = null;
-  linesStore[sessionKey()] = []; saveSessionNow(); draw();
+  linesStore[lineKey()] = []; saveSessionNow(); draw();
 });
 // 盈亏比工具：开/关 + 多空方向 + 拖拽创建（按下定入场 → 拖出 TP/SL）
 document.getElementById('tradeEnter').addEventListener('click', () => {
