@@ -1,0 +1,5 @@
+# 每日更新产生的日志
+update.log
+
+# 本地 k--data 数据目录（若改用 sync_from_kdata.cjs）
+k--data/
