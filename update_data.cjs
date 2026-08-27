@@ -26,7 +26,7 @@ const SOURCE = (process.env.SOURCE || 'okx').toLowerCase();
 const DRY = process.env.DRY_RUN === '1';
 const BINANCE_BASE = (process.env.BINANCE_BASE || 'https://fapi.binance.com').replace(/\/+$/, '');
 
-const DATA_RE = /window\.BTCFUT_DATA=(\{[\s\S]*?\});<\/script>/;
+const DATA_RE = /window\.BTCFUT_DATA=(\{[\s\S]*?\})(?:;window\.BTCFUT_UPDATED="[^"]*")?;<\/script>/;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 let pass = 0, fail = 0;
