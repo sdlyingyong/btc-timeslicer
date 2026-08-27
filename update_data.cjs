@@ -1,19 +1,33 @@
-// 每日自动拉取币安 BTCUSDT 永续 15m K 线，追加到 index.html 的 window.BTCFUT_DATA 并重采样。
-// 用法: node update_data.cjs            # 拉取并写入 index.html（若今天已是最新则跳过）
+// 每日自动拉取 BTC 永续 15m K 线，追加到 index.html 的 window.BTCFUT_DATA 并重采样。
+// 用法: node update_data.cjs
 // 环境变量:
-//   BINANCE_BASE  币安 API 基址，默认 https://fapi.binance.com
-//                 国内被墙时可设为自己的反代，例如 https://你的反代/fapi
-//   DRY_RUN       设为 1 时只校验不写文件
+//   SOURCE       数据源: okx (默认, 国内可直连) | binance (需区域合规反代)
+//   BINANCE_BASE 仅 binance 用，API 基址，默认 https://fapi.binance.com
+//   HTTPS_PROXY  网络代理，默认尝试本机 127.0.0.1:10809
+//   DRY_RUN      设为 1 时只校验不写文件
+// 让 Node 的 fetch 走代理（Node24 需启动时设置 NODE_USE_ENV_PROXY，故必要时自重启）
+if (process.env.NODE_USE_ENV_PROXY !== '1') {
+  if (!process.env.HTTPS_PROXY && !process.env.https_proxy) {
+    process.env.HTTPS_PROXY = 'http://127.0.0.1:10809';
+    process.env.HTTP_PROXY = 'http://127.0.0.1:10809';
+  }
+  process.env.NODE_USE_ENV_PROXY = '1';
+  const { spawnSync } = require('child_process');
+  const r = spawnSync(process.execPath, process.argv.slice(1), { stdio: 'inherit', env: process.env });
+  process.exit(r.status == null ? 1 : r.status);
+}
+
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
 
 const REPO = __dirname;
 const HTML = path.join(REPO, 'index.html');
-const BASE = (process.env.BINANCE_BASE || 'https://fapi.binance.com').replace(/\/+$/, '');
+const SOURCE = (process.env.SOURCE || 'okx').toLowerCase();
 const DRY = process.env.DRY_RUN === '1';
+const BINANCE_BASE = (process.env.BINANCE_BASE || 'https://fapi.binance.com').replace(/\/+$/, '');
 
 const DATA_RE = /window\.BTCFUT_DATA=(\{[\s\S]*?\});<\/script>/;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 let pass = 0, fail = 0;
 function check(name, cond, extra) {
@@ -32,13 +46,61 @@ function resample15(bars, step) {
   return out;
 }
 
-async function fetchKlines(startTimeMs) {
-  const url = BASE + '/fapi/v1/klines?symbol=BTCUSDT&interval=15m&startTime=' + startTimeMs + '&limit=1500';
+async function fetchJson(url) {
   const res = await fetch(url, { signal: AbortSignal.timeout(30000) });
   if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + res.statusText + ' @ ' + url);
-  const rows = await res.json();
-  if (!Array.isArray(rows)) throw new Error('unexpected body: ' + JSON.stringify(rows).slice(0, 200));
-  return rows;
+  return res.json();
+}
+
+// 返回 [{tMin, o,h,l,c,v}, ...]（升序），仅含 tMin > oldLastT 的新增根
+async function fetchNew(source, oldLastT) {
+  const map = new Map();
+  let fetched = 0;
+
+  if (source === 'binance') {
+    let cursor = (oldLastT + 15) * 60000; // 下一根起始（ms）
+    const now = Date.now();
+    while (true) {
+      const url = BINANCE_BASE + '/fapi/v1/klines?symbol=BTCUSDT&interval=15m&startTime=' + cursor + '&limit=1500';
+      const rows = await fetchJson(url);
+      if (!Array.isArray(rows) || rows.length === 0) break;
+      for (const k of rows) {
+        const tMin = Math.floor(Number(k[0]) / 60000);
+        if (tMin <= oldLastT) continue;
+        map.set(tMin, [tMin, +k[1], +k[2], +k[3], +k[4], +k[5]]);
+        fetched++;
+      }
+      const lastClose = Number(rows[rows.length - 1][6]);
+      cursor = Number(rows[rows.length - 1][0]) + 1;
+      if (rows.length < 1500) break;
+      if (lastClose >= now - 15 * 60000) break;
+      await sleep(250);
+    }
+  } else if (source === 'okx') {
+    const instId = 'BTC-USDT-SWAP';
+    const base = 'https://www.okx.com/api/v5/market/history-candles?instId=' + instId + '&bar=15m&limit=100';
+    const boundary = (oldLastT + 15) * 60000;
+    let after = null;
+    while (true) {
+      const url = after ? base + '&after=' + after : base;
+      const body = await fetchJson(url);
+      const rows = body && body.data;
+      if (!Array.isArray(rows) || rows.length === 0) break;
+      for (const r of rows) {
+        const tMin = Math.floor(Number(r[0]) / 60000); // ts(ms)
+        if (tMin <= oldLastT) continue;
+        map.set(tMin, [tMin, +r[1], +r[2], +r[3], +r[4], +r[5]]); // vol=合约数, 近似 base 量
+        fetched++;
+      }
+      const oldestTs = Number(rows[rows.length - 1][0]);
+      if (oldestTs <= boundary) break;
+      after = oldestTs;
+      await sleep(200);
+    }
+  } else {
+    throw new Error('未知 SOURCE=' + source);
+  }
+  return { bars: [...map.values()].sort((a, b) => a[0] - b[0]), fetched };
 }
 
 async function main() {
@@ -52,37 +114,18 @@ async function main() {
 
   const old15 = old['15m'];
   const oldLastT = old15[old15.length - 1][0];
+  console.log('数据源=' + SOURCE + '  现有 15m 末根=' + new Date(oldLastT * 60000).toISOString() + '  共 ' + old15.length + ' 根');
 
-  // 以 t 为键重建 15m，便于对“进行中那根”做更新而非重复追加
-  const map = new Map();
-  for (const b of old15) map.set(b[0], b);
+  const { bars: inc, fetched } = await fetchNew(SOURCE, oldLastT);
+  check('获取到新根数', fetched >= 0, 'fetched=' + fetched);
 
-  let cursor = (oldLastT + 15) * 60000; // 下一根起始（ms）
-  const now = Date.now();
-  let fetched = 0;
-  while (true) {
-    const rows = await fetchKlines(cursor);
-    if (rows.length === 0) break;
-    for (const k of rows) {
-      const tMin = Math.floor(Number(k[0]) / 60000); // openTime(ms) -> UTC 分钟
-      if (tMin <= oldLastT) continue;
-      map.set(tMin, [tMin, +k[1], +k[2], +k[3], +k[4], +k[5]]);
-      fetched++;
-    }
-    const lastOpen = Number(rows[rows.length - 1][0]);
-    const lastClose = Number(rows[rows.length - 1][6]);
-    cursor = lastOpen + 1;
-    if (rows.length < 1500) break;               // 已追到最新
-    if (lastClose >= now - 15 * 60000) break;    // 末根已覆盖到现在
-    await new Promise(r => setTimeout(r, 250));  // 礼貌限速
-  }
-  check('从币安获取到新根数', fetched >= 0, 'fetched=' + fetched);
-
+  // 合并（以 t 为键，支持更新进行中那根）
+  const map = new Map(old15.map(b => [b[0], b]));
+  for (const b of inc) map.set(b[0], b);
   const new15 = [...map.values()].sort((a, b) => a[0] - b[0]);
   const added = new15.length - old15.length;
   check('15m 总根数增加', added >= 0, old15.length + ' -> ' + new15.length);
 
-  // 重采样
   const newData = {
     '15m': new15,
     '1h': resample15(new15, 60),
@@ -91,14 +134,12 @@ async function main() {
   };
 
   // 校验
-  // 1) 15m 时间连续（间隔=15），允许末尾“进行中那根”与上一根间隔不足
   let cont = true, gapAt = -1;
   for (let i = 1; i < new15.length; i++) {
     if (new15[i][0] - new15[i - 1][0] !== 15) { cont = false; gapAt = i; break; }
   }
   check('15m 时间连续（间隔=15）', cont, gapAt >= 0 ? 'gap@' + gapAt + ' ' + new Date(new15[gapAt][0] * 60000).toISOString() : '');
 
-  // 2) 各周期严格递增
   for (const p of ['15m', '1h', '4h', '1d']) {
     const a = newData[p];
     let mono = true;
@@ -106,7 +147,6 @@ async function main() {
     check(p + ' 时间戳严格递增', mono);
   }
 
-  // 3) 历史段不被篡改：15m 前缀完全相等；1h/4h/1d 末根为 stub，允许最后一根不同
   const histCheck = (p, allowLast) => {
     const a = old[p], b = newData[p];
     const n = allowLast ? a.length - 1 : a.length;
@@ -131,7 +171,6 @@ async function main() {
 
   if (DRY) { console.log('(DRY_RUN 不写文件)'); console.log('校验结果: ' + pass + ' PASS / ' + fail + ' FAIL'); process.exit(0); }
 
-  // 写回 index.html
   const today = new Date().toISOString().slice(0, 10);
   const patched = html.replace(DATA_RE,
     'window.BTCFUT_DATA=' + JSON.stringify(newData) + ';window.BTCFUT_UPDATED="' + today + '";</script>');
