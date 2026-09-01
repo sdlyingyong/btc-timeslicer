@@ -811,11 +811,11 @@ date label: taTop + 26   // 日期标签基线 = H - PAD_B + 28
 
 ## 13.10 完成定义
 
-- [ ] PRD §13 写完（含验收标准 + 完成定义）
-- [ ] 改 `index.html`：`PAD_B` 与光标 `ly` 两处
-- [ ] `tests/regression.test.cjs` 全过
+- [x] PRD §13 写完（含验收标准 + 完成定义）
+- [x] 改 `index.html`：`PAD_B` 与光标 `ly` 两处
+- [x] `tests/regression.test.cjs` 全过
 - [ ] mac 手动验收 E1–E6
-- [ ] 提交并推送，GitHub Pages 线上验证
+- [x] 提交并推送，GitHub Pages 线上验证（commit `1ab8b3b`）
 
 # 附：§14 本次修改 — 缩放降速 + 平移时 VOL 柱子不再乱跳
 
@@ -1035,7 +1035,7 @@ volNormSmooth = 0;   // §14：切换周期/标的后重新吸附，避免跨量
 - [x] 改 `index.html`：缩放常量 + 钳制 + VOL 平滑（含 `setView` 重置）
 - [x] `tests/regression.test.cjs` 新增断言并全过（114 PASS / 0 FAIL）
 - [ ] mac 手动验收 E1–E9
-- [ ] 提交并推送，GitHub Pages 线上验证
+- [x] 提交并推送，GitHub Pages 线上验证（commit `e8247a5`）
 
 ### 附：顺带修复（本次一并完成）
 
