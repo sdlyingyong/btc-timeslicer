@@ -257,11 +257,12 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     const vc2 = API.getViewCount();
     check('滚轮向下=缩小（viewCount 增大）', vc2 > vc1, vc1 + ' -> ' + vc2);
 
-    // §17 锚定不变量：单次缩放后「右边缘恒 = len（最新一根，贴右框；不露未来空白）」
+    // §17 锚定不变量：单次缩放「右边缘保持」（在屏钉 len / 离屏锚当前右边缘，均不跳变）
+    const edgeBefore17 = API.getViewStart() + API.getViewCount();
     wheel(-120);
     const edgeAfter17 = API.getViewStart() + API.getViewCount();
-    check('§17 缩放后右边缘锚定到最新一根(len)', Math.abs(edgeAfter17 - len) <= 1e-6,
-      'edge ' + edgeAfter17.toFixed(1) + ' vs len ' + len);
+    check('§17 单次缩放右边缘保持（不跳变）', Math.abs(edgeAfter17 - edgeBefore17) <= 0.5,
+      'edgeBefore=' + edgeBefore17.toFixed(1) + ' edgeAfter=' + edgeAfter17.toFixed(1));
 
     // 幅度参与换算：滚 2 格（-240）≈ 数学期望 viewCount × ZOOM_SENSITIVITY^-2（连续而非固定步进）
     // §14：ZOOM_SENSITIVITY 由 1.15 降为 1.08（缩放降速），期望值同步
@@ -305,37 +306,42 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
       'vs=' + API.getViewStart().toFixed(0) + ' vc=' + API.getViewCount());
   }
 
-  // ============ 5.5b §17 缩放锚定最新K线（不露未来/缩到底停止） ============
+  // ============ 5.5b §17 缩放锚定（最新在屏→钉最新；最新离屏→锚当前右边缘） ============
   {
     const len = API.dataLen();
 
-    // E1：放大与缩小后，右边缘恒 = len（最新K线贴右框，不露右侧未来/空白）
-    for (let i = 0; i < 10; i++) wheel(-5000);   // 放大到最小视图
-    check('§17 E1 放大后右边缘=len', Math.abs((API.getViewStart() + API.getViewCount()) - len) <= 1e-6,
+    // 场景1（最新在屏）：默认全量/最新贴右，任意缩放右边缘恒 = len（不露未来空白）
+    for (let i = 0; i < 10; i++) wheel(-5000);   // 放大到最小（最新在屏）
+    check('§17 最新在屏·放大后右边缘=len', Math.abs((API.getViewStart() + API.getViewCount()) - len) <= 1e-6,
       'edge=' + (API.getViewStart() + API.getViewCount()));
     for (let i = 0; i < 10; i++) wheel(5000);    // 缩小
-    check('§17 E1 缩小后右边缘=len', Math.abs((API.getViewStart() + API.getViewCount()) - len) <= 1e-6,
+    check('§17 最新在屏·缩小后右边缘=len', Math.abs((API.getViewStart() + API.getViewCount()) - len) <= 1e-6,
       'edge=' + (API.getViewStart() + API.getViewCount()));
 
-    // E2：先缩小到最小（制造平移空间），再平移到历史（看更早），再缩放，右边缘应回到 len（最新K线重新贴右框）
-    for (let i = 0; i < 10; i++) wheel(-5000);   // 放大到最小视图（vc=20，留出平移空间）
-    wheel(0, -10000);                            // 左滑到历史侧（viewStart 远离末根）
-    check('§17 E2 前置：已平移到历史侧(vs>0)', API.getViewStart() > 0, 'vs=' + API.getViewStart());
-    wheel(-240);                                // 在任意历史位置放大
-    check('§17 E2 历史位置缩放后右边缘=len', Math.abs((API.getViewStart() + API.getViewCount()) - len) <= 1e-6,
-      'edge=' + (API.getViewStart() + API.getViewCount()));
-    for (let i = 0; i < 40; i++) wheel(120);    // 持续缩小
-    check('§17 E2 持续缩小后右边缘=len', Math.abs((API.getViewStart() + API.getViewCount()) - len) <= 1e-6,
-      'edge=' + (API.getViewStart() + API.getViewCount()));
+    // 场景2（最新离屏）：放大制造平移空间 → 平移到历史（最新离开屏幕）→ 缩放锚定当前右边缘（不拉回最新）
+    for (let i = 0; i < 10; i++) wheel(-5000);   // 放大到最小（vc 小，留出平移空间）
+    wheel(0, -10000);                            // 左滑到历史侧（最新离开屏幕）
+    const curRight = API.getViewStart() + API.getViewCount();
+    check('§17 离屏前置：最新已离开屏幕(curRight<len)', curRight < len,
+      'curRight=' + curRight.toFixed(1) + ' len=' + len);
+    const beforeEdge = API.getViewStart() + API.getViewCount();
+    wheel(-120);                                // 在离屏历史位置放大
+    const afterEdge = API.getViewStart() + API.getViewCount();
+    check('§17 离屏·单次缩放右边缘保持(不拉回最新)',
+      Math.abs(afterEdge - beforeEdge) <= 1e-6 && afterEdge < len,
+      'before=' + beforeEdge.toFixed(1) + ' after=' + afterEdge.toFixed(1));
+    check('§17 离屏·最新仍不在屏(afterEdge<len)', afterEdge < len, 'afterEdge=' + afterEdge.toFixed(1));
 
-    // E3：极端缩小 → 全量视图（vc=len, viewStart=0），自动停止（不露未来）
+    // 场景3（极端缩小→全量）：无论是否在屏，缩到极限都 = 全量（vc=len, vs=0, edge=len）
     for (let i = 0; i < 60; i++) wheel(5000);
-    check('§17 E3 最小缩放=全量(viewCount=len)', Math.abs(API.getViewCount() - len) <= 1,
+    check('§17 极端缩小=全量(viewCount=len)', Math.abs(API.getViewCount() - len) <= 1,
       'vc=' + API.getViewCount() + ' len=' + len);
-    check('§17 E3 全量时viewStart=0', API.getViewStart() === 0, 'vs=' + API.getViewStart());
+    check('§17 全量时viewStart=0', API.getViewStart() === 0, 'vs=' + API.getViewStart());
+    check('§17 全量时右边缘=len', Math.abs((API.getViewStart() + API.getViewCount()) - len) <= 1e-6,
+      'edge=' + (API.getViewStart() + API.getViewCount()));
 
-    // E4：右边缘永不超出 len（绝不露出未来/空白区）
-    check('§17 E4 右边缘永不超出len', (API.getViewStart() + API.getViewCount()) <= len + 1e-6,
+    // 场景4（不露未来）：任何状态下右边缘永不超出 len
+    check('§17 右边缘永不超出len', (API.getViewStart() + API.getViewCount()) <= len + 1e-6,
       'edge=' + (API.getViewStart() + API.getViewCount()));
   }
 
@@ -464,15 +470,15 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
 
   // ============ 5.9 缩放右边缘严格锚定（PRD §12：右侧价格贴框稳定） ============
   {
-    // 场景1：小缩放（bkt=1）单次缩放后，右边缘锚定到最新一根（len），偏差 ≤ 0.5 根
-    // （§17：缩放始终以 len 为右锚点，故无论是否先平移，缩放后右边缘≡len）
+    // 场景1：单次缩放右边缘应保持稳定（偏差 ≤ 0.5 根）。
+    // §17：在屏(含最新)锚定 len、离屏锚定当前右边缘——两种情形下单次缩放都不跳变。
     for (let i = 0; i < 10; i++) wheel(-5000); // 放大到最小
-    wheel(0, -10000);                          // 左滑到中间（留出缩放空间）
+    wheel(0, -10000);                          // 左滑到中间（留出缩放空间，使最新离屏）
     const rightA = API.getViewStart() + API.getViewCount();
-    wheel(-120); // 放大一格（viewCount 减小，右边缘应锚定到 len）
+    wheel(-120); // 放大一格（viewCount 减小，右边缘应锚定不变）
     const rightB = API.getViewStart() + API.getViewCount();
-    check('小缩放右边缘锚定到最新一根(len)', Math.abs(rightB - API.dataLen()) <= 0.5,
-      'edgeBefore=' + rightA.toFixed(3) + ' edgeAfter=' + rightB.toFixed(3) + ' len=' + API.dataLen());
+    check('小缩放右边缘稳定（偏差≤0.5）', Math.abs(rightA - rightB) <= 0.5,
+      'edgeBefore=' + rightA.toFixed(3) + ' edgeAfter=' + rightB.toFixed(3));
 
     // 场景2（核心）：从全量（viewCount=len，bkt>1）开始连续放大，
     // 右边缘必须恒锚定（当前实现桶对齐量化在奇数 viewStart 时破坏锚定）
