@@ -77,12 +77,15 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     getDragTarget: () => dragTarget, getDragStart: () => dragStart, getDrag: () => drag,
     getSelected: () => selectedLine, getContinuousDraw: () => continuousDraw, getScale: () => SCALE,
     getPanRubber: () => panRubber, getLastWheelAt: () => lastWheelAt,
+    // §14 缩放降速 + VOL 平滑
+    getZoomSensitivity: () => ZOOM_SENSITIVITY, getZoomMaxPerFrame: () => ZOOM_MAX_PER_FRAME,
+    getVolNormSmooth: () => volNormSmooth, setVolNormSmooth: v => { volNormSmooth = v; },
     setTool: t => { toolMode = t; },
     setContinuousDraw: b => { continuousDraw = b; },
     setTradeMode: b => { tradeMode = b; },
     hitTest, dataXToScreenX, priceToY, xToIdx, yToPrice, closeAt, dataLen,
     getTradePlan, exitToolMode,
-    findIdxSync, lnIdx, barTs,
+    findIdxSync, lnIdx, barTs, draw,
     clearLines: () => { lines = []; linesStore[lineKey()] = []; saveSessionNow(); },
     setView, getCur: () => cur, getRightTs: () => rightTs,
     parseDateInput
@@ -108,7 +111,14 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
   await sleep(30); // 等待初始化 setView 完成
 
   // ============ 0. 环境 ============
-  check('数据加载：15m 根数 243961', DATA['15m'].length === 243961, '' + DATA['15m'].length);
+  // 注：数据每日自动更新（update_data.cjs），不可硬编码根数/末根快照，否则每轮同步后必然 FAIL。
+  // 改为「量级 + 周期比例 + 末根有效性」的持久性校验，仍能捕捉数据被清空/损坏。
+  const L15 = DATA['15m'].length;
+  check('数据加载：15m 根数量级（>24万）', L15 > 240000, '' + L15);
+  check('数据加载：周期比例 15m:1h ≈ 4:1', Math.abs(L15 / DATA['1h'].length - 4) < 0.2,
+    (L15 / DATA['1h'].length).toFixed(3));
+  check('数据加载：周期比例 15m:1d ≈ 96:1', Math.abs(L15 / DATA['1d'].length - 96) < 5,
+    (L15 / DATA['1d'].length).toFixed(2));
   check('SCALE 已建立', API.getScale().plotW > 0 && API.getScale().xW > 0, 'xW=' + API.getScale().xW.toFixed(3));
   check('默认周期 1d、工具 cursor', API.getTool() === 'cursor');
 
@@ -256,12 +266,28 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     check('单次缩放右边缘锚定（容差桶对齐）', Math.abs(eX - eY) <= bktX + 2,
       'edge ' + eX.toFixed(1) + ' vs ' + eY.toFixed(1));
 
-    // 幅度参与换算：滚 2 格（-240）≈ 数学期望 viewCount × 1.15^-2（连续而非固定步进）
+    // 幅度参与换算：滚 2 格（-240）≈ 数学期望 viewCount × ZOOM_SENSITIVITY^-2（连续而非固定步进）
+    // §14：ZOOM_SENSITIVITY 由 1.15 降为 1.08（缩放降速），期望值同步
     const vcS = API.getViewCount();
     wheel(-240);
     const vcT = API.getViewCount();
-    const expect = Math.round(vcS * Math.pow(1.15, -2));
-    check('幅度参与换算（2格 ≈ ×1.15^-2）', Math.abs(vcT - expect) <= 2, vcS + ' -> ' + vcT + ' (期望 ' + expect + ')');
+    const expect = Math.round(vcS * Math.pow(API.getZoomSensitivity(), -2));
+    check('幅度参与换算（2格 ≈ ×底数^-2）', Math.abs(vcT - expect) <= 2, vcS + ' -> ' + vcT + ' (期望 ' + expect + ')');
+
+    // §14 缩放降速：灵敏度应为 1.08（原 1.15），保证"慢点"生效
+    check('§14 缩放灵敏度 = 1.08（降速生效）', Math.abs(API.getZoomSensitivity() - 1.08) < 1e-9,
+      'ZOOM_SENSITIVITY=' + API.getZoomSensitivity());
+
+    // §14 单帧钳制：单帧超量（10 格）应被钳到 ZOOM_MAX_PER_FRAME=3 格，超出部分丢弃
+    {
+      const vcA = API.getViewCount();
+      wheel(-1200);   // = -10 格
+      const vcB = API.getViewCount();
+      const capRatio = Math.pow(API.getZoomSensitivity(), -API.getZoomMaxPerFrame());
+      const gotRatio = vcB / vcA;
+      check('§14 单帧缩放钳制（10格→3格）', Math.abs(gotRatio - capRatio) < 0.02,
+        '实际 ×' + gotRatio.toFixed(4) + ' 期望 ×' + capRatio.toFixed(4));
+    }
 
     // 小幅滚动：1/6 格（-20）也生效（连续缩放），且变化量明显小于整格
     const vcU = API.getViewCount();
@@ -444,6 +470,67 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     up(); move(-1, -1);
   }
 
+  // ============ 6b. §14 VOL 归一化基准平滑（消除平移时整屏柱子跳变） ============
+  {
+    await API.setView(null, '1d');
+    for (let i = 0; i < 6; i++) wheel(-120);   // 放大到适中窗口
+    wheel(0, -3000);                            // 平移到历史某处
+    API.draw();
+    const base = API.getVolNormSmooth();
+    check('§14 VOL 基准已建立', base > 0, 'volNormSmooth=' + base.toFixed(0));
+
+    // 静止：连续 draw 不应漂移（已收敛到真实 vmax）
+    const seq = [];
+    for (let i = 0; i < 5; i++) { API.draw(); seq.push(API.getVolNormSmooth()); }
+    check('§14 静止时 VOL 基准收敛（不漂移）', seq.every(v => Math.abs(v - base) <= base * 1e-3),
+      seq.map(v => v.toFixed(0)).join(' → '));
+
+    // 缓动生效性：把基准手动偏离 1.5x（< VMAX_SNAP_RATIO=3，走缓动分支而非吸附）。
+    // 注意：mock 的 rAF 是同步的（f => f()），draw() 内 redrawSoon() 会递归跑完整段缓动，
+    // 因此这里临时「挂起」rAF 以观察单帧步进比例，测完恢复并放行 pending 回调复位状态。
+    {
+      const realRaf = global.requestAnimationFrame;
+      let pending = null;
+      global.requestAnimationFrame = f => { pending = f; return 0; };
+      try {
+        const cur = API.getVolNormSmooth();
+        const off = cur * 1.5;
+        API.setVolNormSmooth(off);
+        API.draw(); const a1 = API.getVolNormSmooth();
+        const expect1 = off + (cur - off) * 0.18;   // 缓动一步 ≈ cur * 1.41
+        check('§14 VOL 基准缓动（单帧走 18%，非瞬跳）',
+          Math.abs(a1 - expect1) <= Math.max(1e-6, cur * 1e-3) && a1 < off && a1 > cur,
+          'off=' + off.toFixed(0) + ' → ' + a1.toFixed(0) + ' (期望≈' + expect1.toFixed(0) + ') target=' + cur.toFixed(0));
+        // 再挂起帧：继续靠近且步长递减
+        API.draw(); const a2 = API.getVolNormSmooth();
+        check('§14 VOL 基准缓动（逐帧靠近且步长递减）', a2 < a1 && a2 > cur && (a1 - a2) < (off - a1),
+          a1.toFixed(0) + ' → ' + a2.toFixed(0));
+      } finally {
+        global.requestAnimationFrame = realRaf;
+        if (pending) pending();   // 复位 drawScheduled
+      }
+    }
+
+    // 缓动收敛：持续 draw 直到稳定，最终应回到真实窗口 vmax
+    let prev = API.getVolNormSmooth(), stable = 0;
+    for (let i = 0; i < 80 && stable < 3; i++) {
+      API.draw();
+      const now = API.getVolNormSmooth();
+      if (Math.abs(now - prev) <= Math.max(1e-6, now * 1e-3)) stable++; else stable = 0;
+      prev = now;
+    }
+    check('§14 VOL 基准最终收敛', stable >= 3, 'final=' + prev.toFixed(0));
+
+    // 切换周期应「直接吸附」：1d（百万级）→ 15m（千级）量纲差 >> 3x，
+    // 第一帧就该到位，不出现跨量纲长时间爬升
+    await API.setView(null, '15m');
+    API.draw(); const sw1 = API.getVolNormSmooth();
+    API.draw(); const sw2 = API.getVolNormSmooth();
+    check('§14 切换周期直接吸附（不缓动爬升）',
+      Math.abs(sw1 - sw2) <= Math.max(1e-6, sw1 * 1e-3),
+      '15m 首帧=' + sw1.toFixed(0) + ' 次帧=' + sw2.toFixed(0));
+  }
+
   // ============ 7. 盈亏比 ============
   {
     API.setTradeMode(true);
@@ -503,8 +590,12 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
       for (let i = 1; i < DATA[p].length; i++) if (DATA[p][i][0] <= DATA[p][i - 1][0]) { mono = false; break; }
       check(p + ' 时间戳递增', mono);
     }
-    check('15m 末根 = 2026-08-23 23:45',
-      DATA['15m'][DATA['15m'].length - 1][0] === Math.floor(Date.UTC(2026, 7, 23, 23, 45) / 60000));
+    // 末根：15 分钟对齐 + 落在合理时间窗（数据起点 2019-09-08 ~ 现在+1天），不硬编码快照
+    const lastT = DATA['15m'][DATA['15m'].length - 1][0];
+    check('15m 末根 15 分钟对齐', lastT % 15 === 0, 'ts=' + lastT);
+    check('15m 末根时间落在合理区间',
+      lastT * 60000 > Date.UTC(2019, 8, 8) && lastT * 60000 <= Date.now() + 86400000,
+      new Date(lastT * 60000).toISOString());
   }
 
   // ============ 11. 持久化 ============

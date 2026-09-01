@@ -835,6 +835,12 @@ async function fetchChunk(meta, ci) {
   return arr;
 }
 
+// §14 成交量归一化基准平滑：消除平移时单根爆量K线进出可视窗口导致的整屏柱子瞬时跳变。
+// 根因：vmax 取「当前可视窗口」最大值，平移时爆量K线进出 → vmax 突变数倍（实测 1d 最大单步 2431%）→ 全屏柱子同时反向缩放。
+const VMAX_SMOOTH = 0.18;      // 缓动系数（0=不跟随，1=瞬时跳变）；0.18 @60fps ≈ 0.39s 收敛
+const VMAX_SNAP_RATIO = 3;     // 目标/当前偏差超过 3 倍时直接吸附（切换周期/大幅缩放不拖沓）
+let volNormSmooth = 0;         // 平滑后的归一化基准（跨帧保持）
+
 function redrawSoon() {
   if (drawScheduled) return;
   drawScheduled = true;
@@ -1044,6 +1050,7 @@ function showGoToDialog() {
 async function setView(sym, period) {
   for (const k in emaFull) delete emaFull[k];
   for (const k in emaFullLen) delete emaFullLen[k];
+  volNormSmooth = 0;   // §14：切换标的/周期后重新吸附 VOL 基准，避免跨量纲长时间爬升
   if (DS) {   // 离开前保存当前画线 + 浏览位置
     linesStore[lineKey()] = lines;
     viewStore[sessionKey()] = { viewStart: Math.floor(viewStart), viewCount: viewCount };
@@ -1333,17 +1340,12 @@ function draw() {
 
   // 成交量（大缩放按像素桶求和）
   if (vmax > 0) {
-    if (xW >= 1) {
-      for (let i = s; i < e; i++) {
-        const r = getBar(i);
-        if (!r) continue;
-        const v = +r[5], o = +r[1], c = +r[4];
-        ctx.fillStyle = c >= o ? 'rgba(239,77,77,0.55)' : 'rgba(47,191,113,0.55)';
-        const x = xI(i - s), vh = (v / vmax) * (volBot - volTop);
-        ctx.fillRect(x - cw / 2, volBot - vh, cw, vh);
-      }
-    } else {
-      const sums = new Float64Array(Wpx), os = new Float64Array(Wpx), cs = new Float64Array(Wpx), gotB = new Uint8Array(Wpx);
+    // §14：先求本帧「归一化基准」，再统一平滑，两个分支共用 vNorm
+    //      （根因：平移时爆量K线进出窗口 → 基准突变数倍 → 全屏柱子同时反向缩放）
+    let sums = null, os = null, cs = null, gotB = null;
+    let targetNorm = vmax;                     // 小缩放（xW>=1）：单根最大值
+    if (xW < 1) {
+      sums = new Float64Array(Wpx); os = new Float64Array(Wpx); cs = new Float64Array(Wpx); gotB = new Uint8Array(Wpx);
       let maxSum = 0;
       for (let x = 0; x < Wpx; x++) {
         const { i0, i1 } = bucketOf(x);
@@ -1360,13 +1362,36 @@ function draw() {
         sums[x] = sum; os[x] = o; cs[x] = c; gotB[x] = 1;
         if (sum > maxSum) maxSum = sum;
       }
-      if (maxSum > 0) {
-        for (let x = 0; x < Wpx; x++) {
-          if (!gotB[x]) continue;
-          ctx.fillStyle = cs[x] >= os[x] ? 'rgba(239,77,77,0.55)' : 'rgba(47,191,113,0.55)';
-          const vh = Math.min((sums[x] / maxSum) * (volBot - volTop), volBot - volTop);
-          ctx.fillRect(PAD_L + x, volBot - vh, 1, vh);
-        }
+      targetNorm = maxSum;                     // 大缩放：桶求和最大值
+    }
+    // 指数缓动平滑；首次 / 偏差超 3 倍（切换周期、大幅缩放）直接吸附，避免长时间爬升
+    if (volNormSmooth <= 0 || targetNorm <= 0 ||
+        targetNorm / volNormSmooth > VMAX_SNAP_RATIO ||
+        volNormSmooth / targetNorm > VMAX_SNAP_RATIO) {
+      volNormSmooth = targetNorm;
+    } else {
+      volNormSmooth += (targetNorm - volNormSmooth) * VMAX_SMOOTH;
+    }
+    const vNorm = volNormSmooth > 0 ? volNormSmooth : targetNorm;
+    // 缓动未收敛则续帧（保证静止时收敛到真实基准，偏差阈值 0.1%）
+    if (targetNorm > 0 && Math.abs(targetNorm - volNormSmooth) > targetNorm * 1e-3) redrawSoon();
+
+    if (xW >= 1) {
+      for (let i = s; i < e; i++) {
+        const r = getBar(i);
+        if (!r) continue;
+        const v = +r[5], o = +r[1], c = +r[4];
+        ctx.fillStyle = c >= o ? 'rgba(239,77,77,0.55)' : 'rgba(47,191,113,0.55)';
+        // §14：改用平滑基准 vNorm，并 clamp（缓动过程中 v 可能短暂超过 vNorm）
+        const x = xI(i - s), vh = Math.min((v / vNorm) * (volBot - volTop), volBot - volTop);
+        ctx.fillRect(x - cw / 2, volBot - vh, cw, vh);
+      }
+    } else if (targetNorm > 0) {
+      for (let x = 0; x < Wpx; x++) {
+        if (!gotB[x]) continue;
+        ctx.fillStyle = cs[x] >= os[x] ? 'rgba(239,77,77,0.55)' : 'rgba(47,191,113,0.55)';
+        const vh = Math.min((sums[x] / vNorm) * (volBot - volTop), volBot - volTop);
+        ctx.fillRect(PAD_L + x, volBot - vh, 1, vh);
       }
     }
     ctx.fillStyle = '#6b7689'; ctx.textAlign = 'left';
@@ -2095,8 +2120,10 @@ window.addEventListener('keydown', e => {
 // 解决 macOS 触控板缩放过于灵敏：高频小 delta 事件先累积，帧内一次性换算，
 // 缩放幅度与滚动量成正比（连续可精细控制），而非每事件固定 15% 步进。
 // §9 扩展：deltaX（触控板双指横向滑动）→ 平移视图（免按住拖拽，mac/win 兼容）。
-const ZOOM_SENSITIVITY = 1.15;  // 指数底数：一格标准滚动(120)的缩放倍数；越小越"钝"
+// §14 缩放降速：1.15 -> 1.08（每格缩放幅度降至约 55%），越小心越钝
+const ZOOM_SENSITIVITY = 1.08;  // 指数底数：一格标准滚动(120)的缩放倍数；越小越"钝"
 const DELTA_NORM = 120;         // 鼠标一格的标准 delta，用于归一化触控板/鼠标
+const ZOOM_MAX_PER_FRAME = 3;   // §14：单帧最大缩放格数（≈26% @1.08），超出部分丢弃（防触控板单帧暴冲）
 let wheelAccum = 0;             // delta 累积器（像素归一化单位）
 let panAccum = 0;               // deltaX 平移累积器（像素，与拖拽一致）
 let wheelScheduled = false;     // rAF 是否已排程（节流）
@@ -2175,8 +2202,11 @@ canvas.addEventListener('wheel', e => {
   wheelScheduled = true;
   requestAnimationFrame(() => {
     wheelScheduled = false;
-    const d = wheelAccum; wheelAccum = 0;     // 取帧内累积量
+    let d = wheelAccum; wheelAccum = 0;     // 取帧内累积量
     const px = panAccum; panAccum = 0;
+    // §14 单帧钳制：触控板猛滑/快速拨轮会在单帧累积多格，钳制避免视图瞬间翻倍。
+    // 超出部分直接丢弃（不结转下一帧），避免松手后惯性继续缩放。
+    d = Math.max(-ZOOM_MAX_PER_FRAME, Math.min(ZOOM_MAX_PER_FRAME, d));
     if (d !== 0) applyZoom(d);
     if (px !== 0) applyPan(px);
   });
