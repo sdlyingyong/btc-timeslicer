@@ -2149,10 +2149,12 @@ function applyZoom(delta) {
   const factor = Math.pow(ZOOM_SENSITIVITY, delta);
   let nc = Math.round(viewCount * factor);
   nc = Math.max(20, Math.min(len, nc));
-  const rightEdge = viewStart + viewCount;   // 缩放前右边缘作为锚点（=最新K线侧，固定不动）
+  // §17：缩放始终以「最新一根（末根 = len）」为右边缘锚点——最新K线恒贴右框，
+  //       不露右侧未来/空白区；缩到全量(vc=len, viewStart=0)即自然停止（无需额外 clamp）。
+  const rightEdge = len;
   viewCount = nc;
-  // 缩放只改变左侧可见历史量，右侧（最新K线）始终钉住，避免露出右侧未来空白
-  viewStart = Math.max(0, Math.min(len - viewCount, rightEdge - viewCount));
+  // 右侧（最新K线）始终钉住，避免露出右侧未来空白；缩到全量时 viewStart=0 自动到底
+  viewStart = Math.max(0, Math.min(len - viewCount, rightEdge - viewCount));   // = len - viewCount
   // §12 桶对齐保护：量化 viewStart 到桶边界（防柱子跳），但仅在
   // 量化后右边缘**严格不变**时才采用（右侧贴框优先，偏差 0）。
   const bkt = Math.max(1, Math.round(viewCount / Math.max(1, plotW)));

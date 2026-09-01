@@ -1264,6 +1264,123 @@ const bucketOf = (x) => {
 - [x] 改 `index.html`：`bucketOf` 连续化
 - [x] `tests/regression.test.cjs` 全过（114 PASS / 0 FAIL 保持）
 - [ ] mac 手动验收 E1–E7
+- [x] 提交并推送（commit `d5e767e` → `origin/main`，`git ls-remote` 确认远端 = 本地）；GitHub Pages 自动部署，curl 确认线上含 `vs0 = viewStart` / `VMAX_SMOOTH`、`BTCFUT_DATA` 15m 244280 根，部署成功
+
+# 附：§17 本次修改 — 缩放时最新一根恒贴右边缘（不露未来空白、缩到全量即停）
+
+版本：v1.11 追加 ｜ 日期：2026-09-01 ｜ 状态：待评审
+
+## 17.1 背景与需求
+
+用户反馈：**缩放时希望最新一根 K 线固定（贴右边缘），不要露出它"之后"的区域（未来/空白），
+并且缩小到不能再缩（显示全部数据）就停止。**
+
+## 17.2 根因分析
+
+`applyZoom`（index.html line 2144）当前锚点是**当前右边缘**：
+
+```js
+const rightEdge = viewStart + viewCount;   // 缩放前右边缘作为锚点（=最新K线侧，固定不动）
+viewCount = nc;
+viewStart = Math.max(0, Math.min(len - viewCount, rightEdge - viewCount));
+```
+
+§12 的注释写明意图是"右侧（最新K线）始终钉住，避免露出右侧未来空白"，但实现用的是
+`viewStart + viewCount`（**当前**右边缘），只有当你本来就停在最新时它才等于最新；一旦**先平移到历史区间再缩放**，锚点就是你当时的右边缘，最新一根始终在屏幕右侧之外、回不来。
+
+Node 仿真（`/tmp/zoom_sim.cjs`，真参数）结论：
+
+| 场景 | 起始 | 缩小若干次后 rightEdge | 最新在右边缘 |
+|---|---|---|---|
+| A：默认（最新已贴右） | vs=len-200, vc=200 | 恒 = `len` ✅ | 是 |
+| B：平移到历史 vs=1000 | vs=1000, vc=200 | 恒 = `1200`（旧右边缘）❌ | 否（最新在屏外右侧） |
+| C：默认放大 | vs=len-200, vc=200 | 恒 = `len` ✅ | 是 |
+
+即：**停在最新时一切正常；一旦平移过，缩放锚定在旧位置，最新回不来**——正是用户感知到的"最新没固定"。
+
+| # | 根因 | 说明 |
+|---|------|------|
+| R1 | **缩放锚点用"当前右边缘"而非"最新一根"** | `rightEdge = viewStart + viewCount` 在平移态锚定到旧位置，最新 K 线无法在缩放时回到右边缘 |
+| R2 | **§12 注释意图未落到实现** | 注释要"最新K线始终钉住"，实现只钉住了"你当时所在位置的右边缘" |
+
+## 17.3 目标
+
+1. 任何缩放（放大/缩小）后，**最新一根 K 线恒贴在右边缘**
+2. **绝不露出最新一根右侧的未来/空白区**（rightEdge ≤ `len`）
+3. 缩小到全量（`viewCount = len`、`viewStart = 0`）即停止，不再继续放大右侧空白
+4. 平移（不缩放）仍可自由看历史，仅缩放操作触发"钉最新"语义
+5. 缩放灵敏度（§14）、VOL 平滑（§14）、辅助线裁剪（§15）、成交量连续滑动（§16）全部不受影响
+
+## 17.4 方案设计
+
+把 `applyZoom` 的锚点从"当前右边缘"改为"最新一根（末根 `len`）"：
+
+```js
+// §17：缩放始终以「最新一根（末根 = len）」为右边缘锚点——最新K线恒贴右框，
+//       不露右侧未来/空白区；缩到全量(vc=len, viewStart=0)即停止
+const rightEdge = len;
+viewCount = nc;
+viewStart = Math.max(0, Math.min(len - viewCount, rightEdge - viewCount));   // = len - viewCount
+```
+
+| 项 | 策略 |
+|---|---|
+| 锚点 | `viewStart + viewCount` → `len`（最新一根） |
+| 结果 | 缩放后 `viewStart = len - viewCount`，`rightEdge = len` 恒成立（最新恒贴右框） |
+| 不露未来空白 | `rightEdge = len` 即数据末根，右侧无空白/未来区 |
+| 缩到全量即停 | `nc` 已钳 `Math.min(len, nc)`；`vc=len` 时 `viewStart=0`，再缩 `nc` 仍 = len → 自然停止，不超出 |
+| 平移不受影响 | 仅 `applyZoom` 改；`applyPan`（双击拖拽 / 双指滑动）逻辑不变，仍可看历史 |
+| §12 桶对齐 | 量化分支仅在 `vsQ + viewCount === rightEdge` 时生效；现 `rightEdge=len` 且 `viewStart=len-vc` 通常非整桶倍数，故不量化（右边缘恒定优先）；柱稳定已由 §16 连续 `bucketOf` 保证 |
+
+## 17.5 验收标准
+
+| # | 用例 | 预期 |
+|---|------|------|
+| E1 | 默认（最新贴右）缩小 | rightEdge 恒 = `len`，最新贴右框 |
+| E2 | **平移到历史区间后缩小** | 缩小后最新一根回到右边缘（rightEdge ≈ `len`），不再停在旧位置 |
+| E3 | 缩小到极限 | `viewCount = len`、`viewStart = 0`，rightEdge = `len`，无右侧空白 |
+| E4 | 放大（任何起点） | 最新恒贴右边缘 |
+| E5 | 缩小过程中 | 任意中间档位 rightEdge = `len`，不露未来区 |
+| E6 | 仅平移（不缩放） | 仍可自由看历史（applyPan 不变） |
+| E7 | 缩放 + 其他功能 | 灵敏度(§14)/VOL平滑(§14)/辅助线(§15)/成交量连续滑动(§16) 全部正常 |
+
+## 17.6 非目标
+
+- 不改平移（拖拽 / 双指）的看历史能力
+- 不改缩放灵敏度参数（§14）
+- 不做"缩放时同时钉住左边缘/居中"等额外语义
+
+## 17.7 测试策略
+
+1. **自动化**：`tests/regression.test.cjs` 新增 §17 断言：
+   - 平移到历史区间（rightEdge < `len`）后连续缩小 → rightEdge 收敛到 `len`（最新贴右框）
+   - 缩小到极限 → `viewCount === len`、`viewStart === 0`、rightEdge ≤ `len`（不露未来空白）
+   - 全量回归保持（含 §12 右边缘稳定性断言，需更新为"缩放后 rightEdge ≡ len"）
+2. **手动**：mac 实测 §17.5 E1–E7
+
+## 17.8 交付物
+
+| 文件 | 内容 |
+|---|---|
+| `index.html` | `applyZoom` 锚点 `viewStart+viewCount` → `len`（1 行常量） |
+| `tests/regression.test.cjs` | 新增 §17 断言；§12 右边缘断言更新为"缩放后 ≡ len" |
+| `PRD.md` | 本文档（§17） |
+
+## 17.9 风险与对策
+
+| 风险 | 对策 |
+|------|------|
+| 平移到历史后缩放会"跳回最新" | 这正是用户诉求（"最新固定"）；若后续想要"缩放保留历史视图"可改为条件锚定 |
+| §12 既有断言失效 | 更新为"缩放后 rightEdge ≡ len"（更贴合新语义） |
+| 柱跳动回归（失去桶对齐量化） | §16 连续 `bucketOf` 已保证柱随 viewStart 连续滑动，无需 §12 量化 |
+| 回归风险 | 仅改 `applyZoom` 一行；跑全量 regression |
+
+## 17.10 完成定义
+
+- [x] PRD §17 写完（含仿真证据 + 验收标准 + 完成定义）
+- [x] 改 `index.html`：`applyZoom` 锚点改 `len`
+- [x] `tests/regression.test.cjs` 新增 §17 断言 + §12 断言更新，全过（122 PASS / 0 FAIL）
+- [ ] mac 手动验收 E1–E7
 - [ ] 提交并推送
 
 ### 附：顺带修复（本次一并完成）
