@@ -1455,9 +1455,15 @@ function draw() {
     ctx.fillText(label, x, taTop + 26);
   }
 
+  // §15：价格类覆盖层裁剪到主图价格区 [mainTop, mainBot]，绝不进入成交量子面板（避免压住 VOL 柱子）
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(PAD_L, mainTop, plotW, mainBot - mainTop);
+  ctx.clip();
   drawLines();
   drawTrades();
   drawRRDraft();
+  ctx.restore();
   updateTradePanel();
 
 
