@@ -1259,7 +1259,14 @@ function draw() {
   // 蜡烛 + 影线（大缩放 xW<1 时按像素桶聚合，避免逐根 canvas 调用）
   const nVis = e - s;
   const Wpx = Math.max(1, Math.round(plotW));
-  const bucketOf = (x) => ({ i0: s + Math.floor(x * nVis / Wpx), i1: s + Math.floor((x + 1) * nVis / Wpx) });
+  // §16：桶边界改用连续 viewStart（而非整数 s），平移时桶窗口随 viewStart 连续滑动，
+  //      消除缩小后平移时成交量/蜡烛"冻住→整批跳"的离散跳变（zoom-out 每拖 1px 偏移数十~上百根）
+  const vs0 = viewStart;
+  const bucketOf = (x) => {
+    const i0 = Math.max(0, Math.floor(vs0 + x * nVis / Wpx));
+    const i1 = Math.min(len, Math.floor(vs0 + (x + 1) * nVis / Wpx));
+    return { i0, i1 };
+  };
   if (xW >= 1) {
     for (let i = s; i < e; i++) {
       const r = getBar(i);
