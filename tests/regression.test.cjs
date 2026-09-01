@@ -437,7 +437,9 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
   // ============ 6. 成交量分隔条 ============
   {
     const vf0 = API.getVolFrac();
-    down(600, 510); move(600, 450);
+    // §13：hy = volTop - gap/2 = (PAD_T + H - PAD_T - PAD_B - volH - gap) + gap/2 = H - PAD_B - volH - gap/2
+    // H=700, PAD_B=52, volFrac=0.22 → volH=154, gap=8 → hy ≈ 700 - 52 - 154 - 4 = 490
+    down(600, 490); move(600, 430);
     check('volFrac 拖动调节', API.getVolFrac() !== vf0, vf0.toFixed(3) + ' -> ' + API.getVolFrac().toFixed(3));
     up(); move(-1, -1);
   }

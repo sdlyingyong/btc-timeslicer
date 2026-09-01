@@ -262,7 +262,7 @@ const PERIODS = [
   { p: '1d', label: '日线' }, { p: '4h', label: '4 小时' },
   { p: '1h', label: '1 小时' }, { p: '15m', label: '15 分' }
 ];
-const PAD_L = 8, PAD_R = 62, PAD_T = 12, PAD_B = 32;
+const PAD_L = 8, PAD_R = 62, PAD_T = 12, PAD_B = 52;   // §13：底部 padding 加大 20px，给光标时间留独立行（避免覆盖 VOL 区与时间轴日期）
 const canvas = document.getElementById('chart');
 const ctx = canvas.getContext('2d');
 const dpr = window.devicePixelRatio || 1;
@@ -1456,7 +1456,7 @@ function draw() {
       ctx.font = '11px "SFMono-Regular", Consolas, monospace';
       ctx.textAlign = 'center';
       const tw = ctx.measureText(tsLabel).width;
-      const lx = hover.x, ly = taTop - 4;
+      const lx = hover.x, ly = taTop + 42;   // §13：下移到时间轴日期标签下方独立一行（不挡 VOL、不与日期撞 X）
       ctx.fillStyle = 'rgba(12,16,24,0.88)';
       ctx.fillRect(lx - tw / 2 - 5, ly - 11, tw + 10, 15);
       ctx.fillStyle = '#cdd3e0';
