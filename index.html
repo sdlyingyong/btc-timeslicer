@@ -1035,7 +1035,7 @@ function showGoToDialog() {
     if (!t) { setLoading('日期格式无效'); return; }
     const idx = await findIdxByTime(t / 60000);
     if (idx < 0) return;
-    viewStart = Math.max(0, Math.min(dataLen() - viewCount, idx - viewCount + 1));
+    viewStart = Math.max(vsLo(), Math.min(dataLen() - viewCount, idx - viewCount + 1));
     DS.ensure(Math.max(0, Math.floor(viewStart) - 200), Math.floor(viewStart) + viewCount);
     closeGoTo();
     redrawSoon(); scheduleViewSave();
@@ -1098,7 +1098,7 @@ async function setView(sym, period) {
   // 首次启动：恢复上次浏览位置（仅当标的+周期一致）
   if (RESTORE && RESTORE.sym === curSym && RESTORE.period === cur) {
     viewCount = Math.max(20, Math.min(len, RESTORE.viewCount));
-    viewStart = Math.max(0, Math.min(len - viewCount, RESTORE.viewStart));
+    viewStart = Math.max(vsLo(), Math.min(len - viewCount, RESTORE.viewStart));
     RESTORE = null;
     syncPeriodButtons();
     DS.ensure(Math.max(0, Math.floor(viewStart) - 200), Math.floor(viewStart) + viewCount);
@@ -1116,19 +1116,19 @@ async function setView(sym, period) {
       if (ni >= 0) {
         // §11 R1 修正：ni 显示在最右可见位置（viewStart = ni - viewCount + 1），
         // 避免 ni 落在不可见 e 位置导致最右可见偏 1 根
-        viewStart = Math.max(0, Math.min(len - viewCount, ni - viewCount + 1));
+        viewStart = Math.max(vsLo(), Math.min(len - viewCount, ni - viewCount + 1));
       } else {
-        viewStart = Math.max(0, len - viewCount);
+        viewStart = Math.max(vsLo(), len - viewCount);
       }
     } else {
-      viewStart = Math.max(0, len - viewCount);
+      viewStart = Math.max(vsLo(), len - viewCount);
     }
   } else {
     // 切换标的（同周期）：优先恢复该 标的|周期 上次保存的浏览位置
     const savedView = viewStore[curSym + '|' + cur];
     if (savedView && typeof savedView.viewStart === 'number') {
       viewCount = Math.max(20, Math.min(len, savedView.viewCount || viewCount));
-      viewStart = Math.max(0, Math.min(len - viewCount, savedView.viewStart));
+      viewStart = Math.max(vsLo(), Math.min(len - viewCount, savedView.viewStart));
       syncPeriodButtons();
       DS.ensure(Math.max(0, Math.floor(viewStart) - 200), Math.floor(viewStart) + viewCount);
       draw();
@@ -1143,15 +1143,15 @@ async function setView(sym, period) {
         const inPlot = hover.x >= PAD_L && hover.x <= PAD_L + plotW && hover.y >= 0;
         if (inPlot) {
           const frac = (hover.x - PAD_L) / plotW;          // 锚点停在原屏幕横向位置
-          viewStart = Math.max(0, Math.min(len - viewCount, ni - frac * viewCount));
+          viewStart = Math.max(vsLo(), Math.min(len - viewCount, ni - frac * viewCount));
         } else {
-          viewStart = Math.max(0, Math.min(len - viewCount, ni - viewCount / 2)); // 锚点居中
+          viewStart = Math.max(vsLo(), Math.min(len - viewCount, ni - viewCount / 2)); // 锚点居中
         }
       } else {
-        viewStart = Math.max(0, len - viewCount);
+        viewStart = Math.max(vsLo(), len - viewCount);
       }
     } else {
-      viewStart = Math.max(0, len - viewCount);
+      viewStart = Math.max(vsLo(), len - viewCount);
     }
   }
 
@@ -1204,7 +1204,7 @@ function draw() {
   const volH = H * volFrac, gap = 8;
   const mainTop = PAD_T, mainBot = PAD_T + (H - PAD_T - PAD_B - volH - gap);
   const volTop = mainBot + gap, volBot = H - PAD_B;
-  const s = Math.max(0, Math.floor(viewStart)), e = Math.min(len, s + viewCount);
+  const s = Math.floor(viewStart), e = Math.min(len, s + viewCount);   // §18：s 允许为负（左侧留空）；getBar 对负索引返回 null 安全跳过
 
   // 触发所需分块加载（可见区 + 左侧 EMA 上下文）
   DS.ensure(Math.max(0, s - 200), e);
@@ -1263,7 +1263,7 @@ function draw() {
   //      消除缩小后平移时成交量/蜡烛"冻住→整批跳"的离散跳变（zoom-out 每拖 1px 偏移数十~上百根）
   const vs0 = viewStart;
   const bucketOf = (x) => {
-    const i0 = Math.max(0, Math.floor(vs0 + x * nVis / Wpx));
+    const i0 = Math.floor(vs0 + x * nVis / Wpx);   // §18：去 Math.max(0,…)，负值由 getBar 跳过 → 左侧自然留空
     const i1 = Math.min(len, Math.floor(vs0 + (x + 1) * nVis / Wpx));
     return { i0, i1 };
   };
@@ -1898,7 +1898,7 @@ canvas.addEventListener('mousedown', e => {
     if (mx >= PAD_L && mx <= PAD_L + plotW) {
       const frac = Math.max(0, Math.min(1, (mx - PAD_L) / plotW));
       const targetIdx = Math.floor(viewStart + frac * viewCount);
-      viewStart = Math.max(0, Math.min(dataLen() - viewCount, targetIdx - viewCount / 2));
+      viewStart = Math.max(vsLo(), Math.min(dataLen() - viewCount, targetIdx - viewCount / 2));
       DS.ensure(Math.max(0, Math.floor(viewStart) - 200), Math.floor(viewStart) + viewCount);
       redrawSoon(); scheduleViewSave();
     }
@@ -2035,7 +2035,7 @@ canvas.addEventListener('mousemove', e => {
     const dx = e.clientX - lastX; lastX = e.clientX;
     const len = dataLen(), plotW = canvas.clientWidth - PAD_L - PAD_R;
     const xW = plotW / viewCount;
-    viewStart = Math.max(0, Math.min(len - viewCount, viewStart - dx / xW));
+    viewStart = Math.max(vsLo(), Math.min(len - viewCount, viewStart - dx / xW));
     DS.ensure(Math.max(0, Math.floor(viewStart) - 200), Math.floor(viewStart) + viewCount);
   }
   redrawSoon(); scheduleViewSave();
@@ -2123,7 +2123,7 @@ window.addEventListener('keydown', e => {
     const bkt = Math.max(1, Math.round(barsPerPx));
     viewStart = Math.round(Math.floor(viewStart / bkt) * bkt);
   }
-  if (e.key === 'ArrowLeft') viewStart = Math.max(0, viewStart - step);
+  if (e.key === 'ArrowLeft') viewStart = Math.max(vsLo(), viewStart - step);
   else viewStart = Math.min(len - viewCount, viewStart + step);
   DS.ensure(Math.max(0, Math.floor(viewStart) - 200), Math.floor(viewStart) + viewCount);
   redrawSoon(); scheduleViewSave();
@@ -2141,6 +2141,10 @@ let wheelAccum = 0;             // delta 累积器（像素归一化单位）
 let panAccum = 0;               // deltaX 平移累积器（像素，与拖拽一致）
 let wheelScheduled = false;     // rAF 是否已排程（节流）
 
+// §18：viewStart 下限放开——最早一根可挪到屏幕最右（左侧留空）。
+// 下限 = 1 - viewCount：此时右边缘 = viewStart+viewCount = 1，最早一根(idx 0)恰好在屏幕最右。
+function vsLo() { return 1 - viewCount; }
+
 function applyZoom(delta) {
   const len = dataLen();
   const plotW = canvas.clientWidth - PAD_L - PAD_R;
@@ -2156,7 +2160,7 @@ function applyZoom(delta) {
   const rightEdge = (curRight >= len) ? len : curRight;
   viewCount = nc;
   // 在屏：viewStart=len-vc（最新贴右框）；离屏：viewStart=curRight-vc（停在历史位置）；缩到全量(vc=len)→vs=0 自动到底
-  viewStart = Math.max(0, Math.min(len - viewCount, rightEdge - viewCount));
+  viewStart = Math.max(vsLo(), Math.min(len - viewCount, rightEdge - viewCount));
   // §12 桶对齐保护：量化 viewStart 到桶边界（防柱子跳），但仅在
   // 量化后右边缘**严格不变**时才采用（右侧贴框优先，偏差 0）。
   const bkt = Math.max(1, Math.round(viewCount / Math.max(1, plotW)));
@@ -2191,7 +2195,7 @@ function applyPan(px) {
   }
   // 2) 剩余量移动 viewStart（仍 clamp 合法范围）
   const vs0 = viewStart;
-  viewStart = Math.max(0, Math.min(len - viewCount, viewStart + pxRemain / xW));
+  viewStart = Math.max(vsLo(), Math.min(len - viewCount, viewStart + pxRemain / xW));
   // 3) 被边界吃掉的量进橡皮筋（限幅）
   const leftoverPx = pxRemain - (viewStart - vs0) * xW;
   if (leftoverPx !== 0) {
@@ -2291,7 +2295,7 @@ document.getElementById('resetSession').addEventListener('click', () => {
   RESTORE = null;
   const len = dataLen();
   viewCount = Math.min(260, len);
-  viewStart = Math.max(0, len - viewCount);
+  viewStart = Math.max(vsLo(), len - viewCount);
   DS.ensure(Math.max(0, Math.floor(viewStart) - 200), Math.floor(viewStart) + viewCount);
   draw();
 });

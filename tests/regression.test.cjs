@@ -101,6 +101,9 @@ const wmove = (x, y) => wmm({ clientX: x, clientY: y });
 const up = () => wmu({});
 const key = (k) => wkd({ key: k, preventDefault() {} });
 const wheel = (dy, dx) => wl({ deltaY: dy || 0, deltaX: dx || 0, preventDefault() {} });
+// §18：把视图平移顶到右边界（viewStart=len-vc，最新一根在屏幕最右、右边缘=len）。
+// §18 放开 viewStart 下限后，平移可能停在历史/空白区，凡需「最新在屏」前提的断言都先 goLatest() 复位。
+const goLatest = () => { for (let i = 0; i < 300; i++) wheel(0, 10000); };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 // 屏幕坐标 <-> 逻辑坐标（依赖 SCALE 建立后）
 const sx = idx => API.dataXToScreenX(idx);
@@ -302,7 +305,7 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     for (let i = 0; i < 60; i++) wheel(5000);
     check('连续缩小钳制 <= len', API.getViewCount() <= len, API.getViewCount() + ' <= ' + len);
     // viewStart 始终在合法范围
-    check('viewStart 不越界', API.getViewStart() >= 0 && API.getViewStart() <= len - API.getViewCount(),
+    check('viewStart 不越界（§18 下限=1-vc）', API.getViewStart() >= 1 - API.getViewCount() && API.getViewStart() <= len - API.getViewCount(),
       'vs=' + API.getViewStart().toFixed(0) + ' vc=' + API.getViewCount());
   }
 
@@ -311,6 +314,7 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     const len = API.dataLen();
 
     // 场景1（最新在屏）：默认全量/最新贴右，任意缩放右边缘恒 = len（不露未来空白）
+    goLatest();                                  // §18：先复位到最新在屏（避免继承离屏态）
     for (let i = 0; i < 10; i++) wheel(-5000);   // 放大到最小（最新在屏）
     check('§17 最新在屏·放大后右边缘=len', Math.abs((API.getViewStart() + API.getViewCount()) - len) <= 1e-6,
       'edge=' + (API.getViewStart() + API.getViewCount()));
@@ -332,7 +336,8 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
       'before=' + beforeEdge.toFixed(1) + ' after=' + afterEdge.toFixed(1));
     check('§17 离屏·最新仍不在屏(afterEdge<len)', afterEdge < len, 'afterEdge=' + afterEdge.toFixed(1));
 
-    // 场景3（极端缩小→全量）：无论是否在屏，缩到极限都 = 全量（vc=len, vs=0, edge=len）
+    // 场景3（极端缩小→全量）：先复位到最新在屏，缩到极限 = 全量（vc=len, vs=0, edge=len）
+    goLatest();
     for (let i = 0; i < 60; i++) wheel(5000);
     check('§17 极端缩小=全量(viewCount=len)', Math.abs(API.getViewCount() - len) <= 1,
       'vc=' + API.getViewCount() + ' len=' + len);
@@ -343,6 +348,36 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     // 场景4（不露未来）：任何状态下右边缘永不超出 len
     check('§17 右边缘永不超出len', (API.getViewStart() + API.getViewCount()) <= len + 1e-6,
       'edge=' + (API.getViewStart() + API.getViewCount()));
+  }
+
+  // ============ 5.5c §18 左侧留空：viewStart 下限放开，最早一根可到屏幕最右 ============
+  {
+    const len = API.dataLen();
+    // 放大到较窄视图，制造平移空间
+    for (let i = 0; i < 6; i++) wheel(-5000);
+    const vc = API.getViewCount();
+    // 持续左滑（看更早），应越过 0 进入负值，并停在 1-vc（最早一根在屏幕最右）
+    for (let i = 0; i < 80; i++) wheel(0, -10000);
+    const vs = API.getViewStart();
+    check('§18 左滑越过0进入负值（左侧留空）', vs < 0, 'vs=' + vs.toFixed(2));
+    check('§18 左滑下限=1-vc（最早根在屏幕最右）', Math.abs(vs - (1 - vc)) <= 1e-6,
+      'vs=' + vs.toFixed(4) + ' 1-vc=' + (1 - vc));
+    check('§18 右边缘=1（最早根在最右）', Math.abs((vs + vc) - 1) <= 1e-6, 'rightEdge=' + (vs + vc));
+    // 显式触发一次负数窗口绘制，确认不抛异常（getBar 对负索引返回 null → 安全跳过）
+    let drawOk = true;
+    try { API.draw(); } catch (e) { drawOk = false; }
+    check('§18 负数窗口 draw 不抛异常', drawOk);
+    // 离屏态缩放后仍停在最左极值（右边缘保持=1，不回弹 0）
+    wheel(-120);
+    const vsA = API.getViewStart(), vcA = API.getViewCount();
+    check('§18 离屏缩放后仍在最左极值（右边缘=1）', vsA < 0 && Math.abs((vsA + vcA) - 1) <= 1e-6,
+      'vsA=' + vsA.toFixed(2) + ' edge=' + (vsA + vcA));
+    // 复位：右滑回正常区间（viewStart 回到 >= 0 且不超过右极限）
+    for (let i = 0; i < 120; i++) wheel(0, 10000);
+    const vsR = API.getViewStart();
+    check('§18 复位后 viewStart>=0', vsR >= 0, 'vs=' + vsR.toFixed(1));
+    check('§18 右侧极限 rightEdge=len（行为不变）', Math.abs((vsR + API.getViewCount()) - len) <= 1e-6,
+      'rightEdge=' + (vsR + API.getViewCount()) + ' len=' + len);
   }
 
   // ============ 5.6 双指滑动平移（PRD §9：deltaX 免按住拖拽，兼容 Win） ============
@@ -393,7 +428,7 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
 
     // 边界钳制：疯狂向左平移不越界（≥0）
     for (let i = 0; i < 200; i++) wheel(0, -10000);
-    check('连续向左平移钳制 >= 0', API.getViewStart() >= 0, '' + API.getViewStart().toFixed(1));
+    check('连续向左平移钳制至左极限 1-vc（§18）', Math.abs(API.getViewStart() - (1 - API.getViewCount())) <= 1e-6, '' + API.getViewStart().toFixed(1));
     // 疯狂向右平移不越界（≤ len - viewCount）
     for (let i = 0; i < 200; i++) wheel(0, 10000);
     check('连续向右平移钳制 <= len-vc', API.getViewStart() <= len - API.getViewCount(),
@@ -410,13 +445,13 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     // 前置：先放大再左滑到左边界（viewStart=0）
     for (let i = 0; i < 10; i++) wheel(-5000);
     for (let i = 0; i < 50; i++) wheel(0, -10000);
-    check('前置：已到左边界（viewStart=0）', API.getViewStart() === 0, '' + API.getViewStart());
+    check('前置：已到左边界（viewStart=1-vc，§18）', Math.abs(API.getViewStart() - (1 - API.getViewCount())) <= 1e-6, '' + API.getViewStart());
 
     // 到边后继续左滑：viewStart 保持 0，panRubber 进入负值（橡皮筋）
     const rb0 = API.getPanRubber();
     wheel(0, -500); // 左边界继续左滑
     const rb1 = API.getPanRubber();
-    check('左边界继续左滑→panRubber 负值（橡皮筋生效）', rb1 < 0 && API.getViewStart() === 0,
+    check('左边界继续左滑→panRubber 负值（橡皮筋生效，vs=1-vc，§18）', rb1 < 0 && Math.abs(API.getViewStart() - (1 - API.getViewCount())) <= 1e-6,
       'rubber ' + rb0.toFixed(1) + ' -> ' + rb1.toFixed(1));
     check('橡皮筋限幅 <= 90px', Math.abs(rb1) <= 90, '' + Math.abs(rb1).toFixed(1));
 
@@ -482,6 +517,7 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
 
     // 场景2（核心）：从全量（viewCount=len，bkt>1）开始连续放大，
     // 右边缘必须恒锚定（当前实现桶对齐量化在奇数 viewStart 时破坏锚定）
+    goLatest();                                // §18：先复位到最新在屏（避免继承离屏态）
     for (let i = 0; i < 30; i++) wheel(5000);  // 缩小到全量（viewCount=len）
     const anchor = API.dataLen();
     let ok = true, firstFail = '';
@@ -493,7 +529,7 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     check('大缩放区间连续放大右边缘恒锚定（偏差≤0.5）', ok, firstFail || '10 次全锚定');
 
     // 边界钳制回归：缩放后状态合法
-    check('缩放后状态合法', API.getViewStart() >= 0 && API.getViewCount() >= 20 &&
+    check('缩放后状态合法', API.getViewStart() >= 1 - API.getViewCount() && API.getViewCount() >= 20 &&
       API.getViewStart() <= API.dataLen() - API.getViewCount());
   }
 
@@ -571,6 +607,7 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
   // ============ 7. 盈亏比 ============
   {
     API.setTradeMode(true);
+    goLatest();                                // §18：复位到最新在屏，确保 down(600,400) 命中有效K线（否则落空白区→entry 空→trade 不生成）
     // 视图最右（最新K线）按下定入场
     down(600, 400);
     check('rrDraft 创建（入场=K线收盘）', !!API.getRrDraft() && API.getRrDraft().phase === 'tp' && API.getRrDraft().entry != null);

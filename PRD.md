@@ -1403,3 +1403,114 @@ viewStart = Math.max(0, Math.min(len - viewCount, rightEdge - viewCount));
 | `末根 === 2026-08-23 23:45` | 末根随时间推移，必然 FAIL | 15 分钟对齐 + 落在 `[2019-09-08, 现在+1天]` 区间 |
 
 改后仍可捕捉数据被清空/损坏，但不再随每日同步失效。
+
+---
+
+# 附：§18 本次修改 — 左侧留空：放开 viewStart 下限，最早一根可挪到屏幕最右
+
+版本：v1.0 追加 ｜ 日期：2026-09-01 ｜ 状态：已实现（代码+测试全过，待推送发布）
+
+## 18.1 背景与需求
+
+用户反馈：**现在往左拖到头（最早一根贴在最左边）就顶住了，左侧没法留空白**；希望
+"左侧也能空出一些空间，挪动范围更大，直到最早一根 K 线能出现在屏幕最右边"。
+
+即：当前 `viewStart` 下限是 `0`（最早一根永远在屏幕最左），需要放开下限，允许
+`viewStart` 取负值，使左侧呈现空白、并支持一直左挪到**最早一根 K 线落在屏幕最右边缘**。
+
+## 18.2 根因分析
+
+1. `viewStart` 的钳制在代码中约 16 处，统一写死下限 `0`：
+   `Math.max(0, Math.min(len - viewCount, X))`（含 `dataLen()`/`len` 两种写法、独立
+   `Math.max(0, len - viewCount)`、方向键 `Math.max(0, viewStart - step)` 等）。
+   下限 `0` 导致最早一根恒贴左框，无法左移。
+2. 绘制窗口 `s = Math.max(0, Math.floor(viewStart))`（draw 内 L1207）假设 `s ≥ 0`：
+   一旦 `viewStart < 0`，`s` 被钳成 0，蜡烛按 `xI(i - s)` 映射会**整体右移错位**
+   （数据填满左半屏、而非左侧留空），视觉错误。
+3. 像素桶 `bucketOf` 的 `i0 = Math.max(0, floor(vs0 + x*nVis/Wpx))`（L1266）把负索引
+   钳成 0，大缩放(xW<1)路径下最早一根会被错误地画到最左像素。
+
+好消息：`getBar(i)` 对 `i<0` 返回 `null`（负 chunk 索引→缓存未命中→`null`），所有绘制
+循环均 `if (!r) continue;`，所以负数索引天然被跳过、不会崩。
+
+## 18.3 目标
+
+1. `viewStart` 下限放开到 `1 - viewCount`：此时右边缘 `viewStart+viewCount = 1`，
+   最早一根（idx 0）恰好落在屏幕最右边缘，其左侧为 `viewCount-1` 根空白。
+2. 平移（拖拽 / 双指 / 方向键）可越过 `0` 进入负值，停在 `1 - viewCount`，不再"顶住左边"。
+3. 缩放（尤其离屏态）尊重同一下限，不会把视图从左侧极值拉回 `0`。
+4. 绘制在 `viewStart<0` 时正确：左侧呈空白、最早一根在右边缘，价格/成交量/EMA 不错位、不崩。
+5. 右侧行为不变（仍锚定到 `len`，不露未来空白）；平移看历史能力不变。
+6. §14 灵敏度/VOL 平滑、§15 辅助线裁剪、§16 连续滑动、§17 两情形锚定 全部不受影响。
+
+## 18.4 方案设计
+
+引入单一下限函数，把所有 `viewStart` 钳制的下界从 `0` 改为 `vsLo()`：
+
+```js
+// §18：viewStart 下限放开——最早一根可挪到屏幕最右（左侧留空）
+function vsLo() { return 1 - viewCount; }
+```
+
+| 项 | 策略 |
+|---|---|
+| 钳制下界 | 所有 `Math.max(0, Math.min(len - viewCount, X))` → `Math.max(vsLo(), Math.min(len - viewCount, X))`；独立 `Math.max(0, len - viewCount)` → `Math.max(vsLo(), len - viewCount)`；方向键 `Math.max(0, viewStart - step)` → `Math.max(vsLo(), viewStart - step)` |
+| 绘制窗口 | `s = Math.max(0, Math.floor(viewStart))` → `s = Math.floor(viewStart)`（允许负值；`e = Math.min(len, s + viewCount)` 不变） |
+| 像素桶 | `i0 = Math.max(0, floor(vs0 + x*nVis/Wpx))` → `i0 = floor(vs0 + x*nVis/Wpx)`（负索引由 getBar 跳过，左侧自然留空） |
+| 绘制安全 | `getBar` 对负索引返回 `null`，各循环 `if(!r) continue`，无需额外防护 |
+| 缩放下限一致 | §17 `applyZoom` 的 `Math.max(0, …)` 同样改 `vsLo()`，离屏锚定 `rightEdge=curRight` 在极值处自然收敛到 `viewStart=1-viewCount` |
+
+极端值校验（以 `vc` 根视图为例）：
+- 最左：`viewStart = 1 - vc` → 右边缘 `= 1`，可视范围 `[1-vc, 1)`，仅 idx 0 在屏最右，左侧全空。
+- 最右：`viewStart = len - vc` → 右边缘 `= len`（最新一根在屏最右，无未来空白）——与 §17 一致。
+- `vc = len`（全量）时：`viewStart ∈ [1-len, 0]`，可左挪到 `1-len`（idx 0 在最右、左侧 `len-1` 空）。
+
+## 18.5 验收标准
+
+| # | 用例 | 预期 |
+|---|------|------|
+| E1 | 持续左滑（看更早）越过 0 | `viewStart` 进入负值（`< 0`），不再被钳在 0 |
+| E2 | 左滑到极限 | `viewStart = 1 - viewCount`，右边缘 `= 1`（最早一根在屏幕最右） |
+| E3 | 缩放（离屏态）后仍停在最左极值 | `viewStart < 0` 保持，不回弹到 0 |
+| E4 | 绘制 `viewStart<0` 不崩 | draw 正常、左侧空白、最早一根在右、价格/量/EMA 不错位 |
+| E5 | 右侧行为不变 | 向右平移极限仍 `viewStart = len - viewCount`，右边缘 `= len` |
+| E6 | 仅平移看历史、其他功能 | 平移/缩放/VOL/辅助线/连续滑动/§17 锚定 全部正常 |
+
+## 18.6 非目标
+
+- 不改右侧下界（仍锚 `len`，不露未来空白）。
+- 不引入"固定空白像素数"的额外装饰语义，空白量由视图宽度（`viewCount`）自然决定。
+
+## 18.7 测试策略
+
+1. **自动化**：`tests/regression.test.cjs` 新增 §18 断言：
+   - 放大后持续左滑 → `viewStart` 变负、最终 `≈ 1 - viewCount`、右边缘 `≈ 1`；
+   - 离屏缩放后 `viewStart` 仍 `< 0`（不回弹 0）；
+   - 右侧极限仍 `= len - viewCount`；
+   - 全程 `draw()` 不抛（负数窗口被覆盖）。
+2. **手动**：mac 实测 §18.5 E1–E6。
+
+## 18.8 交付物
+
+| 文件 | 内容 |
+|---|---|
+| `index.html` | 新增 `vsLo()`；所有 `viewStart` 钳制下界 `0→vsLo()`；`s=floor(viewStart)`；`bucketOf` i0 去 `Math.max(0,…)` |
+| `tests/regression.test.cjs` | 新增 §18 断言 |
+| `PRD.md` | 本文档（§18） |
+
+## 18.9 风险与对策
+
+| 风险 | 对策 |
+|------|------|
+| 改 16 处钳制漏改/误改 | 用 `replace_all` 统一替换四种前缀模式；全量 regression 兜底 |
+| `s=floor(viewStart)` 后某些逻辑假设 `s≥0` | 审查：EMA 右标签循环、DS.ensure、价格区间循环均对负索引 null 安全；`xW=plotW/(e-s)` 仍 `=plotW/vc` |
+| 大缩放(xW<1)路径错位 | `bucketOf` i0 同步放开负值，由 getBar 跳过 |
+| 回归 §17 | §17 锚定逻辑只读 `curRight/viewStart`，下限改动不影响其判定；§18 断言与 §17 断言并存 |
+
+## 18.10 完成定义
+
+- [x] PRD §18 写完（含根因 + 方案 + 验收 + 完成定义）
+- [x] 改 `index.html`：新增 `vsLo()`、钳制下界统一改、绘制窗口与 bucketOf 修正
+- [x] `tests/regression.test.cjs` 新增 §18 断言 + 既有断言同步到 §18 语义，全过（130 PASS / 0 FAIL）
+- [ ] mac 手动验收 E1–E6（用户在线上实测）
+- [ ] 提交并推送
