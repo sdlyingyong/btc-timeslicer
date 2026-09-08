@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // btc-timeslicer 数据更新脚本（OKX BTC-USDT 永续合约）
 // 仅重写 index.html 里的 window.BTCFUT_DATA 数据段，代码逻辑原样保留。
-// 用法: HTTPS_PROXY=http://127.0.0.1:10809 node update_data.cjs
+// 用法:
+//   本地(走代理): HTTPS_PROXY=http://127.0.0.1:10809 node update_data.cjs
+//   云端/直连(无需代理): node update_data.cjs   # 不设 HTTPS_PROXY 即直连 OKX
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -9,15 +11,29 @@ const { execSync } = require('child_process');
 
 const REPO = __dirname;
 const HTML = path.join(REPO, 'index.html');
-const PROXY = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || 'http://127.0.0.1:10809';
+// 仅在显式设置 HTTPS_PROXY/HTTP_PROXY 时才走代理；否则直连（云端 runner 适用）
+const USE_PROXY = !!(process.env.HTTPS_PROXY || process.env.HTTP_PROXY);
+const PROXY = USE_PROXY ? (process.env.HTTPS_PROXY || process.env.HTTP_PROXY) : '';
 const INST = 'BTC-USDT-SWAP';
 const LIMIT = 100;            // OKX candles 单页最大 100
 const PERIODS = { '15m': '15m', '1h': '1H', '4h': '4H', '1d': '1D' };
 const SLEEP_MS = 150;         // 翻页间隔，避免触发 OKX 限频
 
-function fetchJson(url) {
-  const out = execSync(`curl -s -m 30 -x ${PROXY} "${url}"`, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
-  return JSON.parse(out);
+function fetchJson(url, attempt = 0) {
+  const MAX = 3;
+  try {
+    const px = USE_PROXY ? `-x ${PROXY} ` : '';
+    const out = execSync(`curl -s -m 30 ${px}"${url}"`, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    return JSON.parse(out);
+  } catch (e) {
+    if (attempt < MAX - 1) {
+      const wait = 1000 * (attempt + 1);
+      console.warn(`fetch 失败 (${e.message || e}); ${wait}ms 后重试 ${attempt + 1}/${MAX - 1}`);
+      sleep(wait);
+      return fetchJson(url, attempt + 1);
+    }
+    throw e;
+  }
 }
 const sleep = ms => execSync(`sleep ${ms / 1000}`);
 

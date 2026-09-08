@@ -1,0 +1,70 @@
+name: Daily BTC data update
+
+# 云端定时更新 btc-timeslicer 行情数据：
+#   - 每天 20:00 UTC（= 北京凌晨 04:00）自动触发
+#   - 从 OKX 直连拉取最新 K 线（云端 runner 无需代理）
+#   - 只重写 index.html 里的 window.BTCFUT_DATA 数据段，代码逻辑不变
+#   - 校验数据完整性（无缺口 / 网格对齐 / 时间戳递增），通过才提交并推送
+on:
+  schedule:
+    - cron: '0 20 * * *'      # 20:00 UTC = 04:00 Beijing
+  workflow_dispatch: {}       # 允许在 Actions 页面手动触发测试
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Fetch latest OKX data and rewrite index.html
+        run: node update_data.cjs
+
+      - name: Validate data integrity
+        run: |
+          node -e '
+          const fs=require("fs");
+          const h=fs.readFileSync("index.html","utf8");
+          const m=h.match(/window\.BTCFUT_DATA\s*=\s*(\{[\s\S]*?\})\s*;/);
+          if(!m){console.error("未找到 BTCFUT_DATA");process.exit(1);}
+          const D=JSON.parse(m[1]);
+          const grid={15m:15,1h:60,4h:240,1d:1440};
+          let ok=true;
+          for(const k of Object.keys(grid)){
+            const a=D[k];const g=grid[k];let inc=true,gap=0,mis=0;
+            for(let i=1;i<a.length;i++){if(a[i][0]-a[i-1][0]!==g)gap++;if(a[i][0]<=a[i-1][0])inc=false;}
+            mis=a.filter(b=>b[0]%g!==0).length;
+            const last=new Date(a[a.length-1][0]*60000).toISOString();
+            console.log(k,"n="+a.length,"gap="+gap,"mis="+mis,"inc="+inc,"last="+last);
+            if(gap||mis||!inc)ok=false;
+          }
+          if(!ok){console.error("数据完整性校验失败，拒绝提交");process.exit(1);}
+          console.log("数据校验通过");
+          '
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add index.html
+          if git diff --cached --quiet; then
+            echo "无变化，跳过提交"
+          else
+            git commit -m "data: daily update $(date -u +%F) (github actions)"
+            git push
+            echo "已提交并推送到 GitHub Pages"
+          fi
