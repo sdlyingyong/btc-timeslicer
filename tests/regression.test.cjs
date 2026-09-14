@@ -93,6 +93,7 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     getSimStore: () => simStore,
     simOpen, simAdd, simExit, simEvaluatePosition, simReplay, simAvgEntry, simOpenSize, simActiveStop, simLiqPrice, simRealizedPnl, simUnrealized, simDir, simMargin,
     loadSim, saveSim, simKey, simClearAll: () => { simStore = {}; saveSim(); },
+    simDropMemory: () => { simStore = {}; },
     // §19.5 UI 控制器 + 渲染数据
     simMarks, simOpenAtCursor, simAddAtCursor, simExitAtCursor, simCursorTs, simCursorPrice, simLeverage, simStopVal, simSizeVal, drawSim, renderSim
   };`);
@@ -893,6 +894,34 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     const cts = API.simCursorTs();
     const allTs = DATA['1d'].map(b => b[0]);
     check('§19 simCursorTs 回退到数据范围内', cts != null && cts >= Math.min.apply(null, allTs) && cts <= Math.max.apply(null, allTs), '' + cts);
+
+    API.simClearAll();
+  }
+
+  // ============ 19.6 持久化 + 操作记录（E7 刷新恢复、E8 切换独立） ============
+  {
+    // E7：开仓→平仓→写入 localStorage；模拟刷新（清空内存再 loadSim）应恢复
+    API.simClearAll();
+    API.simOpen({ sym: 'BTC', period: '1d', side: 'long', leverage: 10, size: 1, stop: 900, ts: 100, price: 1000 });
+    API.simExit({ sym: 'BTC', period: '1d', kind: 'full', price: 1100, ts: 200 }); // 已实现 100
+    API.simDropMemory();
+    check('§19 E7 刷新前内存已清空', Object.keys(API.getSimStore()).length === 0);
+    API.loadSim();
+    const stR = API.getSimStore()['BTC|1d'];
+    check('§19 E7 刷新后从 localStorage 恢复持仓', !!stR && stR.positions.length === 1);
+    check('§19 E7 刷新后恢复已实现盈亏=100', !!stR && near(API.simRealizedPnl(stR.positions[0]), 100), '' + (!!stR ? API.simRealizedPnl(stR.positions[0]) : 'null'));
+    check('§19 E7 刷新后恢复操作记录=2 条', !!stR && stR.log.length === 2, '' + (!!stR ? stR.log.length : 'null'));
+
+    // E8：不同周期持仓相互独立存储与读取
+    API.simClearAll();
+    API.simOpen({ sym: 'BTC', period: '1d', side: 'long', leverage: 10, size: 1, ts: 100, price: 1000 });
+    API.simOpen({ sym: 'BTC', period: '4h', side: 'short', leverage: 5, size: 2, ts: 100, price: 2000 });
+    const store8 = API.getSimStore();
+    check('§19 E8 两周期独立存储键 BTC|1d / BTC|4h', !!store8['BTC|1d'] && !!store8['BTC|4h']);
+    const mk1 = API.simMarks('BTC', '1d', 100);
+    const mk4 = API.simMarks('BTC', '4h', 100);
+    check('§19 E8 1d 仅含 1d 持仓（多/10x）', mk1.length === 1 && mk1[0].side === 'long' && mk1[0].leverage === 10);
+    check('§19 E8 4h 仅含 4h 持仓（空/5x）', mk4.length === 1 && mk4[0].side === 'short' && mk4[0].leverage === 5);
 
     API.simClearAll();
   }
