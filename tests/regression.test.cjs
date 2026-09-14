@@ -91,7 +91,7 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     parseDateInput,
     // §19 模拟交易
     getSimStore: () => simStore,
-    simOpen, simAdd, simExit, simAvgEntry, simOpenSize, simActiveStop, simLiqPrice, simRealizedPnl, simUnrealized, simDir, simMargin,
+    simOpen, simAdd, simExit, simEvaluatePosition, simReplay, simAvgEntry, simOpenSize, simActiveStop, simLiqPrice, simRealizedPnl, simUnrealized, simDir, simMargin,
     loadSim, saveSim, simKey, simClearAll: () => { simStore = {}; saveSim(); }
   };`);
 fn(sandbox.window, sandbox.document, sandbox.localStorage, async () => ({}), sandbox.location, console, canvasMock, 1);
@@ -793,6 +793,57 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     const f2 = API.simExit({ sym: 'BTC', period: '1d', kind: 'full', ts: t0 + 1, price: 900 }); // 空头盈利
     check('§19 E4 空头全平 realized = dir*(900-1000)*1 = 100', near(API.simRealizedPnl(f2), 100), '' + API.simRealizedPnl(f2));
     check('§19 E4 空头全平 closed', f2.status === 'closed');
+    API.simClearAll();
+  }
+
+  // ============ 19.4 回放估值：止损/强平按光标触发（E2/E6/E9） ============
+  {
+    // E2：光标右移越过 sl 价 → 自动生成"损"退出
+    API.simClearAll();
+    const pSL = API.simOpen({ sym: 'BTC', period: '1d', side: 'long', leverage: 10, size: 1, stop: 900, ts: 100, price: 1000 });
+    const exSL = API.simEvaluatePosition(pSL, [[200, 1010, 1020, 895, 900, 10]]); // 低 895 <= 900
+    check('§19 E2 触发止损 kind=sl', !!exSL && exSL.kind === 'sl' && exSL.price === 900);
+    check('§19 E2 触发后 status=closed', pSL.status === 'closed');
+    check('§19 E2 realized=dir*(900-1000)*1=-100', near(API.simRealizedPnl(pSL), -100), '' + API.simRealizedPnl(pSL));
+
+    // E9：强平价被刺穿（无止损）→ kind=liq，价=liq
+    API.simClearAll();
+    const pLIQ = API.simOpen({ sym: 'BTC', period: '1d', side: 'long', leverage: 10, size: 1, stop: null, ts: 100, price: 1000 });
+    // liq = 1000*(1-0.1)=900；bar 低 898 <= 900 → 强平
+    const exLIQ = API.simEvaluatePosition(pLIQ, [[200, 1010, 1020, 898, 905, 10]]);
+    check('§19 E9 触发强平 kind=liq', !!exLIQ && exLIQ.kind === 'liq' && near(exLIQ.price, 900));
+    check('§19 E9 强平后 status=closed', pLIQ.status === 'closed');
+
+    // E6：光标左移回到开仓前 → 持仓未触发（不显示）；右移再出现（可逆）。用真实数据 ts 保证窗口有 bar。
+    API.simClearAll();
+    const D1 = DATA['1d']; const iR = D1.length - 5;
+    const openTsR = D1[iR][0], entryR = D1[iR][4];
+    const pRev = API.simOpen({ sym: 'BTC', period: '1d', side: 'long', leverage: 10, size: 1, stop: 1, ts: openTsR, price: entryR }); // stop 极低，常规右移不触发
+    API.simReplay('BTC', '1d', openTsR - 1); // 光标 < openTs
+    check('§19 E6 光标<openTs：无自动退出', pRev.exits.filter(e => e.auto).length === 0);
+    check('§19 E6 光标<openTs：status open（面板隐藏）', pRev.status === 'open');
+    // 右移一格（下一根），无穿越 → 仍 open（可见）
+    API.simReplay('BTC', '1d', D1[iR + 1][0]);
+    check('§19 E6 右移无穿越：仍 open（可见）', pRev.status === 'open' && pRev.exits.filter(e => e.auto).length === 0);
+    // 把止损改到刚高于下一根 low → 右移触发 sl（等价 UI 改止损）
+    pRev.legs[0].stop = D1[iR + 1][3] + 0.5;
+    API.simReplay('BTC', '1d', D1[iR + 1][0]);
+    check('§19 E6 右移触发 auto sl', pRev.exits.some(e => e.auto && e.kind === 'sl'));
+    check('§19 E6 右移后 status=closed', pRev.status === 'closed');
+    // 再左移 → 自动退出被剥离（可逆）
+    API.simReplay('BTC', '1d', openTsR - 1);
+    check('§19 E6 左移回：自动退出被剥离（可逆）', pRev.exits.filter(e => e.auto).length === 0);
+    check('§19 E6 左移回：status open（隐藏）', pRev.status === 'open');
+
+    // E2 集成：用真实 1d 数据窗口切片（变量加后缀避免与上方 E6 块同作用域重名）
+    API.simClearAll();
+    const D1b = DATA['1d']; const i = D1b.length - 5;
+    const openTsB = D1b[i][0], entryB = D1b[i][4];
+    const nextLowB = D1b[i + 1][3]; const stopB = nextLowB + 0.5; const cursorB = D1b[i + 1][0];
+    const pR = API.simOpen({ sym: 'BTC', period: '1d', side: 'long', leverage: 10, size: 1, stop: stopB, ts: openTsB, price: entryB });
+    API.simReplay('BTC', '1d', cursorB);
+    check('§19 E2 集成：真实数据窗口触发 sl', pR.status === 'closed' && pR.exits.some(e => e.auto && e.kind === 'sl'));
+    check('§19 E2 集成：退出价=stopB', pR.exits.some(e => e.auto && near(e.price, stopB)), 'stopB=' + stopB);
     API.simClearAll();
   }
 

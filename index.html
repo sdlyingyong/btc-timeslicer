@@ -673,6 +673,58 @@ function simExit(o) {
   return pos;
 }
 
+// 回放求值：对窗口 (openTs, cursorTs] 的 bars，判定止损/强平首触发（纯函数，便于单测）
+function simEvaluatePosition(pos, bars) {
+  const S = simActiveStop(pos);
+  const liq = simLiqPrice(pos);
+  const dir = simDir(pos);
+  const e = simAvgEntry(pos);
+  for (const b of bars) {
+    let hit = null, price = null;
+    if (pos.side === 'long') {
+      if (S != null && b[3] <= S) { hit = 'sl'; price = S; }
+      else if (b[3] <= liq) { hit = 'liq'; price = liq; }
+    } else {
+      if (S != null && b[2] >= S) { hit = 'sl'; price = S; }
+      else if (b[2] >= liq) { hit = 'liq'; price = liq; }
+    }
+    if (hit) {
+      const size = simOpenSize(pos);
+      const realized = dir * (price - e) * size;
+      const exit = { ts: b[0], price: price, size: size, kind: hit, auto: true, realized: realized };
+      pos.exits.push(exit);
+      pos.realizedPnl += realized;
+      pos.status = 'closed';
+      return exit;
+    }
+  }
+  return null;
+}
+
+function simRecomputeStatus(pos) {
+  pos.status = pos.exits.some(e => e.kind !== 'half') ? 'closed' : 'open';
+}
+
+// 回放：基于当前光标重算所有 open 持仓的止损/强平。每次从 (openTs,cursorTs] 重算，可逆。
+function simReplay(sym, period, cursorTs) {
+  const k = simKey(sym, period);
+  const st = simStore[k];
+  if (!st) return;
+  const data = (window.BTCFUT_DATA && window.BTCFUT_DATA[period]) || [];
+  for (const pos of st.positions) {
+    // 先剥离上一轮自动退出（用户退出保留），重算 realized/status
+    const userExits = pos.exits.filter(e => !e.auto);
+    pos.exits = userExits;
+    pos.realizedPnl = userExits.reduce((a, x) => a + (x.realized || 0), 0);
+    simRecomputeStatus(pos);
+    if (pos.status !== 'open') continue;        // 已被用户全平 → 不再回放
+    if (cursorTs < pos.openTs) continue;        // 未来/未触发 → 不显示
+    const bars = data.filter(b => b[0] > pos.openTs && b[0] <= cursorTs);
+    simEvaluatePosition(pos, bars);
+    if (!pos.exits.some(e => e.auto)) simRecomputeStatus(pos); // 未触发仍 open
+  }
+}
+
 async function importTradesFile(file) {
   if (typeof XLSX === 'undefined') { setTradeInfo('Excel 解析库未加载'); return; }
   setTradeInfo('解析 Excel 中…');
