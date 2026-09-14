@@ -45,7 +45,38 @@ const data = JSON.parse(m[1]);
 
 let totalAdded = 0, totalReplaced = 0;
 
-for (const p of ['15m', '1h', '4h', '1d']) {
+// 从 4h 重聚合 00:00 UTC 日线（OKX 1D 锚定 16:00 UTC，直接抓会与历史 00:00 UTC 网格错位）
+function deriveDailyFrom4h(data) {
+  const h4 = data['4h'];
+  const d1 = data['1d'];
+  const lastDay = d1.length ? Math.floor(d1[d1.length - 1][0] / 1440) * 1440 : 0;
+  const byDay = new Map();
+  for (const b of h4) {
+    const day = Math.floor(b[0] / 1440) * 1440;
+    if (day <= lastDay) continue;
+    if (!byDay.has(day)) byDay.set(day, []);
+    byDay.get(day).push(b);
+  }
+  const seen = new Map();
+  for (let i = 0; i < d1.length; i++) seen.set(d1[i][0], i);
+  let added = 0;
+  for (const day of [...byDay.keys()].sort((a, b) => a - b)) {
+    const bars = byDay.get(day).slice().sort((a, b) => a[0] - b[0]);
+    const o = bars[0][1];
+    const c = bars[bars.length - 1][4];
+    const hi = bars.reduce((m, x) => Math.max(m, x[2]), -Infinity);
+    const lo = bars.reduce((m, x) => Math.min(m, x[3]), Infinity);
+    const v = bars.reduce((s, x) => s + x[5], 0);
+    const bar = [day, o, hi, lo, c, v];
+    if (seen.has(day)) d1[seen.get(day)] = bar;
+    else { d1.push(bar); seen.set(day, d1.length - 1); added++; }
+  }
+  d1.sort((a, b) => a[0] - b[0]);
+  console.log(`1d: 从4h派生 +${added} 天, 现 ${d1.length} 根, 末端=${new Date(d1[d1.length - 1][0] * 60000).toISOString()}`);
+  return added;
+}
+
+for (const p of ['15m', '1h', '4h']) {
   const arr = data[p];
   if (!Array.isArray(arr) || arr.length === 0) { console.log(`${p}: 跳过（无数据）`); continue; }
   const lastTs = arr[arr.length - 1][0];        // 分钟
@@ -84,6 +115,9 @@ for (const p of ['15m', '1h', '4h', '1d']) {
   console.log(`${p}: +${added} 新柱, 刷新 ${replaced} 根(最后一根), 现 ${arr.length} 根, 末端=${(new Date(arr[arr.length - 1][0] * 60000).toISOString())}`);
   totalAdded += added; totalReplaced += replaced;
 }
+
+// 1d 由 4h 重聚合（见 deriveDailyFrom4h），不从 OKX 直接抓，避免 16:00 UTC 网格错位
+totalAdded += deriveDailyFrom4h(data);
 
 console.log(`合计: 新增 ${totalAdded} 根, 刷新 ${totalReplaced} 根`);
 
