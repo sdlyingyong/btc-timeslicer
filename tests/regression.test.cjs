@@ -91,7 +91,7 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     parseDateInput,
     // §19 模拟交易
     getSimStore: () => simStore,
-    simOpen, simAvgEntry, simOpenSize, simActiveStop, simLiqPrice, simRealizedPnl, simUnrealized, simDir, simMargin,
+    simOpen, simAdd, simAvgEntry, simOpenSize, simActiveStop, simLiqPrice, simRealizedPnl, simUnrealized, simDir, simMargin,
     loadSim, saveSim, simKey, simClearAll: () => { simStore = {}; saveSim(); }
   };`);
 fn(sandbox.window, sandbox.document, sandbox.localStorage, async () => ({}), sandbox.location, console, canvasMock, 1);
@@ -752,6 +752,23 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     const roi5 = API.simUnrealized(p5, 1100) / API.simMargin(p5);
     const roi10 = API.simUnrealized(p10, 1100) / API.simMargin(p10);
     check('§19 E5 ROI(10x) 是 ROI(5x) 的 2 倍', near(roi10 / roi5, 2), 'roi5=' + roi5 + ' roi10=' + roi10);
+    API.simClearAll();
+  }
+
+  // ============ 19.2 加仓（E3） ============
+  {
+    API.simClearAll();
+    const t0 = 1700000000;
+    const base = API.simOpen({ sym: 'BTC', period: '1d', side: 'long', leverage: 10, size: 1, stop: 900, ts: t0, price: 1000 });
+    check('§19 E3 开仓后 legs=1', base.legs.length === 1);
+    const added = API.simAdd({ sym: 'BTC', period: '1d', size: 1, stop: 950, ts: t0 + 1, price: 1100 });
+    check('§19 E3 加仓后 legs=2', added.legs.length === 2);
+    check('§19 E3 openSize 增加=2', near(API.simOpenSize(added), 2), '' + API.simOpenSize(added));
+    check('§19 E3 avgEntry 重算=1050', near(API.simAvgEntry(added), 1050));
+    check('§19 E3 新腿独立 stop=950', added.legs[1].stop === 950);
+    check('§19 E3 activeStop=min(900,950)=900', near(API.simActiveStop(added), 900));
+    const saved = JSON.parse(store['kline_sim_v1'] || '{}');
+    check('§19 E3 日志含"加仓"', saved['BTC|1d'].log.some(l => l.msg.includes('加仓')));
     API.simClearAll();
   }
 

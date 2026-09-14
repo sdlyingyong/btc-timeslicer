@@ -629,6 +629,25 @@ function simOpen(o) {
 }
 function simClearAll() { simStore = {}; saveSim(); }
 
+// 加仓：对当前同 sym|period 的未平持仓追加一条腿（带本腿止损），重算 avgEntry/openSize/activeStop
+function simAdd(o) {
+  const sym = o.sym, period = o.period, size = o.size, price = o.price;
+  const stop = (o.stop == null || isNaN(o.stop)) ? null : o.stop, ts = o.ts;
+  const k = simKey(sym, period);
+  const st = simStore[k];
+  if (!st) return null;
+  const pos = st.positions.filter(p => p.status === 'open').pop(); // 当前未平持仓
+  if (!pos) return null;
+  pos.legs.push({ ts: ts, price: price, size: size, stop: stop });
+  st.log.push({
+    t: ts, action: 'add', side: pos.side, leverage: pos.leverage, price: price, size: size, stop: stop,
+    sym: sym, period: period,
+    msg: '加仓@' + price + ' size=' + size + (stop != null ? ' sl=' + stop : '')
+  });
+  saveSim();
+  return pos;
+}
+
 async function importTradesFile(file) {
   if (typeof XLSX === 'undefined') { setTradeInfo('Excel 解析库未加载'); return; }
   setTradeInfo('解析 Excel 中…');
