@@ -583,9 +583,11 @@ function saveSim() {
 
 // ---- 纯函数：持仓数学（统一约定见 PRD §19.4.2）----
 function simDir(pos) { return pos.side === 'long' ? 1 : -1; }
-function simOpenSize(pos) { return pos.legs.reduce((a, l) => a + (l.size || 0), 0); }
+function simCommittedSize(pos) { return pos.legs.reduce((a, l) => a + (l.size || 0), 0); }
+function simExitedSize(pos) { return pos.exits.reduce((a, x) => a + (x.size || 0), 0); }
+function simOpenSize(pos) { return Math.max(0, simCommittedSize(pos) - simExitedSize(pos)); }
 function simAvgEntry(pos) {
-  const s = simOpenSize(pos);
+  const s = simCommittedSize(pos);
   if (s === 0) return 0;
   return pos.legs.reduce((a, l) => a + (l.price || 0) * (l.size || 0), 0) / s;
 }
@@ -643,6 +645,29 @@ function simAdd(o) {
     t: ts, action: 'add', side: pos.side, leverage: pos.leverage, price: price, size: size, stop: stop,
     sym: sym, period: period,
     msg: '加仓@' + price + ' size=' + size + (stop != null ? ' sl=' + stop : '')
+  });
+  saveSim();
+  return pos;
+}
+
+// 平仓：平半(half)/平全(full)，以光标价结算已实现盈亏，记录退出腿与日志
+function simExit(o) {
+  const sym = o.sym, period = o.period, kind = o.kind, price = o.price, ts = o.ts;
+  const k = simKey(sym, period); const st = simStore[k];
+  if (!st) return null;
+  const pos = st.positions.filter(p => p.status === 'open').pop();
+  if (!pos) return null;
+  const dir = simDir(pos), e = simAvgEntry(pos);
+  const cur = simOpenSize(pos);
+  const exitSize = kind === 'half' ? cur / 2 : cur;
+  const realized = dir * (price - e) * exitSize;
+  pos.exits.push({ ts: ts, price: price, size: exitSize, kind: kind, realized: realized });
+  pos.realizedPnl += realized;
+  if (kind === 'full' || simOpenSize(pos) <= 1e-12) pos.status = 'closed';
+  st.log.push({
+    t: ts, action: kind, side: pos.side, leverage: pos.leverage, price: price, size: exitSize,
+    sym: sym, period: period, realized: realized,
+    msg: (kind === 'half' ? '平半' : '平全') + '@' + price + ' size=' + exitSize + ' 实现PnL=' + realized.toFixed(2)
   });
   saveSim();
   return pos;

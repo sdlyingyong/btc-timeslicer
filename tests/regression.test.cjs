@@ -91,7 +91,7 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     parseDateInput,
     // §19 模拟交易
     getSimStore: () => simStore,
-    simOpen, simAdd, simAvgEntry, simOpenSize, simActiveStop, simLiqPrice, simRealizedPnl, simUnrealized, simDir, simMargin,
+    simOpen, simAdd, simExit, simAvgEntry, simOpenSize, simActiveStop, simLiqPrice, simRealizedPnl, simUnrealized, simDir, simMargin,
     loadSim, saveSim, simKey, simClearAll: () => { simStore = {}; saveSim(); }
   };`);
 fn(sandbox.window, sandbox.document, sandbox.localStorage, async () => ({}), sandbox.location, console, canvasMock, 1);
@@ -769,6 +769,30 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     check('§19 E3 activeStop=min(900,950)=900', near(API.simActiveStop(added), 900));
     const saved = JSON.parse(store['kline_sim_v1'] || '{}');
     check('§19 E3 日志含"加仓"', saved['BTC|1d'].log.some(l => l.msg.includes('加仓')));
+    API.simClearAll();
+  }
+
+  // ============ 19.3 平仓：平半 / 平全（E4） ============
+  {
+    API.simClearAll();
+    const t0 = 1700000000;
+    const pos = API.simOpen({ sym: 'BTC', period: '1d', side: 'long', leverage: 10, size: 2, stop: null, ts: t0, price: 1000 });
+    // 盈利到 1100 平半
+    const half = API.simExit({ sym: 'BTC', period: '1d', kind: 'half', ts: t0 + 1, price: 1100 });
+    check('§19 E4 平半生成 exit(kind=half)', half.exits.some(x => x.kind === 'half'));
+    check('§19 E4 平半 size=1（openSize 减半）', near(API.simOpenSize(half), 1), '' + API.simOpenSize(half));
+    check('§19 E4 平半 realized = dir*(1100-1000)*1 = 100', near(API.simRealizedPnl(half), 100), '' + API.simRealizedPnl(half));
+    check('§19 E4 平半后 status 仍 open', half.status === 'open');
+    // 再平全（价格 1200）
+    const full = API.simExit({ sym: 'BTC', period: '1d', kind: 'full', ts: t0 + 2, price: 1200 });
+    check('§19 E4 平全 realized 累加 = 300', near(API.simRealizedPnl(full), 300), '' + API.simRealizedPnl(full));
+    check('§19 E4 平全后 status=closed', full.status === 'closed');
+    // 单次全平
+    API.simClearAll();
+    const p2 = API.simOpen({ sym: 'BTC', period: '1d', side: 'short', leverage: 5, size: 1, stop: null, ts: t0, price: 1000 });
+    const f2 = API.simExit({ sym: 'BTC', period: '1d', kind: 'full', ts: t0 + 1, price: 900 }); // 空头盈利
+    check('§19 E4 空头全平 realized = dir*(900-1000)*1 = 100', near(API.simRealizedPnl(f2), 100), '' + API.simRealizedPnl(f2));
+    check('§19 E4 空头全平 closed', f2.status === 'closed');
     API.simClearAll();
   }
 
