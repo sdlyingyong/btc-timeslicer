@@ -88,7 +88,11 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     findIdxSync, lnIdx, barTs, draw,
     clearLines: () => { lines = []; linesStore[lineKey()] = []; saveSessionNow(); },
     setView, getCur: () => cur, getRightTs: () => rightTs,
-    parseDateInput
+    parseDateInput,
+    // §19 模拟交易
+    getSimStore: () => simStore,
+    simOpen, simAvgEntry, simOpenSize, simActiveStop, simLiqPrice, simRealizedPnl, simUnrealized, simDir, simMargin,
+    loadSim, saveSim, simKey, simClearAll: () => { simStore = {}; saveSim(); }
   };`);
 fn(sandbox.window, sandbox.document, sandbox.localStorage, async () => ({}), sandbox.location, console, canvasMock, 1);
 const API = sandbox.window.__API__;
@@ -718,6 +722,37 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     // 清理
     API.setTool('cursor');
     check('清理跨周期测试线', (API.clearLines(), API.getLines().length === 0));
+  }
+
+  // ============ 19. §19 模拟交易（测试先行） ============
+  {
+    API.simClearAll();
+    // E1：光标处开多，size=1 lev=10x sl=设
+    const openTs = 1700000000; // 仅测试用的时间戳，不依赖真实数据
+    const pL = API.simOpen({ sym: 'BTC', period: '1d', side: 'long', leverage: 10, size: 1, stop: 100, ts: openTs, price: 1000 });
+    check('§19 E1 开多生成 open 持仓', !!pL && pL.status === 'open' && pL.side === 'long');
+    check('§19 E1 avgEntry = 光标价', near(API.simAvgEntry(pL), 1000));
+    check('§19 E1 activeStop = sl', near(API.simActiveStop(pL), 100));
+    check('§19 E1 leverage = 10', pL.leverage === 10);
+    check('§19 E1 openTs = 光标', pL.openTs === openTs);
+    const saved1 = JSON.parse(store['kline_sim_v1'] || '{}');
+    check('§19 E1 日志含"开多"', !!saved1['BTC|1d'] && saved1['BTC|1d'].log.some(l => l.msg.includes('开多')));
+
+    // E1 开空：stop 取较大值（空头止损在上方）
+    const pS = API.simOpen({ sym: 'BTC', period: '1d', side: 'short', leverage: 10, size: 1, stop: 1100, ts: openTs + 1, price: 1000 });
+    check('§19 E1 开空 side=short', pS.side === 'short');
+    check('§19 E1 空 activeStop = max(1100)', near(API.simActiveStop(pS), 1100));
+
+    // E5：杠杆 5x vs 10x 同价同 size → ROI 比例 2x、强平价 10x 更近
+    const p5 = API.simOpen({ sym: 'ETH', period: '1d', side: 'long', leverage: 5, size: 1, stop: null, ts: openTs + 2, price: 1000 });
+    const p10 = API.simOpen({ sym: 'ETH', period: '1d', side: 'long', leverage: 10, size: 1, stop: null, ts: openTs + 3, price: 1000 });
+    const liq5 = API.simLiqPrice(p5), liq10 = API.simLiqPrice(p10);
+    check('§19 E5 强平价 10x 更近(entry)', Math.abs(liq10 - 1000) < Math.abs(liq5 - 1000), 'liq10=' + liq10 + ' liq5=' + liq5);
+    check('§19 E5 强平价距离比 = 0.5', near(Math.abs(liq10 - 1000) / Math.abs(liq5 - 1000), 0.5));
+    const roi5 = API.simUnrealized(p5, 1100) / API.simMargin(p5);
+    const roi10 = API.simUnrealized(p10, 1100) / API.simMargin(p10);
+    check('§19 E5 ROI(10x) 是 ROI(5x) 的 2 倍', near(roi10 / roi5, 2), 'roi5=' + roi5 + ' roi10=' + roi10);
+    API.simClearAll();
   }
 
   // ============ 汇总 ============

@@ -1514,3 +1514,190 @@ function vsLo() { return 1 - viewCount; }
 - [x] `tests/regression.test.cjs` 新增 §18 断言 + 既有断言同步到 §18 语义，全过（130 PASS / 0 FAIL）
 - [ ] mac 手动验收 E1–E6（用户在线上实测）
 - [ ] 提交并推送
+
+---
+
+# 附：§19 本次修改 — 模拟开平仓（多空 / 止损 / 加仓 / 杠杆 / 操作记录）
+
+版本：v1.0 新增 ｜ 日期：2026-09-14 ｜ 状态：设计中（PRD 待实现）
+
+## 19.1 背景与需求
+
+现有交易功能只有"交割单 Excel 导入 + 开/平标注"（见 `index.html` L539–L665 的 `tradesBySym` / `drawTrades`），是**事后标注**，不能交互模拟。
+
+用户要的是在回看 K 线时**手动模拟下单**，并完整记录操作：
+1. 开仓可多可空；
+2. 开仓时即设置止损价；
+3. 盈利时可平一半或全平；
+4. 可加仓，加仓带自己的止损；
+5. 可选杠杆 5x / 10x；
+6. 所有操作有记录（操作日志），可复盘。
+
+即把 `btc-timeslicer` 从"看 K 线 + 标交割单"升级为"回看时模拟交易并复盘"。
+
+## 19.2 根因 / 现有模型为何不够
+
+现有 `tradesBySym[sym] = [{side, entryT, entryP, exitT, exitP, pnl, lev}]` 是**单笔一进一出**的标注结构：
+- 无持仓概念（不能加仓、不能平半）；
+- 无止损字段；
+- `pnl` 是导入时外部给的，不是按杠杆/价格算出来的；
+- 没有"在当前回看位置开仓、随光标推进自动判定止损/盈亏"的回放逻辑。
+
+所以必须引入**持仓（Position）模型** + **回放时求值**，而非在旧结构打补丁。
+
+## 19.3 目标
+
+1. 在任意回看位置（光标所在 bar）开多/开空，开仓即带止损与杠杆。
+2. 持仓可加仓（每条加仓腿带独立止损），可平一半、可全平。
+3. 随光标向右回放，自动判定止损/强平是否触发，并在触发 bar 记录平仓。
+4. 全部操作写入操作日志（开/加/平半/平全/止损 + 时间 + 价格 + 已实现盈亏）。
+5. 持仓/日志按 `sym|period` 持久化（localStorage），刷新不丢。
+6. 不破坏现有"交割单导入标注"功能（两套数据并存、渲染样式区分）。
+
+## 19.4 方案设计
+
+### 19.4.1 数据模型（新增，独立于现有 `tradesBySym`）
+
+```js
+// 模拟持仓，按 sym|period 存于 localStorage key 'kline_sim_v1'
+Position = {
+  id: string,
+  sym: string,
+  period: string,                 // 15m/1h/4h/1d，回放语义依赖周期
+  side: 'long' | 'short',
+  leverage: 5 | 10,
+  legs: [                         // 开仓 + 每次加仓
+    { ts: number(分钟), price: number, size: number(名义 BTC), stop: number|null }
+  ],
+  exits: [                        // 平半 / 平全 / 止损 / 强平
+    { ts: number(分钟), price: number, size: number, kind: 'half'|'full'|'sl'|'liq' }
+  ],
+  status: 'open' | 'closed',
+  realizedPnl: number,            // 累计已实现盈亏（BTC）
+  openTs: number(分钟)            // 首腿 ts = 开仓时光标 bar ts
+}
+```
+
+- **size** = 仓位名义（单位 BTC，即"多少 BTC 的敞口"）；保证金 `margin = size / leverage`。
+- 现有 `tradesBySym`（交割单标注）**不动**，渲染时与模拟持仓用不同颜色/标记区分。
+
+### 19.4.2 盈亏数学（统一约定）
+
+```
+dir      = side==='long' ? +1 : -1
+openSize = Σ legs.size
+avgEntry = Σ(leg.price * leg.size) / openSize
+margin   = openSize / leverage
+已实现(平 q@x) = dir * (x - avgEntry) * q          // 累加进 realizedPnl
+未实现(光标 p) = dir * (p - avgEntry) * openSize     // 仅展示
+ROI%     = 未实现(或已实现) / margin * 100
+```
+
+- 采用**加权平均开仓价**法（加仓后重算 avgEntry）；全平总盈亏与逐腿法精确一致，平半为近似（标准做法）。
+- 止损价 `S` = 多：`min(各腿 stop)`；空：`max(各腿 stop)`（取最保守/最近的一道）。
+- 强平价（杠杆的自然结果，作为硬止损）：
+  - 多：`liq = avgEntry * (1 - 1/leverage)`
+  - 空：`liq = avgEntry * (1 + 1/leverage)`
+  （忽略维持保证金细节，v1 用此近似；触发即按 liq 价全平。）
+
+### 19.4.3 回放时求值（核心，保证"回看"正确）
+
+光标位于 `cursorTs` 的 bar。对每个 `open` 持仓：
+1. **活跃窗口** = `(openTs, cursorTs]` 内的 bar。
+2. 对窗口内每个 bar `b`：
+   - 若多且 `b.low ≤ S`（或 `b.low ≤ liq`）→ 在该 bar 生成 **SL/强平退出**（价 = S 或 liq，size = 当前 openSize），`status='closed'`，写日志。
+   - 若空且 `b.high ≥ S`（或 `b.high ≥ liq`）→ 同上。
+   - 命中即停（只取首个触发 bar）。
+3. 若窗口内未触发，则持仓在光标处**未实现**，按 `cursorPrice` 算未实现盈亏。
+4. **时间感知显示**：`openTs > cursorTs` 的持仓视为"未来/未触发"，面板与图表不显示（回放到该 bar 后才出现）。用户把光标**左移**越过某笔平仓后，该平仓从图中隐去（回放可逆）。
+
+> 这样"开了单然后向右拖着看"就能看到止损有没有被扫、盈亏怎么走——这是模拟盘相对事后标注的最大价值。
+
+### 19.4.4 交互（UI）
+
+新增"模拟交易"面板（侧栏/底部，按钮切换显隐）：
+- **杠杆**：5x / 10x 单选（默认 10x），仅影响**新开**持仓。
+- **仓位 size**：输入框（BTC 名义）。
+- **止损价**：输入框（可选；留空 = 无止损，仅强平保护）。
+- **开多 / 开空**：以**光标价**（或点击的 bar 价）为开仓价，建仓并记日志 `开多@e lev=10x size=s sl=S`。
+- **加仓**：对当前同向后**未平**持仓，在光标价追加一条腿（带本腿止损），重算 avgEntry/openSize/activeStop，记 `加仓@e size=s sl=S`。
+- **平半 / 平全**：以光标价平 50% / 100% 当前 openSize，记 `平半@x ... 实现PnL=..` / `平全@x ...`。
+- 止损可改：面板内编辑持仓止损 → 更新 activeStop。
+- **操作日志**：按时间列表，每条含 动作/方向/杠杆/价格/数量/已实现盈亏/对应 bar 时间；可导出 CSV / JSON（亦可映射回现有交割单格式，便于复用 `drawTrades` 标注样式）。
+
+### 19.4.5 图表渲染（扩展 `drawTrades` @ L642）
+
+- 开仓：在首腿 `entryT` bar 画圆点 + "开"（多红/空绿），同现有逻辑。
+- 加仓：在加仓腿 bar 画小圆点 + "加"。
+- 止损线：当前 activeStop 画**水平虚线**（多=红在下方、空=绿在上方），贯穿可视区。
+- 平仓：平半画"半"、平全画"平"、止损/强平画"损"，连线到退出 bar，附盈亏标签。
+- 现有 `tradesBySym` 交割单标注**保持原样式不变**，仅新增模拟持仓的渲染分支（用不同标记/透明度区分）。
+
+### 19.4.6 持久化
+
+- key `kline_sim_v1` → `{ [sym|period]: { positions: Position[], log: OpLog[] } }`。
+- `loadSim()` / `saveSim()` 类比现有 `loadTrades`(L558) / `localStorage.setItem(TRADES_KEY)`(L612)。
+- 切换 `sym|period` 时按 key 载入对应持仓与日志。
+
+## 19.5 验收标准
+
+| # | 用例 | 预期 |
+|---|------|------|
+| E1 | 光标处点"开多"，size=1 lev=10x sl=设 | 生成 open 持仓，avgEntry=光标价，activeStop=sl，日志有"开多" |
+| E2 | 光标右移越过 sl 价 | 该 bar 自动生成"损"退出，status=closed，realizedPnl 按 sl 算，日志有"止损@.." |
+| E3 | 开多后点"加仓" | openSize 增加、avgEntry 重算、新增一条腿与独立 stop，日志"加仓" |
+| E4 | 持仓盈利时点"平半" | openSize 减半，realizedPnl 累加 `dir*(x-avgEntry)*q`，日志"平半"；再"平全"→ closed |
+| E5 | 杠杆 5x vs 10x 同价同 size | 10x 的 ROI% 是 5x 的 2 倍；强平价 10x 更近（更易触发） |
+| E6 | 光标左移回到开仓前 | 该持仓从图/面板消失（"未触发"），右移回又出现 |
+| E7 | 刷新页面 | 持仓与日志从 localStorage 恢复，不丢 |
+| E8 | 切换 sym/period 再切回 | 各自持仓独立保存、互不影响 |
+| E9 | 强平价被刺穿 | 同 E2 但退出 kind='liq'，价=liq |
+| E10 | 不改现有交割单导入/标注 | 导入 Excel、`drawTrades` 原标注正常显示 |
+
+## 19.6 非目标
+
+- 真实下单 / 真实资金（纯模拟）。
+- 逐腿 FIFO 盈亏（用加权平均开仓价）。
+- 每条腿独立部分止损（v1：触发 activeStop 即全平）。
+- 跨资产/逐仓保证金复杂模型、资金费率、维持保证金精算。
+- 回测统计报表（v1 仅持仓 PnL + 操作日志；汇总统计为后续）。
+
+## 19.7 测试策略
+
+1. **自动化**：`tests/regression.test.cjs` 新增 §19 断言（mock canvas）：
+   - 在 cursor 开多/开空 → positions 新增、字段正确；
+   - 构造一段含击穿 sl 的假数据，推进 cursor → 自动生成 sl 退出、realizedPnl 正确（用已知价格验算）；
+   - 加仓 → openSize/avgEntry 正确；
+   - 平半 → size 减半、realized 正确；平全 → closed；
+   - 杠杆换 5x/10x → ROI 比例 2x、liq 价正确；
+   - cursor 左移 < openTs → 持仓不显示；
+   - saveSim/loadSim 往返一致；
+   - 现有 §7 交割单标注断言不受影响。
+2. **手动**：mac 实测 §19.5 E1–E10。
+
+## 19.8 交付物
+
+| 文件 | 内容 |
+|---|---|
+| `index.html` | 新增模拟持仓模型 + 开/加/平半/平全/止损/强平 + 回放求值 + 面板 UI + `drawTrades` 扩展渲染 + `loadSim/saveSim` |
+| `tests/regression.test.cjs` | 新增 §19 断言 |
+| `PRD.md` | 本文档（§19） |
+
+## 19.9 风险与对策
+
+| 风险 | 对策 |
+|------|------|
+| 回放双向（光标左右移）状态错乱 | 求值每次基于 `(openTs, cursorTs]` 重算，不增量累积；退出只在窗口内首触发 bar 生成 |
+| 止损介于两根 bar 之间 | 用 bar 的 `low/high` 判定穿越，退出价取 stop/liq（非 wick 价） |
+| 与现有 `tradesBySym` 渲染混淆 | 两套 key 独立；`drawTrades` 内按来源分渲染分支与样式 |
+| 盈亏公式错（尤其加仓/杠杆） | §19.7 用已知价格写断言硬验 realizedPnl/ROI/liq |
+| 止损价非法/为空 | 空=仅强平保护；非数字忽略并提示；sl 方向需比 entry 更优（多 sl<entry，空 sl>entry），否则提示 |
+| 平半时 size 过小 | size<2×最小单位时禁用"平半"或退化为全平 |
+
+## 19.10 完成定义
+
+- [ ] PRD §19 写完（含模型 + 盈亏数学 + 回放求值 + 验收 + 完成定义）
+- [ ] `index.html`：模拟持仓模型 + 开/加/平半/平全/止损/强平 + 回放求值 + 面板 + `drawTrades` 扩展 + `loadSim/saveSim`
+- [ ] `tests/regression.test.cjs` 新增 §19 断言，全过
+- [ ] mac 手动验收 E1–E10
+- [ ] 提交并推送

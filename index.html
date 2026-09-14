@@ -565,6 +565,70 @@ function loadTrades() {
 }
 
 // 解析 Excel：自动识别两个 sheet、按表头列名定位，归一化币种后按当前币种绘制
+// ================= 模拟交易（§19）：持仓模型 + 盈亏数学 + 回放求值 =================
+const SIM_KEY = 'kline_sim_v1';
+let simStore = {};   // { 'sym|period': { positions: Position[], log: OpLog[] } }
+
+function simKey(sym, period) { return sym + '|' + period; }
+
+function loadSim() {
+  try {
+    const raw = localStorage.getItem(SIM_KEY);
+    simStore = raw ? JSON.parse(raw) : {};
+  } catch (e) { simStore = {}; }
+}
+function saveSim() {
+  try { localStorage.setItem(SIM_KEY, JSON.stringify(simStore)); } catch (e) {}
+}
+
+// ---- 纯函数：持仓数学（统一约定见 PRD §19.4.2）----
+function simDir(pos) { return pos.side === 'long' ? 1 : -1; }
+function simOpenSize(pos) { return pos.legs.reduce((a, l) => a + (l.size || 0), 0); }
+function simAvgEntry(pos) {
+  const s = simOpenSize(pos);
+  if (s === 0) return 0;
+  return pos.legs.reduce((a, l) => a + (l.price || 0) * (l.size || 0), 0) / s;
+}
+function simMargin(pos) { return simOpenSize(pos) / pos.leverage; }
+function simActiveStop(pos) {
+  const stops = pos.legs.map(l => l.stop).filter(s => s != null && !isNaN(s));
+  if (!stops.length) return null;
+  return pos.side === 'long' ? Math.min.apply(null, stops) : Math.max.apply(null, stops);
+}
+function simLiqPrice(pos) {
+  const e = simAvgEntry(pos);
+  return pos.side === 'long' ? e * (1 - 1 / pos.leverage) : e * (1 + 1 / pos.leverage);
+}
+function simRealizedPnl(pos) { return pos.exits.reduce((a, x) => a + (x.realized || 0), 0); }
+function simUnrealized(pos, cursorPrice) {
+  if (pos.status !== 'open') return 0;
+  return simDir(pos) * (cursorPrice - simAvgEntry(pos)) * simOpenSize(pos);
+}
+
+// 开仓：在光标处建立多/空持仓（price = 光标价，ts = 光标 bar 时间戳）
+function simOpen(o) {
+  const sym = o.sym, period = o.period, side = o.side, leverage = o.leverage;
+  const size = o.size, price = o.price, stop = (o.stop == null || isNaN(o.stop)) ? null : o.stop, ts = o.ts;
+  const k = simKey(sym, period);
+  simStore[k] = simStore[k] || { positions: [], log: [] };
+  const st = simStore[k];
+  const leg = { ts: ts, price: price, size: size, stop: stop };
+  const pos = {
+    id: 'p' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36),
+    sym: sym, period: period, side: side, leverage: leverage,
+    legs: [leg], exits: [], autoExit: null, status: 'open', realizedPnl: 0, openTs: ts
+  };
+  st.positions.push(pos);
+  st.log.push({
+    t: ts, action: 'open', side: side, leverage: leverage, price: price, size: size, stop: stop,
+    sym: sym, period: period,
+    msg: (side === 'long' ? '开多' : '开空') + '@' + price + ' lev=' + leverage + 'x size=' + size + (stop != null ? ' sl=' + stop : '')
+  });
+  saveSim();
+  return pos;
+}
+function simClearAll() { simStore = {}; saveSim(); }
+
 async function importTradesFile(file) {
   if (typeof XLSX === 'undefined') { setTradeInfo('Excel 解析库未加载'); return; }
   setTradeInfo('解析 Excel 中…');
@@ -2323,6 +2387,7 @@ window.addEventListener('resize', resize);
 loadPrefs();
 loadSession();
 loadTrades();
+loadSim();
 focusInit();
 if (Object.keys(tradesBySym).length) {
   const total = Object.values(tradesBySym).reduce((a, b) => a + b.length, 0);
