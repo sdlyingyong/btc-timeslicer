@@ -92,7 +92,9 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     // §19 模拟交易
     getSimStore: () => simStore,
     simOpen, simAdd, simExit, simEvaluatePosition, simReplay, simAvgEntry, simOpenSize, simActiveStop, simLiqPrice, simRealizedPnl, simUnrealized, simDir, simMargin,
-    loadSim, saveSim, simKey, simClearAll: () => { simStore = {}; saveSim(); }
+    loadSim, saveSim, simKey, simClearAll: () => { simStore = {}; saveSim(); },
+    // §19.5 UI 控制器 + 渲染数据
+    simMarks, simOpenAtCursor, simAddAtCursor, simExitAtCursor, simCursorTs, simCursorPrice, simLeverage, simStopVal, simSizeVal, drawSim, renderSim
   };`);
 fn(sandbox.window, sandbox.document, sandbox.localStorage, async () => ({}), sandbox.location, console, canvasMock, 1);
 const API = sandbox.window.__API__;
@@ -844,6 +846,54 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     API.simReplay('BTC', '1d', cursorB);
     check('§19 E2 集成：真实数据窗口触发 sl', pR.status === 'closed' && pR.exits.some(e => e.auto && e.kind === 'sl'));
     check('§19 E2 集成：退出价=stopB', pR.exits.some(e => e.auto && near(e.price, stopB)), 'stopB=' + stopB);
+    API.simClearAll();
+  }
+
+  // ============ 19.5 UI 控制器 + 渲染数据（E1/E3/E4 接线、E10 标注/面板） ============
+  {
+    // 控制器以 opts 显式覆盖光标，保证无 DOM 可测；E1 开多/开空接线
+    API.simClearAll();
+    const pO = API.simOpenAtCursor('long', { sym: 'BTC', period: '1d', price: 1000, ts: 100, leverage: 10, size: 1, stop: 900 });
+    check('§19 E1 控制器开多：生成未平持仓', !!pO && pO.status === 'open' && pO.side === 'long');
+    check('§19 E5 控制器默认 10x（无 select）', pO.leverage === 10);
+    const st5 = API.getSimStore()['BTC|1d'];
+    check('§19 E1 控制器开多：写入 simStore', st5 && st5.positions.length === 1);
+    // simMarks（E10 渲染数据）：入场点/均价/SL/强平
+    const mk = API.simMarks('BTC', '1d', 100);
+    check('§19 E10 simMarks 数量=1', mk.length === 1);
+    check('§19 E10 入场均价=1000', near(mk[0].entryPrice, 1000), '' + mk[0].entryPrice);
+    check('§19 E10 止损线=900', near(mk[0].sl, 900));
+    check('§19 E10 强平线=1000*(1-1/10)=900', near(mk[0].liq, 900), '' + mk[0].liq);
+    check('§19 E10 入场 idx 命中（findIdxSync）', mk[0].entryIdx >= 0, '' + mk[0].entryIdx);
+
+    // E3 加仓接线
+    API.simAddAtCursor({ sym: 'BTC', period: '1d', price: 1100, ts: 200, size: 1, stop: 950 });
+    const mk2 = API.simMarks('BTC', '1d', 200);
+    check('§19 E3 控制器加仓：legs=2', mk2[0].committed === 2, '' + mk2[0].committed);
+    check('§19 E3 加仓后均价=(1000+1100)/2=1050', near(mk2[0].entryPrice, 1050), '' + mk2[0].entryPrice);
+
+    // E4 平半/平全接线 + 退出标注
+    API.simExitAtCursor('half', { sym: 'BTC', period: '1d', price: 1200, ts: 300 });
+    let mk3 = API.simMarks('BTC', '1d', 300);
+    check('§19 E4 控制器平半：退出含 kind=half', mk3[0].exits.some(e => e.kind === 'half'));
+    check('§19 E4 平半后剩余 size=1', near(mk3[0].size, 1), '' + mk3[0].size);
+    API.simExitAtCursor('full', { sym: 'BTC', period: '1d', price: 1300, ts: 400 });
+    mk3 = API.simMarks('BTC', '1d', 400);
+    check('§19 E4 控制器平全：status=closed', mk3[0].status === 'closed');
+    check('§19 E4 平全退出含 kind=full', mk3[0].exits.some(e => e.kind === 'full'));
+    check('§19 E4 已实现累加>0', mk3[0].realized > 0, '' + mk3[0].realized.toFixed(2));
+
+    // E10 面板/渲染不抛异常（drawSim 依赖 canvas stub）
+    let threw = false;
+    try { API.drawSim(); API.renderSim(); API.draw(); } catch (e) { threw = true; }
+    check('§19 E10 drawSim/renderSim/draw 不抛异常', !threw);
+
+    // simCursorTs 回退：无悬停时返回数据范围内 ts
+    API.simClearAll();
+    const cts = API.simCursorTs();
+    const allTs = DATA['1d'].map(b => b[0]);
+    check('§19 simCursorTs 回退到数据范围内', cts != null && cts >= Math.min.apply(null, allTs) && cts <= Math.max.apply(null, allTs), '' + cts);
+
     API.simClearAll();
   }
 

@@ -141,6 +141,33 @@
   #focusClear { margin-top: 10px; width: 100%; }
 
 
+  /* ---- §19 模拟交易 面板 + 工具栏 ---- */
+  .sim-group { flex-wrap: wrap; }
+  .sim-sel, .sim-inp { background: #11161f; color: #dde4f1; border: 1px solid #2a3142; border-radius: 7px; font-size: 12.5px; font-family: inherit; padding: 6px 8px; }
+  .sim-inp { width: 64px; }
+  .sim-inp.sim-size { width: 52px; }
+  .sim-group button { background: #182031; color: #cdd3e0; border: 1px solid #2a3142; border-radius: 7px; font-size: 12.5px; font-weight: 600; padding: 6px 11px; cursor: pointer; transition: .15s; font-family: inherit; }
+  .sim-group button:hover { border-color: #3a4458; }
+  .sim-group button.primary { background: rgba(47,191,113,.16); color: #7ee2a8; border-color: rgba(47,191,113,.45); }
+  .sim-group button.primary:hover { background: rgba(47,191,113,.26); }
+  .sim-group button.danger { background: rgba(239,77,77,.14); color: #ff9a9a; border-color: rgba(239,77,77,.4); }
+  .sim-group button.danger:hover { background: rgba(239,77,77,.24); }
+  .sim-panel { position: absolute; right: 70px; top: 56px; z-index: 30; width: 196px; background: rgba(12,18,28,.94); border: 1px solid #2a3142; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.45); font-size: 12px; color: #cdd3e0; backdrop-filter: blur(4px); }
+  .sim-panel .sim-h { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; font-weight: 700; color: #e7ecf5; border-bottom: 1px solid #1d2433; }
+  .sim-panel .sim-h button { background: none; border: none; color: #6b7689; font-size: 15px; line-height: 1; cursor: pointer; padding: 0 4px; }
+  .sim-panel .sim-h button:hover { color: #cdd3e0; }
+  .sim-panel #simBody { padding: 8px 10px; max-height: 52vh; overflow-y: auto; }
+  .sim-pos { padding: 8px 0; border-bottom: 1px dashed #1d2433; }
+  .sim-pos:last-child { border-bottom: none; }
+  .sim-pos-h { display: flex; align-items: center; justify-content: space-between; margin-bottom: 5px; }
+  .sim-pos-h b { font-size: 13px; }
+  .sim-st { font-size: 11px; color: #9aa6bd; }
+  .sim-row { display: flex; align-items: center; justify-content: space-between; padding: 1.5px 0; }
+  .sim-row span { color: #8590a3; }
+  .sim-row b { font-weight: 600; color: #dde4f1; }
+  .sim-log-h { margin-top: 8px; padding-top: 6px; border-top: 1px solid #1d2433; color: #9aa6bd; font-weight: 600; }
+  .sim-log { max-height: 160px; overflow-y: auto; }
+  .sim-log-i { padding: 2px 0; color: #aeb7c7; font-size: 11px; line-height: 1.4; word-break: break-all; }
 </style>
 </head>
 <body>
@@ -218,6 +245,21 @@
     <label class="chk"><input type="checkbox" id="showTrades" checked><span class="sw" style="background:#ffd166"></span>显示标注</label>
     <button id="clearTrades" class="danger">清除交割单</button>
   </div>
+  <div class="group sim-group">
+    <span class="group-label">模拟</span>
+    <select id="simLev" class="sim-sel" title="杠杆倍数">
+      <option value="5">5x</option>
+      <option value="10" selected>10x</option>
+    </select>
+    <input id="simStop" class="sim-inp" type="number" placeholder="止损" title="止损价（留空=不设置）">
+    <input id="simSize" class="sim-inp sim-size" type="number" value="1" min="0.0001" step="0.0001" title="仓位数量">
+    <button id="simLong" class="primary">开多</button>
+    <button id="simShort" class="danger">开空</button>
+    <button id="simAdd">加仓</button>
+    <button id="simHalf">平半</button>
+    <button id="simFull">平全</button>
+    <button id="simClear" class="danger">清仓</button>
+  </div>
 </div>
 <div id="main">
   <div id="tradePanel">
@@ -250,6 +292,10 @@
   <div id="hint">
     <span class="tip-text">滚轮缩放 · 拖拽平移 · <kbd>←</kbd><kbd>→</kbd> 逐根步进 · <kbd>G</kbd> 日期跳转 · <kbd>Del</kbd> 删除选中 · 「盈亏比」拖出入场/止盈/止损</span>
     <button id="hintClose" title="隐藏提示">×</button>
+  </div>
+  <div id="simPanel" class="sim-panel" style="display:none">
+    <div class="sim-h">模拟持仓 <button id="simCloseX" title="隐藏面板">×</button></div>
+    <div id="simBody"></div>
   </div>
 </div>
 
@@ -723,6 +769,202 @@ function simReplay(sym, period, cursorTs) {
     simEvaluatePosition(pos, bars);
     if (!pos.exits.some(e => e.auto)) simRecomputeStatus(pos); // 未触发仍 open
   }
+}
+
+// ================= 模拟交易 UI（§19）：光标下单 + 渲染 + 面板 =================
+// 当前「回放光标」= 鼠标所在 bar；无悬停时取视图最右可见根（时光机当前时间）
+function simCursorIdx() {
+  if (hover.x >= PAD_L && hover.x <= PAD_L + SCALE.plotW) {
+    const i = Math.floor(SCALE.viewStart + (hover.x - PAD_L) / SCALE.xW);
+    if (i >= 0 && i < dataLen()) return i;
+  }
+  return -1;
+}
+function simCursorBar() {
+  const i = simCursorIdx();
+  if (i >= 0) { const b = getBar(i); if (b) return b; }
+  const r = Math.max(0, Math.min(dataLen() - 1, Math.floor(viewStart + viewCount) - 1));
+  return getBar(r);
+}
+function simCursorTs() { const b = simCursorBar(); return b ? b[0] : null; }
+function simCursorPrice() { const b = simCursorBar(); return b ? b[4] : null; } // close
+
+// 读取 UI 控件（无控件/空值时给出默认），便于无 DOM 单测
+function simLeverage() {
+  const el = document.getElementById('simLev');
+  const v = parseFloat(el && el.value);
+  return (v === 5 || v === 10) ? v : 10;
+}
+function simStopVal() {
+  const el = document.getElementById('simStop');
+  const s = el && el.value;
+  if (s === '' || s == null) return null;
+  const v = parseFloat(s);
+  return isNaN(v) ? null : v;
+}
+function simSizeVal() {
+  const el = document.getElementById('simSize');
+  const v = parseFloat(el && el.value);
+  return (v && v > 0) ? v : 1;
+}
+
+// ---- 控制器：以「光标处」为基准开/加/平，opts 可显式覆盖（测试友好）----
+function simOpenAtCursor(side, opts) {
+  opts = opts || {};
+  const sym = opts.sym || curSym, period = opts.period || cur;
+  const price = opts.price != null ? opts.price : simCursorPrice();
+  const ts = opts.ts != null ? opts.ts : simCursorTs();
+  if (ts == null) return null;
+  const pos = simOpen({ sym: sym, period: period, side,
+    leverage: opts.leverage != null ? opts.leverage : simLeverage(),
+    size: opts.size != null ? opts.size : simSizeVal(),
+    price: price, stop: opts.stop !== undefined ? opts.stop : simStopVal(), ts });
+  simReplay(sym, period, ts);
+  renderSim(); draw();
+  return pos;
+}
+function simAddAtCursor(opts) {
+  opts = opts || {};
+  const sym = opts.sym || curSym, period = opts.period || cur;
+  const price = opts.price != null ? opts.price : simCursorPrice();
+  const ts = opts.ts != null ? opts.ts : simCursorTs();
+  if (ts == null) return null;
+  const pos = simAdd({ sym: sym, period: period,
+    size: opts.size != null ? opts.size : simSizeVal(),
+    price: price, stop: opts.stop !== undefined ? opts.stop : simStopVal(), ts });
+  if (pos) { simReplay(sym, period, ts); renderSim(); draw(); }
+  return pos;
+}
+function simExitAtCursor(kind, opts) {
+  opts = opts || {};
+  const sym = opts.sym || curSym, period = opts.period || cur;
+  const price = opts.price != null ? opts.price : simCursorPrice();
+  const ts = opts.ts != null ? opts.ts : simCursorTs();
+  if (ts == null) return null;
+  const pos = simExit({ sym: sym, period: period, kind: kind, price: price, ts });
+  if (pos) { simReplay(sym, period, ts); renderSim(); draw(); }
+  return pos;
+}
+function simClearPositions() { simClearAll(); renderSim(); draw(); }
+
+// 渲染数据（纯函数，供 drawSim 与面板共用）：每个持仓一条 mark
+function simMarks(sym, period, cursorTs) {
+  const st = simStore[simKey(sym, period)];
+  if (!st) return [];
+  let cursorPrice = null;
+  if (cursorTs != null) {
+    const ci = findIdxSync(cursorTs);
+    const b = ci >= 0 ? getBar(ci) : null;
+    cursorPrice = b ? b[4] : null;
+  }
+  const out = [];
+  for (const pos of st.positions) {
+    out.push({
+      id: pos.id, side: pos.side, leverage: pos.leverage, status: pos.status,
+      entryIdx: findIdxSync(pos.openTs), entryPrice: simAvgEntry(pos),
+      size: simOpenSize(pos), committed: simCommittedSize(pos),
+      sl: simActiveStop(pos), liq: simLiqPrice(pos),
+      exits: pos.exits.map(e => ({ idx: findIdxSync(e.ts), price: e.price, kind: e.kind, auto: !!e.auto, realized: e.realized || 0 })),
+      realized: simRealizedPnl(pos),
+      unrealized: cursorPrice != null ? simUnrealized(pos, cursorPrice) : 0,
+      margin: simOpenSize(pos) / pos.leverage
+    });
+  }
+  return out;
+}
+
+// 在 K 线上绘制模拟持仓：SL 红虚线 / 强平橙虚线 / 入场点 / 退出点
+function drawSim() {
+  const marks = simMarks(curSym, cur, simCursorTs());
+  if (!marks.length) return;
+  const plotL = PAD_L, plotR = PAD_L + SCALE.plotW;
+  ctx.save();
+  ctx.font = '10px system-ui, sans-serif'; ctx.textBaseline = 'alphabetic';
+  for (const m of marks) {
+    if (m.sl != null) {
+      const y = SCALE.yP(m.sl);
+      if (y >= SCALE.mainTop - 30 && y <= SCALE.mainBot + 30) {
+        ctx.strokeStyle = 'rgba(239,77,77,.75)'; ctx.lineWidth = 1; ctx.setLineDash([5, 4]);
+        ctx.beginPath(); ctx.moveTo(plotL, y); ctx.lineTo(plotR, y); ctx.stroke(); ctx.setLineDash([]);
+        ctx.fillStyle = '#ff9a9a'; ctx.textAlign = 'left'; ctx.fillText('SL ' + fmtPrice(m.sl), plotL + 4, y - 3);
+      }
+    }
+    if (m.liq != null && m.liq > 0) {
+      const y = SCALE.yP(m.liq);
+      if (y >= SCALE.mainTop - 30 && y <= SCALE.mainBot + 30) {
+        ctx.strokeStyle = 'rgba(255,154,61,.65)'; ctx.lineWidth = 1; ctx.setLineDash([2, 4]);
+        ctx.beginPath(); ctx.moveTo(plotL, y); ctx.lineTo(plotR, y); ctx.stroke(); ctx.setLineDash([]);
+        ctx.fillStyle = '#ffb454'; ctx.textAlign = 'left'; ctx.fillText('LIQ ' + fmtPrice(m.liq), plotL + 4, y + 11);
+      }
+    }
+    if (m.entryIdx >= 0) {
+      const ex = PAD_L + (m.entryIdx - SCALE.viewStart + 0.5) * SCALE.xW;
+      if (ex >= plotL - 40 && ex <= plotR + 40) {
+        const ey = SCALE.yP(m.entryPrice);
+        const col = m.side === 'long' ? '#ef4d4d' : '#2fbf71';
+        ctx.fillStyle = col; ctx.beginPath(); ctx.arc(ex, ey, 4, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = col; ctx.textAlign = 'center'; ctx.fillText(m.side === 'long' ? '开多' : '开空', ex, ey - 7);
+      }
+    }
+    for (const x of m.exits) {
+      if (x.idx < 0) continue;
+      const xx = PAD_L + (x.idx - SCALE.viewStart + 0.5) * SCALE.xW;
+      if (xx < plotL - 40 || xx > plotR + 40) continue;
+      const xy = SCALE.yP(x.price);
+      const col = x.kind === 'sl' ? '#ff5d5d' : x.kind === 'liq' ? '#ffb454' : x.kind === 'half' ? '#4dd0ff' : '#9aa6bd';
+      const label = x.kind === 'sl' ? '损' : x.kind === 'liq' ? '强平' : x.kind === 'half' ? '平半' : '平全';
+      ctx.fillStyle = col; ctx.beginPath(); ctx.arc(xx, xy, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = col; ctx.textAlign = 'center'; ctx.fillText(label, xx, xy + 13);
+    }
+  }
+  ctx.restore();
+}
+
+// 浮动持仓面板（仅更新 #simBody，关闭按钮常驻不丢监听）
+function renderSim() {
+  const panel = document.getElementById('simPanel');
+  if (!panel) return;
+  const body = document.getElementById('simBody');
+  if (!body) return;
+  const marks = simMarks(curSym, cur, simCursorTs());
+  if (!marks.length) { panel.style.display = 'none'; body.innerHTML = ''; return; }
+  panel.style.display = 'block';
+  let html = '';
+  for (const m of marks) {
+    const col = m.side === 'long' ? '#ef4d4d' : '#2fbf71';
+    html += '<div class="sim-pos">' +
+      '<div class="sim-pos-h"><b style="color:' + col + '">' + (m.side === 'long' ? '多' : '空') + ' ' + m.leverage + 'x</b>' +
+      '<span class="sim-st">' + (m.status === 'open' ? '持仓中' : '已平') + '</span></div>' +
+      '<div class="sim-row"><span>均价</span><b>' + fmtPrice(m.entryPrice) + '</b></div>' +
+      '<div class="sim-row"><span>数量</span><b>' + m.size + '</b></div>' +
+      '<div class="sim-row"><span>保证金</span><b>' + fmtPrice(m.margin) + '</b></div>' +
+      '<div class="sim-row"><span>止损</span><b style="color:#ff9a9a">' + (m.sl != null ? fmtPrice(m.sl) : '-') + '</b></div>' +
+      '<div class="sim-row"><span>强平</span><b style="color:#ffb454">' + (m.liq != null ? fmtPrice(m.liq) : '-') + '</b></div>' +
+      '<div class="sim-row"><span>已实现</span><b style="color:' + (m.realized >= 0 ? '#2fbf71' : '#ef4d4d') + '">' + (m.realized >= 0 ? '+' : '') + m.realized.toFixed(2) + '</b></div>' +
+      '<div class="sim-row"><span>浮动</span><b style="color:' + (m.unrealized >= 0 ? '#2fbf71' : '#ef4d4d') + '">' + (m.unrealized >= 0 ? '+' : '') + m.unrealized.toFixed(2) + '</b></div>' +
+      '</div>';
+  }
+  const st = simStore[simKey(curSym, cur)];
+  if (st && st.log.length) {
+    html += '<div class="sim-log-h">操作记录</div><div class="sim-log">';
+    for (let i = st.log.length - 1; i >= Math.max(0, st.log.length - 8); i--) {
+      const e = st.log[i];
+      html += '<div class="sim-log-i">' + tsStr(e.t) + ' ' + e.msg + '</div>';
+    }
+    html += '</div>';
+  }
+  body.innerHTML = html;
+}
+
+function wireSim() {
+  const on = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener('click', fn); };
+  on('simLong', () => simOpenAtCursor('long'));
+  on('simShort', () => simOpenAtCursor('short'));
+  on('simAdd', () => simAddAtCursor());
+  on('simHalf', () => simExitAtCursor('half'));
+  on('simFull', () => simExitAtCursor('full'));
+  on('simClear', () => simClearPositions());
+  on('simCloseX', () => { const p = document.getElementById('simPanel'); if (p) p.style.display = 'none'; });
 }
 
 async function importTradesFile(file) {
@@ -1629,6 +1871,7 @@ function draw() {
   ctx.clip();
   drawLines();
   drawTrades();
+  try { simReplay(curSym, cur, simCursorTs()); drawSim(); renderSim(); } catch (e) {}
   drawRRDraft();
   ctx.restore();
   updateTradePanel();
@@ -2484,6 +2727,7 @@ loadPrefs();
 loadSession();
 loadTrades();
 loadSim();
+wireSim();
 focusInit();
 if (Object.keys(tradesBySym).length) {
   const total = Object.values(tradesBySym).reduce((a, b) => a + b.length, 0);
