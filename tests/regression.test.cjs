@@ -242,6 +242,44 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     check('删除后视图拖拽正常', API.getViewStart() !== vs1);
   }
 
+  // ============ 4b. 水平通道（两条水平线成区间带） ============
+  {
+    API.setTool('hchannel');
+    down(300, 300);   // 第一条水平线
+    down(300, 500);   // 第二条
+    const hc = API.getLines()[API.getLines().length - 1];
+    check('hchannel 两点创建', !!hc && hc.type === 'hchannel');
+    check('hchannel 自动退出', API.getTool() === 'cursor');
+    check('hchannel 价格=光标价', !!hc && near(hc.price1, API.yToPrice(300)) && near(hc.price2, API.yToPrice(500)),
+      hc ? (hc.price1 + '/' + hc.price2) : 'null');
+    // hitTest 不抛异常（承接 channel 同类回归）
+    let threw = null;
+    try { API.hitTest(400, 300); API.hitTest(400, 400); API.hitTest(400, 500); } catch (e) { threw = e.message; }
+    check('hchannel 存在时 hitTest 不抛异常', threw === null, threw || '');
+    const h1 = API.hitTest(400, API.priceToY(hc.price1));
+    check('hchannel p1 命中', !!h1 && h1.handle === 'p1');
+    const h2 = API.hitTest(400, API.priceToY(hc.price2));
+    check('hchannel p2 命中', !!h2 && h2.handle === 'p2');
+    // p1 拖拽只改 price1
+    const bp1 = hc.price1;
+    down(400, API.priceToY(hc.price1)); move(400, API.priceToY(hc.price1) - 30);
+    check('hchannel p1 拖拽生效', !near(hc.price1, bp1));
+    up(); move(-1, -1);
+    // body 命中 + 整体平移（上下线同移，价差不变）
+    const midY = (API.priceToY(hc.price1) + API.priceToY(hc.price2)) / 2;
+    const bodyHit = API.hitTest(400, midY);
+    check('hchannel body 命中', !!bodyHit && bodyHit.handle === 'body');
+    if (bodyHit) {
+      const b = { p1: hc.price1, p2: hc.price2 };
+      down(400, midY); wmove(400, midY - 40);
+      check('hchannel body 整体平移（价差不变）',
+        !near(hc.price1, b.p1) && near(hc.price1 - b.p1, hc.price2 - b.p2, 1e-6),
+        hc.price1 + '/' + hc.price2);
+      up(); move(-1, -1);
+    }
+    check('hchannel 删除', deleteLine('hchannel', hc));
+  }
+
   // ============ 5. 视图：空白拖拽平移 + 时间轴跳转 ============
   {
     const vs0 = API.getViewStart();
@@ -937,6 +975,7 @@ function deleteLine(type, obj) {
   // 按对象真实坐标点击命中并选中，再 Del 删除
   let px, py;
   if (type === 'hline') { px = 8 + 400; py = sy(obj.price); }
+  else if (type === 'hchannel') { px = 8 + 400; py = sy(obj.price1); }
   else if (type === 'trade') { px = 600; py = sy(obj.entry); }
   else { px = sx(API.lnIdx(obj, 'x1')); py = sy(obj.y1); }
   down(px, py);
