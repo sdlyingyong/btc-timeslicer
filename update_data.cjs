@@ -88,20 +88,46 @@ for (const p of ['15m', '1h', '4h']) {
   const lastTs = arr[arr.length - 1][0];        // 分钟
   const barOkx = PERIODS[p];
 
-  // 从最新往回翻页，直到越过已有末端
+  // 从最新往回翻页，直到越过已有末端。
+  // 端点策略：先用 market/candles（只覆盖最近一段，快且稳）；
+  //   若翻到头仍未够到已有末端（说明断更太久），自动换 history-candles 继续往回补
+  //   —— 否则 15m 一旦断更超过约 15 天，缺口就再也补不回来了。
+  // ⚠️ 关键：第一页就取不到数据时**必须显式失败**。历史教训：云端定时任务在 OKX 返回空
+  //    （地域限制/限频/被墙）时被当成「没有新数据」静默 exit 0 —— 表现为「工作流天天绿、
+  //   数据永远不更新」，排查成本极高。空返回 ≠ 无新数据。
   const cols = [];                              // OKX 原始蜡烛（最新在前）
-  let after = null, pages = 0;
+  let after = null, pages = 0, reached = false, ep = 'candles';
   while (pages < 80) {
-    let url = `https://www.okx.com/api/v5/market/candles?instId=${INST}&bar=${barOkx}&limit=${LIMIT}`;
+    let url = `https://www.okx.com/api/v5/market/${ep}?instId=${INST}&bar=${barOkx}&limit=${LIMIT}`;
     if (after) url += `&after=${after}`;
     const j = fetchJson(url);
-    if (j.code !== '0' || !Array.isArray(j.data) || j.data.length === 0) break;
-    for (const c of j.data) cols.push(c);
-    const oldestMs = Number(j.data[j.data.length - 1][0]);
+    const rows = (j && j.code === '0' && Array.isArray(j.data)) ? j.data : [];
+    if (rows.length === 0) {
+      if (ep === 'candles') {                    // 先换端点重试一次，不计页数
+        ep = 'history-candles';
+        console.log(`${p}: market/candles 空返回，改用 history-candles 重试`);
+        continue;
+      }
+      if (pages === 0) {
+        console.error(`[FAIL] ${p}: OKX 两个端点都没取到数据（code=${j && j.code} msg=${j && j.msg}）。` +
+          '这不是「没有新数据」，而是取数失败（地域限制/限频/被墙）—— 拒绝静默通过。');
+        process.exit(1);
+      }
+      break;
+    }
+    for (const c of rows) cols.push(c);
+    const oldestMs = Number(rows[rows.length - 1][0]);
     pages++;
-    if (oldestMs <= lastTs * 60000) break;       // 已抵达/越过已有末端
+    if (oldestMs <= lastTs * 60000) { reached = true; break; }   // 已抵达/越过已有末端
+    if (rows.length < LIMIT && ep === 'candles') {               // 快照端点到底 → 换历史端点
+      ep = 'history-candles';
+      console.log(`${p}: market/candles 已到底，改用 history-candles 继续回补（目标末端 ${new Date(lastTs * 60000).toISOString()}）`);
+    }
     after = oldestMs;
     sleep(SLEEP_MS);
+  }
+  if (!reached) {
+    console.warn(`${p}: 翻页 ${pages} 页仍未到达已有末端 ${new Date(lastTs * 60000).toISOString()}，可能存在无法回补的缺口，请手动检查`);
   }
 
   // ts(分钟)->已有位置映射，用于刷新最后一根 + 去重
@@ -132,7 +158,9 @@ totalAdded += deriveDailyFrom4h(data);
 console.log(`合计: 新增 ${totalAdded} 根, 刷新 ${totalReplaced} 根`);
 
 if (totalAdded + totalReplaced === 0) {
-  console.log('无新数据，index.html 未改动');
+  // 能走到这里说明每个周期都取到了数据、只是末端已是最新（与「取数失败」是两回事，
+  // 后者已在翻页处显式 exit 1）。留一行明确日志，避免以后误判成静默失败。
+  console.log(`无新数据（已成功取到 OKX 数据，末端已是最新：1d ${new Date(data['1d'][data['1d'].length - 1][0] * 60000).toISOString()}），index.html 未改动`);
   process.exit(0);
 }
 
