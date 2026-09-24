@@ -28,7 +28,32 @@ const ctx2d = new Proxy({
   fillText: t => { ctxTexts.push(String(t)); },
   fillRect: (x, y, w, h) => { ctxRects.push([x, y, w, h]); }
 }, { get: (t, k) => (k in t ? t[k] : typeof k === 'string' ? (() => {}) : undefined), set: () => true });
-const canvasMock = {
+const canvasMock = process.env.RENDER ? (() => {          // 真实渲染模式（额外导出 PNG 供肉眼复核）
+  const { createCanvas } = require('@napi-rs/canvas');
+  const c = createCanvas(1200, 700);
+  const raw = c.getContext('2d');
+  // 真实绘制的同时，把 fillRect / fillText 也记进 ctxRects / ctxTexts，
+  // 这样 §20 年度标签、§21 成交量高度等断言在两种模式下都能跑（RENDER 只是多导一份 PNG）。
+  c.getContext = () => new Proxy(raw, {
+    get: (t, k) => {
+      if (k === 'fillRect') return (x, y, w, h) => { ctxRects.push([x, y, w, h]); return t.fillRect(x, y, w, h); };
+      if (k === 'fillText') return (s, x, y) => { ctxTexts.push(String(s)); return t.fillText(s, x, y); };
+      const v = t[k];
+      return typeof v === 'function' ? v.bind(t) : v;
+    },
+    set: (t, k, v) => { t[k] = v; return true; }
+  });
+  c.clientWidth = 1200; c.clientHeight = 700;
+  c.getBoundingClientRect = () => ({ width: 1200, height: 700, left: 0, top: 0 });
+  c.style = {}; c.cursor = '';
+  c.addEventListener = (type, cb) => {
+    if (type === 'mousedown') md = cb;
+    if (type === 'mousemove') mm = cb;
+    if (type === 'mouseleave') ml = cb;
+    if (type === 'wheel') wl = cb;
+  };
+  return c;
+})() : {
   getContext: () => ctx2d,
   getBoundingClientRect: () => ({ width: 1200, height: 700, left: 0, top: 0 }),
   clientWidth: 1200, clientHeight: 700, width: 0, height: 0,
@@ -991,12 +1016,27 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     check('§20 单年窄视图不画年界标签', threw === null && yrs2.length <= 1, yrs2.join(','));
   }
 
-  // ============ 21. 成交量基准：跨缩放不断层 + 平移稳定（§14b 回归） ============
+  // ============ 21. 成交量基准：跨缩放不断层 + 不顶满 + 平移稳定（§14b 回归） ============
   {
     const volH = 700 * API.getVolFrac();
+    // 成交量柱共用同一个底边 volBot，取「出现次数最多的底边」即可自动定位（不依赖硬编码坐标）
+    const volBotOf = rects => {
+      const cnt = new Map();
+      for (const r of rects) {
+        const b = +(r[1] + r[3]).toFixed(2);
+        if (b < 400) continue;
+        cnt.set(b, (cnt.get(b) || 0) + 1);
+      }
+      let bot = 0, best = 0;
+      for (const [b, c] of cnt) if (c > best) { best = c; bot = b; }
+      return bot;
+    };
     const statNow = () => {
       ctxRects.length = 0; API.draw();
-      const hs = ctxRects.filter(r => Math.abs(r[1] + r[3] - 648) < 0.6 && r[3] > 0.5 && r[3] < 260).map(r => r[3]).sort((a, b) => a - b);
+      const bot = volBotOf(ctxRects);
+      const hs = ctxRects
+        .filter(r => bot > 0 && Math.abs(r[1] + r[3] - bot) < 0.6 && r[3] > 0.5 && r[3] < 260)
+        .map(r => r[3]).sort((a, b) => a - b);
       const n = hs.length;
       return { n, med: n ? hs[Math.floor(n / 2)] : 0, clip: n ? hs.filter(h => h > volH * 0.97).length / n : 0 };
     };
@@ -1004,13 +1044,13 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
 
     await API.setView(null, '15m');
     const L = API.dataLen();
-    // 卡在 xW=1 两侧各取一档：旧版此处基准口径切换，柱高中位能差 6 倍以上（1d 曾达 25 倍）
+    // 卡在 xW=1 两侧各取一档：旧版此处基准口径切换（单根最大 vs 桶和最大），柱高中位能差好几倍
     API.setViewRange(Math.max(0, L - 600), 600); warm();
     const a = statNow();
     API.setViewRange(Math.max(0, L - 1200), 1200); warm();
     const b = statNow();
     const ratio = (a.med > 0 && b.med > 0) ? Math.max(a.med, b.med) / Math.min(a.med, b.med) : 999;
-    check('§21 跨 xW=1 柱高尺度不断层（中位比<3x，旧版 1d 达 25x）', ratio < 3,
+    check('§21 跨 xW=1 柱高尺度不断层（中位比<3x）', ratio < 3,
       'vc600=' + a.med.toFixed(1) + ' vc1200=' + b.med.toFixed(1) + ' ratio=' + ratio.toFixed(2));
     check('§21 成交量不出现大面积顶满（顶格比≤15%）', a.clip <= 0.15 && b.clip <= 0.15,
       (a.clip * 100).toFixed(1) + '% / ' + (b.clip * 100).toFixed(1) + '%');
@@ -1022,6 +1062,54 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     const jumps = seq.slice(1).map((v, k) => Math.abs(v - seq[k]) / Math.max(1, seq[k]));
     const maxJump = Math.max.apply(null, jumps);
     check('§21 大缩放平移时成交量基准稳定（相邻跳变<5%）', maxJump < 0.05, (maxJump * 100).toFixed(1) + '%');
+
+    // 1d 全量档同样不该顶满（历史段/追加段量纲必须一致）
+    await API.setView(null, '1d');
+    const L1 = API.dataLen();
+    API.setViewRange(0, L1); warm();
+    const d = statNow();
+    check('§21 1d 全量视图成交量不顶满（顶格比≤15%）', d.clip <= 0.15, (d.clip * 100).toFixed(1) + '%');
+  }
+
+  // ============ 22. 数据口径完整性（直接跑 CI 用的同一份 validate_data.cjs） ============
+  {
+    const { execFileSync } = require('child_process');
+    let out = '', code = 0;
+    try {
+      out = execFileSync(process.execPath, ['validate_data.cjs'], { cwd: path.join(__dirname, '..'), encoding: 'utf8' });
+    } catch (e) {
+      code = e.status;
+      out = String(e.stdout || '') + String(e.stderr || '');
+    }
+    const tail = out.trim().split('\n').slice(-1)[0] || '';
+    check('§22 validate_data.cjs 通过（含时间轴/量能口径检查）', code === 0, tail);
+    const m = out.match(/量能口径检查: 最大台阶 ×([\d.]+)/);
+    check('§22 全历史无 >20 倍量能台阶（单位口径一致）', !!m && +m[1] < 20,
+      m ? 'max ×' + m[1] : '未取到输出');
+  }
+
+  // ============ 23. 渲染快照（RENDER=1 时额外导出 PNG，供肉眼复核） ============
+  {
+    if (process.env.RENDER) {
+      const shot = tag => {
+        require('fs').writeFileSync('/tmp/shot_' + tag + '.png', canvasMock.toBuffer('image/png'));
+        console.log('§23 wrote /tmp/shot_' + tag + '.png');
+      };
+      for (const spec of [
+        ['1d', null],           // 默认视图
+        ['1d', 260],
+        ['1d', 900],
+        ['15m', null],
+        ['15m', 246893]
+      ]) {
+        const per = spec[0], vc = spec[1];
+        await API.setView(null, per);
+        const L = API.dataLen();
+        if (vc) API.setViewRange(Math.max(0, L - vc), Math.min(vc, L));
+        for (let k = 0; k < 90; k++) API.draw();
+        shot(per + '_' + (vc || 'default'));
+      }
+    }
   }
 
   // ============ 汇总 ============

@@ -15,6 +15,12 @@ const HTML = path.join(REPO, 'index.html');
 const USE_PROXY = !!(process.env.HTTPS_PROXY || process.env.HTTP_PROXY);
 const PROXY = USE_PROXY ? (process.env.HTTPS_PROXY || process.env.HTTP_PROXY) : '';
 const INST = 'BTC-USDT-SWAP';
+// ⚠️ 单位陷阱：OKX 蜡烛第 6 字节 vol 是「张数」，BTC-USDT-SWAP 的 ctVal=0.01 BTC，1 张=0.01 BTC；
+//    第 7 字节 volCcy 才是「币本位数量」（BTC）。
+//    本仓库历史段（来自 k--data / 币安 K 线）量能单位是 BTC，所以必须存 volCcy。
+//    2026-08 曾误存 vol（张），导致 2026-08-24 起量能比历史段大 100 倍
+//    （图表上表现为「一半柱子看不见、另一半顶满」），已修正。
+const CT_VAL = 0.01;          // 兜底：volCcy 缺失时用 vol × ctVal 换算
 const LIMIT = 100;            // OKX candles 单页最大 100
 const PERIODS = { '15m': '15m', '1h': '1H', '4h': '4H', '1d': '1D' };
 const SLEEP_MS = 150;         // 翻页间隔，避免触发 OKX 限频
@@ -107,7 +113,11 @@ for (const p of ['15m', '1h', '4h']) {
     const c = cols[i];
     const tsMin = Math.floor(Number(c[0]) / 60000);
     if (tsMin < lastTs) continue;                // 仅处理末端之后的
-    const bar = [tsMin, +c[1], +c[2], +c[3], +c[4], +c[5]]; // ts,o,h,l,c,vol(合约数)
+    // 量能统一取 volCcy（币本位/BTC），与历史段（币安 K 线的 BTC 口径）一致
+    const volCcy = c[6] === undefined || c[6] === null || c[6] === '' ? NaN : +c[6];
+    const vol = Number.isFinite(volCcy) ? Math.round(volCcy * 1e6) / 1e6
+                                        : Math.round(+c[5] * CT_VAL * 1e6) / 1e6;
+    const bar = [tsMin, +c[1], +c[2], +c[3], +c[4], vol];
     if (seen.has(tsMin)) { arr[seen.get(tsMin)] = bar; replaced++; }
     else { arr.push(bar); seen.set(tsMin, arr.length - 1); added++; }
   }
@@ -127,6 +137,10 @@ if (totalAdded + totalReplaced === 0) {
 }
 
 const newData = JSON.stringify(data);
-const newHtml = html.replace(/window\.BTCFUT_DATA\s*=\s*(\{[\s\S]*?\})\s*;/, 'window.BTCFUT_DATA=' + newData + ';');
+const lastD1 = data['1d'][data['1d'].length - 1];
+const stamp = new Date(lastD1[0] * 60000).toISOString().slice(0, 10);
+const newHtml = html
+  .replace(/window\.BTCFUT_DATA\s*=\s*(\{[\s\S]*?\})\s*;/, 'window.BTCFUT_DATA=' + newData + ';')
+  .replace(/window\.BTCFUT_UPDATED\s*=\s*"[^"]*";/, 'window.BTCFUT_UPDATED="' + stamp + '";');
 fs.writeFileSync(HTML, newHtml);
-console.log('index.html 已重写数据段');
+console.log('index.html 已重写数据段，BTCFUT_UPDATED=' + stamp);

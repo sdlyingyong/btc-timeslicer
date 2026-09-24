@@ -35,26 +35,7 @@ jobs:
         run: node update_data.cjs
 
       - name: Validate data integrity
-        run: |
-          node -e '
-          const fs=require("fs");
-          const h=fs.readFileSync("index.html","utf8");
-          const m=h.match(/window\.BTCFUT_DATA\s*=\s*(\{[\s\S]*?\})\s*;/);
-          if(!m){console.error("未找到 BTCFUT_DATA");process.exit(1);}
-          const D=JSON.parse(m[1]);
-          const grid={15m:15,1h:60,4h:240,1d:1440};
-          let ok=true;
-          for(const k of Object.keys(grid)){
-            const a=D[k];const g=grid[k];let inc=true,gap=0,mis=0;
-            for(let i=1;i<a.length;i++){if(a[i][0]-a[i-1][0]!==g)gap++;if(a[i][0]<=a[i-1][0])inc=false;}
-            mis=a.filter(b=>b[0]%g!==0).length;
-            const last=new Date(a[a.length-1][0]*60000).toISOString();
-            console.log(k,"n="+a.length,"gap="+gap,"mis="+mis,"inc="+inc,"last="+last);
-            if(gap||mis||!inc)ok=false;
-          }
-          if(!ok){console.error("数据完整性校验失败，拒绝提交");process.exit(1);}
-          console.log("数据校验通过");
-          '
+        run: node validate_data.cjs
 
       - name: Commit and push if changed
         run: |
