@@ -1641,6 +1641,57 @@ function draw() {
   const xI = i => PAD_L + (i + 0.5) * xW;
   SCALE = { pmin, pmax, mainTop, mainBot, plotW, xW, viewStart: s, yP: m.yP, pY: m.pY };
 
+  // §20 年度分隔：可视区按 UTC 年切分 —— 交替极淡底色 + 年界细线 + 段内年份标签
+  {
+    const yOf = i => { const r = getBar(i); return r == null ? null : tsStr(r[0]).slice(0, 4); };
+    const firstY = yOf(s);
+    const total = e - s;
+    if (firstY != null && total > 1) {
+      // 视口可能含数十万根，用自适应步长扫年界，命中后再二分精确定位
+      const scan = Math.max(1, Math.floor(total / 2000));
+      const starts = [{ idx: s, year: firstY }];
+      let prevY = firstY;
+      for (let i = s + scan; i < e; i += scan) {
+        const y = yOf(i);
+        if (y == null) continue;
+        if (y !== prevY) {
+          let lo = i - scan, hi = i;
+          while (lo < hi) { const mid = (lo + hi) >> 1; const ym = yOf(mid); if (ym === y) hi = mid; else lo = mid + 1; }
+          starts.push({ idx: lo, year: y });
+          prevY = y;
+        }
+      }
+      if (starts.length > 1) {                       // 只有真正跨年才画，单一年份不打扰
+        const xAt = i => PAD_L + (i - s) * xW;       // 该根 K 线的左边缘像素
+        const yTop = mainTop, yBot = volBot;
+        ctx.save();
+        // 底色：偶数年加一层极淡提亮，形成交替区隔
+        for (let k = 0; k < starts.length; k++) {
+          if ((+starts[k].year) % 2 !== 0) continue;
+          const x0 = k === 0 ? PAD_L : xAt(starts[k].idx);
+          const x1 = k + 1 < starts.length ? xAt(starts[k + 1].idx) : PAD_L + plotW;
+          ctx.fillStyle = 'rgba(255,255,255,0.032)';
+          ctx.fillRect(x0, yTop, Math.max(0, x1 - x0), yBot - yTop);
+        }
+        // 年界细线（首段左界即视图边界，不画）
+        ctx.strokeStyle = 'rgba(130,148,178,0.38)'; ctx.lineWidth = 1; ctx.setLineDash([]);
+        for (let k = 1; k < starts.length; k++) {
+          const x = Math.round(xAt(starts[k].idx)) + 0.5;
+          ctx.beginPath(); ctx.moveTo(x, yTop); ctx.lineTo(x, yBot); ctx.stroke();
+        }
+        // 年份标签：贴主图顶部，跟在各自年的左边界后面
+        ctx.font = 'bold 10px "SFMono-Regular", Consolas, monospace';
+        ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+        ctx.fillStyle = 'rgba(155,171,195,0.85)';
+        for (let k = 0; k < starts.length; k++) {
+          const x0 = k === 0 ? PAD_L : xAt(starts[k].idx);
+          ctx.fillText(starts[k].year, x0 + 4, yTop + 3);
+        }
+        ctx.restore();
+      }
+    }
+  }
+
   // 网格 + 价格轴
   ctx.strokeStyle = '#1c2230'; ctx.fillStyle = '#6b7689';
   ctx.font = '11px "SFMono-Regular", Consolas, monospace'; ctx.textAlign = 'left';

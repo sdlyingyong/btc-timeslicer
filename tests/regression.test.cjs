@@ -20,9 +20,11 @@ const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps;
 
 // ---------- mock 环境 ----------
 let md = null, mm = null, ml = null, wmm = null, wkd = null, wmu = null, wl = null;
+const ctxTexts = [];   // §20：记录所有 fillText 文本，供年度标签断言
 const ctx2d = new Proxy({
   measureText: () => ({ width: 40 }),
-  createRadialGradient: () => ({ addColorStop() {} })
+  createRadialGradient: () => ({ addColorStop() {} }),
+  fillText: t => { ctxTexts.push(String(t)); }
 }, { get: (t, k) => (k in t ? t[k] : typeof k === 'string' ? (() => {}) : undefined), set: () => true });
 const canvasMock = {
   getContext: () => ctx2d,
@@ -88,6 +90,7 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     findIdxSync, lnIdx, barTs, draw,
     clearLines: () => { lines = []; linesStore[lineKey()] = []; saveSessionNow(); },
     setView, getCur: () => cur, getRightTs: () => rightTs,
+    setViewRange: (vs, vc) => { viewStart = vs; viewCount = vc; },
     parseDateInput,
     // §19 模拟交易
     getSimStore: () => simStore,
@@ -962,6 +965,28 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     check('§19 E8 4h 仅含 4h 持仓（空/5x）', mk4.length === 1 && mk4[0].side === 'short' && mk4[0].leverage === 5);
 
     API.simClearAll();
+  }
+
+  // ============ 20. 年度分隔（交替底色 / 年界细线 / 年份标签） ============
+  {
+    await API.setView(null, '1d');
+    const L = API.dataLen();
+    // 全量视图必然跨多年 → 应画出多个年份标签
+    API.setViewRange(0, L);
+    ctxTexts.length = 0;
+    let threw = null;
+    try { API.draw(); } catch (e) { threw = e; }
+    check('§20 跨年全量视图 draw 不抛异常', threw === null, threw ? threw.message : '');
+    const yrs = ctxTexts.filter(t => /^(19|20)\d{2}$/.test(t));
+    check('§20 跨年视图出现多个年份标签', yrs.length >= 3, yrs.join(','));
+
+    // 窄视图（最近 60 根 1d，通常落在同一年）→ 不应画年界标签
+    API.setViewRange(Math.max(0, L - 60), 60);
+    ctxTexts.length = 0;
+    threw = null;
+    try { API.draw(); } catch (e) { threw = e; }
+    const yrs2 = ctxTexts.filter(t => /^(19|20)\d{2}$/.test(t));
+    check('§20 单年窄视图不画年界标签', threw === null && yrs2.length <= 1, yrs2.join(','));
   }
 
   // ============ 汇总 ============
