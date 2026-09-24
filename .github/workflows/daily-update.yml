@@ -1,14 +1,19 @@
 name: Daily BTC data update
 
-# 云端定时更新 btc-timeslicer 行情数据：
-#   - 每天 20:00 UTC（= 北京凌晨 04:00）自动触发
-#   - 从 OKX 直连拉取最新 K 线（云端 runner 无需代理）
-#   - 只重写 index.html 里的 window.BTCFUT_DATA 数据段，代码逻辑不变
-#   - 校验数据完整性（无缺口 / 网格对齐 / 时间戳递增），通过才提交并推送
+# 云端定时更新 btc-timeslicer 行情数据。
+#
+# ⚠️ 2026-09-25：**定时触发已停用**，只保留手动触发（workflow_dispatch）。原因：
+#   - 本 workflow 自 2026-09-08 引入起，`git log --grep="daily update"` 里
+#     **没有任何 "(github actions)" 格式的数据提交** —— 云端这条链路从未成功更新过数据；
+#   - update_data.cjs 已改为「取数失败就 exit 1」（不再把空返回当成"无新数据"静默通过），
+#     于是这条从未生效的定时任务会变成每天报红 + 失败邮件，纯噪音；
+#   - 数据更新已改由本机每日自动化负责（走 127.0.0.1:10809 代理，OKX 可达）。
+# 需要验证云端链路时，在 Actions 页面点 "Run workflow" 手动跑即可。
+# 若哪天确认云端能直连 OKX，把下面 schedule 段恢复即可。
 on:
-  schedule:
-    - cron: '0 20 * * *'      # 20:00 UTC = 04:00 Beijing
-  workflow_dispatch: {}       # 允许在 Actions 页面手动触发测试
+  # schedule:
+  #   - cron: '0 20 * * *'      # 20:00 UTC = 04:00 Beijing
+  workflow_dispatch: {}
 
 permissions:
   contents: write
