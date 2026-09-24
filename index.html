@@ -2064,7 +2064,7 @@ function drawLines() {
       const y1 = priceToY(ln.price1), y2 = priceToY(ln.price2);
       const plotL = PAD_L, plotR = PAD_L + SCALE.plotW;
       const col = isSel ? '#ff5d5d' : '#4ade80';
-      ctx.fillStyle = isSel ? 'rgba(255,93,93,0.10)' : 'rgba(74,222,128,0.08)';
+      ctx.fillStyle = 'rgba(96,165,250,0.14)';   // 内部统一蓝色填充（选中/未选中一致）
       ctx.fillRect(plotL, Math.min(y1, y2), plotR - plotL, Math.abs(y2 - y1));
       ctx.strokeStyle = col; ctx.lineWidth = isSel ? 2 : 1.4;
       ctx.setLineDash(isSel ? [] : [6, 4]);
@@ -2130,7 +2130,7 @@ function drawLines() {
     // 第一条水平线已定，跟随光标预览第二条
     const plotL = PAD_L, plotR = PAD_L + SCALE.plotW;
     const y1 = priceToY(drawingHChannel.price1), y2 = hover.y;
-    ctx.fillStyle = 'rgba(74,222,128,0.08)';
+    ctx.fillStyle = 'rgba(96,165,250,0.14)';   // 预览填充与成品一致（蓝色）
     ctx.fillRect(plotL, Math.min(y1, y2), plotR - plotL, Math.abs(y2 - y1));
     ctx.strokeStyle = '#4ade80'; ctx.setLineDash([4, 3]); ctx.lineWidth = 1.2;
     ctx.beginPath(); ctx.moveTo(plotL, y1); ctx.lineTo(plotR, y1); ctx.stroke();
