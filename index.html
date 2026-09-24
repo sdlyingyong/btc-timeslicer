@@ -1807,10 +1807,32 @@ function draw() {
     // §14：先求本帧「归一化基准」，再统一平滑，两个分支共用 vNorm
     //      （根因：平移时爆量K线进出窗口 → 基准突变数倍 → 全屏柱子同时反向缩放）
     let sums = null, os = null, cs = null, gotB = null;
-    let targetNorm = vmax;                     // 小缩放（xW>=1）：单根最大值
+    // §14b 归一化基准：两种缩放**共用同一口径** —— 视口内「单根量 P95」× 桶内平均根数。
+    // 柱高因此等价于「该根(或该桶平均)的量能 相对于典型高活跃量的倍数」，与桶大小无关，
+    // 所以缩放过程中柱子高度尺度恒定、跨 xW=1 不会断层。
+    // 旧版：小缩放用「单根最大值 vmax」、大缩放用「桶和 P95」，两者量级差十几倍，
+    //       跨 xW=1 时基准突变 → 柱子高度骤变（实测 1d 周期 1.0% → 25.3%，视觉上突然顶满）。
+    const cntPerBucket = Math.max(1, nVis / Wpx);   // 每个像素桶平均覆盖多少根K线
+    let perBarRef = 0;
+    {
+      const stride = Math.max(1, Math.floor(nVis / 2000));   // 采样 ≤2000 点，避免逐根排序
+      const vals = [];
+      // 采样相位钉在「全局」网格上（而不是从视口左端 s 起算）：平移时采样集合几乎不变，
+      // 否则每移一次就整批换样本，分位数随噪声抖动（实测相邻跳变 8.4%）。
+      for (let i = Math.ceil(s / stride) * stride; i < e; i += stride) {
+        const r = getBar(i);
+        if (!r) continue;
+        const v = +r[5];
+        if (v > 0) vals.push(v);
+      }
+      if (vals.length) {
+        vals.sort((a, b) => a - b);
+        perBarRef = vals[Math.min(vals.length - 1, Math.floor(vals.length * 0.95))];
+      }
+    }
+    let targetNorm = perBarRef > 0 ? perBarRef * cntPerBucket : vmax;
     if (xW < 1) {
       sums = new Float64Array(Wpx); os = new Float64Array(Wpx); cs = new Float64Array(Wpx); gotB = new Uint8Array(Wpx);
-      const volList = [];
       for (let x = 0; x < Wpx; x++) {
         const { i0, i1 } = bucketOf(x);
         if (i1 <= i0) continue;
@@ -1824,15 +1846,6 @@ function draw() {
         }
         if (!got) continue;
         sums[x] = sum; os[x] = o; cs[x] = c; gotB[x] = 1;
-        volList.push(sum);
-      }
-      // §14b：大缩放基准改用桶和的 P95，而不是最大值。
-      // 根因：最大值是极值统计量 —— 平移时任意一个爆量桶进出窗口就能让它整倍突变，
-      //       触发全屏柱子同时缩放（实测相邻按键跳变最高 25.6%）。
-      //       P95 只看整体分布，对个别桶不敏感 → 平移时基准稳定。
-      if (volList.length) {
-        volList.sort((a, b) => a - b);
-        targetNorm = volList[Math.min(volList.length - 1, Math.floor(volList.length * 0.95))];
       }
     }
     // 指数缓动平滑；首次 / 偏差超 3 倍（切换周期、大幅缩放）直接吸附，避免长时间爬升

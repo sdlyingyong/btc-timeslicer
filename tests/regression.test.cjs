@@ -21,10 +21,12 @@ const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps;
 // ---------- mock 环境 ----------
 let md = null, mm = null, ml = null, wmm = null, wkd = null, wmu = null, wl = null;
 const ctxTexts = [];   // §20：记录所有 fillText 文本，供年度标签断言
+const ctxRects = [];   // §21 诊断：记录所有 fillRect 参数
 const ctx2d = new Proxy({
   measureText: () => ({ width: 40 }),
   createRadialGradient: () => ({ addColorStop() {} }),
-  fillText: t => { ctxTexts.push(String(t)); }
+  fillText: t => { ctxTexts.push(String(t)); },
+  fillRect: (x, y, w, h) => { ctxRects.push([x, y, w, h]); }
 }, { get: (t, k) => (k in t ? t[k] : typeof k === 'string' ? (() => {}) : undefined), set: () => true });
 const canvasMock = {
   getContext: () => ctx2d,
@@ -989,18 +991,37 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     check('§20 单年窄视图不画年界标签', threw === null && yrs2.length <= 1, yrs2.join(','));
   }
 
-  // ============ 21. 大缩放下平移的成交量基准稳定性（§14b 回归） ============
+  // ============ 21. 成交量基准：跨缩放不断层 + 平移稳定（§14b 回归） ============
   {
+    const volH = 700 * API.getVolFrac();
+    const statNow = () => {
+      ctxRects.length = 0; API.draw();
+      const hs = ctxRects.filter(r => Math.abs(r[1] + r[3] - 648) < 0.6 && r[3] > 0.5 && r[3] < 260).map(r => r[3]).sort((a, b) => a - b);
+      const n = hs.length;
+      return { n, med: n ? hs[Math.floor(n / 2)] : 0, clip: n ? hs.filter(h => h > volH * 0.97).length / n : 0 };
+    };
+    const warm = () => { for (let k = 0; k < 80; k++) API.draw(); };   // 收敛 §14 平滑
+
     await API.setView(null, '15m');
-    for (let i = 0; i < 500; i++) wheel(120, 0);   // 缩到覆盖全部K线（xW<1 的桶聚合路径）
-    API.draw();
-    const vc = API.getViewCount();
+    const L = API.dataLen();
+    // 卡在 xW=1 两侧各取一档：旧版此处基准口径切换，柱高中位能差 6 倍以上（1d 曾达 25 倍）
+    API.setViewRange(Math.max(0, L - 600), 600); warm();
+    const a = statNow();
+    API.setViewRange(Math.max(0, L - 1200), 1200); warm();
+    const b = statNow();
+    const ratio = (a.med > 0 && b.med > 0) ? Math.max(a.med, b.med) / Math.min(a.med, b.med) : 999;
+    check('§21 跨 xW=1 柱高尺度不断层（中位比<3x，旧版 1d 达 25x）', ratio < 3,
+      'vc600=' + a.med.toFixed(1) + ' vc1200=' + b.med.toFixed(1) + ' ratio=' + ratio.toFixed(2));
+    check('§21 成交量不出现大面积顶满（顶格比≤15%）', a.clip <= 0.15 && b.clip <= 0.15,
+      (a.clip * 100).toFixed(1) + '% / ' + (b.clip * 100).toFixed(1) + '%');
+
+    // 全量档连续平移：基准应平滑（旧版相邻跳变最高 25.6%）
+    API.setViewRange(0, L); warm();
     const seq = [];
-    for (let i = 0; i < 12; i++) { key('ArrowLeft'); API.draw(); seq.push(API.getVolNormSmooth()); }
-    const jumps = seq.slice(1).map((v, i) => Math.abs(v - seq[i]) / Math.max(1, seq[i]));
+    for (let k = 0; k < 12; k++) { key('ArrowLeft'); API.draw(); seq.push(API.getVolNormSmooth()); }
+    const jumps = seq.slice(1).map((v, k) => Math.abs(v - seq[k]) / Math.max(1, seq[k]));
     const maxJump = Math.max.apply(null, jumps);
-    check('§21 大缩放确实覆盖大量K线', vc > 100000, String(Math.round(vc)));
-    check('§21 平移时成交量基准稳定（相邻跳变<5%，历史最大25.6%）', maxJump < 0.05, (maxJump * 100).toFixed(1) + '%');
+    check('§21 大缩放平移时成交量基准稳定（相邻跳变<5%）', maxJump < 0.05, (maxJump * 100).toFixed(1) + '%');
   }
 
   // ============ 汇总 ============
