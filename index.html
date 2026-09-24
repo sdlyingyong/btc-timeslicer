@@ -1810,7 +1810,7 @@ function draw() {
     let targetNorm = vmax;                     // 小缩放（xW>=1）：单根最大值
     if (xW < 1) {
       sums = new Float64Array(Wpx); os = new Float64Array(Wpx); cs = new Float64Array(Wpx); gotB = new Uint8Array(Wpx);
-      let maxSum = 0;
+      const volList = [];
       for (let x = 0; x < Wpx; x++) {
         const { i0, i1 } = bucketOf(x);
         if (i1 <= i0) continue;
@@ -1824,9 +1824,16 @@ function draw() {
         }
         if (!got) continue;
         sums[x] = sum; os[x] = o; cs[x] = c; gotB[x] = 1;
-        if (sum > maxSum) maxSum = sum;
+        volList.push(sum);
       }
-      targetNorm = maxSum;                     // 大缩放：桶求和最大值
+      // §14b：大缩放基准改用桶和的 P95，而不是最大值。
+      // 根因：最大值是极值统计量 —— 平移时任意一个爆量桶进出窗口就能让它整倍突变，
+      //       触发全屏柱子同时缩放（实测相邻按键跳变最高 25.6%）。
+      //       P95 只看整体分布，对个别桶不敏感 → 平移时基准稳定。
+      if (volList.length) {
+        volList.sort((a, b) => a - b);
+        targetNorm = volList[Math.min(volList.length - 1, Math.floor(volList.length * 0.95))];
+      }
     }
     // 指数缓动平滑；首次 / 偏差超 3 倍（切换周期、大幅缩放）直接吸附，避免长时间爬升
     if (volNormSmooth <= 0 || targetNorm <= 0 ||

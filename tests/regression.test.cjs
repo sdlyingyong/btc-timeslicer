@@ -989,6 +989,20 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     check('§20 单年窄视图不画年界标签', threw === null && yrs2.length <= 1, yrs2.join(','));
   }
 
+  // ============ 21. 大缩放下平移的成交量基准稳定性（§14b 回归） ============
+  {
+    await API.setView(null, '15m');
+    for (let i = 0; i < 500; i++) wheel(120, 0);   // 缩到覆盖全部K线（xW<1 的桶聚合路径）
+    API.draw();
+    const vc = API.getViewCount();
+    const seq = [];
+    for (let i = 0; i < 12; i++) { key('ArrowLeft'); API.draw(); seq.push(API.getVolNormSmooth()); }
+    const jumps = seq.slice(1).map((v, i) => Math.abs(v - seq[i]) / Math.max(1, seq[i]));
+    const maxJump = Math.max.apply(null, jumps);
+    check('§21 大缩放确实覆盖大量K线', vc > 100000, String(Math.round(vc)));
+    check('§21 平移时成交量基准稳定（相邻跳变<5%，历史最大25.6%）', maxJump < 0.05, (maxJump * 100).toFixed(1) + '%');
+  }
+
   // ============ 汇总 ============
   console.log('\n======== 结果: ' + pass + ' PASS / ' + fail + ' FAIL ========');
   if (errors.length) { console.log('失败项:\n  ' + errors.join('\n  ')); process.exit(1); }
