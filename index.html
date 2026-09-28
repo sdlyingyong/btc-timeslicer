@@ -171,29 +171,36 @@
   .sim-log-h { margin-top: 8px; padding-top: 6px; border-top: 1px solid #1d2433; color: #9aa6bd; font-weight: 600; }
   .sim-log { max-height: 160px; overflow-y: auto; }
   .sim-log-i { padding: 2px 0; color: #aeb7c7; font-size: 11px; line-height: 1.4; word-break: break-all; }
+  /* ---- §27 工具条排序：按住拖动自定义顺序 ---- */
+  .group-label { cursor: grab; user-select: none; }
+  .group-label:active { cursor: grabbing; }
+  .tools > button, .tools > label.chk, .tools > .seg { cursor: grab; user-select: none; }
+  .tools > button:active, .tools > label.chk:active, .tools > .seg:active { cursor: grabbing; }
+  .sz-drag { opacity: .42; outline: 1px dashed rgba(120,160,255,.55); outline-offset: 1px; border-radius: 8px; }
+  body.sz-sorting, body.sz-sorting * { cursor: grabbing !important; user-select: none !important; }
 </style>
 </head>
 <body>
 <div id="toolbar">
   <div class="title" id="title">多品种时光机<small>K线复盘 · 盈亏比</small></div>
-  <div class="group symbols">
+  <div class="group symbols" data-key="symbols">
     <span class="group-label">标的</span>
     <button data-sym="BTC" class="active">BTC</button>
   </div>
-  <div class="group periods">
+  <div class="group periods" data-key="periods">
     <span class="group-label">周期</span>
     <button data-p="1d">日线</button>
     <button data-p="4h">4 小时</button>
     <button data-p="1h">1 小时</button>
     <button data-p="15m">15 分</button>
   </div>
-  <div class="group">
+  <div class="group" data-key="ma">
     <span class="group-label">均线</span>
     <label class="chk"><input type="checkbox" id="ema20" checked><span class="sw" style="background:#ffb454"></span>EMA20</label>
     <label class="chk"><input type="checkbox" id="ema120" checked><span class="sw" style="background:#4ade80"></span>EMA120</label>
     <span class="ema-note">均线≠涨跌</span>
   </div>
-  <div class="group tools">
+  <div class="group tools" data-key="tools">
     <span class="group-label">画线工具</span>
     <button data-tool="cursor" class="active" title="光标：查看数值、选择并拖拽已画对象">
       <svg class="btn-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="7"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>光标
@@ -219,7 +226,7 @@
     <button data-tool="measure" title="测量%：点两点测量涨跌幅">
       <svg class="btn-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 19L19 5"/><path d="M5 19v-3M9 15v-3M13 11v-3M17 7v-3"/></svg>测量%
     </button>
-    <label class="chk"><input type="checkbox" id="contDraw"><span class="sw" style="background:#6b7689"></span>连画</label>
+    <label class="chk" data-key="cont"><input type="checkbox" id="contDraw"><span class="sw" style="background:#6b7689"></span>连画</label>
     <button id="clearLines" class="danger" title="清除所有画线">清除画线</button>
     <button id="tradeEnter" title="盈亏比：按下定入场 → 拖出止盈 TP → 拖出止损 SL，三条线均可拖动实时计算">
       <svg class="btn-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 21V4"/><path d="M6 4h13l-3 4 3 4H6"/></svg>盈亏比
@@ -229,19 +236,19 @@
       <button class="seg-btn short" data-dir="short">做空</button>
     </div>
   </div>
-  <div class="group">
+  <div class="group" data-key="axis">
     <span class="group-label">坐标</span>
     <label class="chk"><input type="checkbox" id="logscale" checked><span class="sw" style="background:#9aa6bd"></span>对数</label>
   </div>
-  <div class="group">
+  <div class="group" data-key="view">
     <span class="group-label">视图</span>
     <label class="chk"><input type="checkbox" id="keepTime" checked><span class="sw" style="background:#3fd0ff"></span>锁定时间</label>
   </div>
-  <div class="group">
+  <div class="group" data-key="memory">
     <span class="group-label">记忆</span>
-    <button id="resetSession" class="danger" title="清除已记住的画线和浏览位置，回到最新K线">重置刷新</button>
+    <button id="resetSession" class="danger" title="清除已记住的画线和浏览位置（含工具条排序），回到最新K线">重置刷新</button>
   </div>
-  <div class="group focus-group">
+  <div class="group focus-group" data-key="focus">
     <span class="group-label">专注</span>
     <div class="focus-disp" id="focusDisp">00:00</div>
     <div class="focus-btns">
@@ -250,14 +257,14 @@
     </div>
     <button id="focusHistory" title="查看历史专注记录">历史记录</button>
   </div>
-  <div class="group">
+  <div class="group" data-key="trades">
     <span class="group-label">交割单</span>
     <button id="importTrades" class="primary">导入交割单 (Excel)</button>
     <input type="file" id="tradeFile" accept=".xls,.xlsx" style="display:none">
     <label class="chk"><input type="checkbox" id="showTrades" checked><span class="sw" style="background:#ffd166"></span>显示标注</label>
     <button id="clearTrades" class="danger">清除交割单</button>
   </div>
-  <div class="group sim-group">
+  <div class="group sim-group" data-key="sim">
     <span class="group-label">模拟</span>
     <select id="simLev" class="sim-sel" title="杠杆倍数">
       <option value="5">5x</option>
@@ -2888,8 +2895,154 @@ document.querySelectorAll('#tradeDirSeg .seg-btn').forEach(b => {
   b.addEventListener('click', () => syncTradeDir(b.dataset.dir));
 });
 // 重置刷新：清空全部记忆（所有周期的画线+浏览位置），回到最新K线
+// ================= §27 工具条排序：按住拖动自定义顺序（顺序记忆到 localStorage） =================
+// 两级：① 按住 .group-label 拖动 = 上下移动整个模块；② 按住「画线工具」组内的条目 = 调整工具顺序。
+// 稳定键优先级：data-key > #id > data-tool。**新增按钮/模块时务必给它 data-key 或 id**，否则它不参与排序
+// （会一直待在末尾）。测试 §27 会静态检查这一点。
+const SORT_KEY = 'kline_toolbar_order_v1';
+let sortDefaults = null;      // 首次加载时的原始顺序，供「重置刷新」还原
+let szDrag = null, szSwallow = false;
+
+function toolbarRoot() { return document.getElementById('toolbar'); }
+function szKey(el) {
+  if (!el || !el.dataset) return null;
+  return el.dataset.key || (el.id ? '#' + el.id : '') || (el.dataset.tool ? 'tool:' + el.dataset.tool : '') || null;
+}
+// 容器里「可排序的孩子」：容器中若有 .group 孩子 → 只排 .group（工具条根）；否则全部（画线工具组）
+function szKids(box) {
+  const all = [];
+  for (let i = 0; i < box.children.length; i++) all.push(box.children[i]);
+  const gs = all.filter(n => n.classList && n.classList.contains('group'));
+  return gs.length ? gs : all;
+}
+function szToolsBox(root) { return root && root.querySelector ? root.querySelector('.group.tools') : null; }
+function szOrderOf(root) {
+  const o = { groups: szKids(root).map(szKey).filter(Boolean), items: {} };
+  const t = szToolsBox(root);
+  if (t) o.items.tools = szKids(t).map(szKey).filter(Boolean);
+  return o;
+}
+function szApplyOrder(root, order) {
+  if (!root || !order || !root.children) return;
+  const put = (box, keys) => {
+    if (!box || !Array.isArray(keys)) return;
+    const map = {};
+    szKids(box).forEach(n => { const k = szKey(n); if (k) map[k] = n; });
+    const used = [];
+    keys.forEach(k => { const n = map[k]; if (n && used.indexOf(k) < 0) { used.push(k); box.appendChild(n); } });
+    // 记忆里没有的（新版本新增的模块/按钮）留在末尾，保持相对顺序
+    szKids(box).forEach(n => { const k = szKey(n); if (k && used.indexOf(k) < 0) box.appendChild(n); });
+  };
+  put(root, order.groups);
+  if (order.items) put(szToolsBox(root), order.items.tools);
+}
+// 把 el 拖到 y 处：找纵向最近的兄弟，落在它上半 → 插到它前面，下半 → 插到它后面
+function szDropTarget(box, el, y) {
+  const sibs = szKids(box).filter(n => n !== el);
+  if (!sibs.length) return null;
+  let best = null, bestD = Infinity;
+  for (const n of sibs) {
+    const r = n.getBoundingClientRect();
+    const d = y < r.top ? (r.top - y) : (y > r.bottom ? (y - r.bottom) : 0);
+    if (d < bestD) { bestD = d; best = n; }
+  }
+  const r = best.getBoundingClientRect();
+  return { ref: best, after: y > r.top + r.height / 2 };
+}
+function szMoveTo(box, el, y) {
+  const t = szDropTarget(box, el, y);
+  if (!t) return false;
+  const kids = szKids(box);
+  const i = kids.indexOf(t.ref);
+  const nextEl = t.after ? (kids[i + 1] || null) : t.ref;
+  // 「插到 nextEl 之前」若 el 本来就紧挨在 nextEl 之前，等于没动 —— 必须判掉，
+  // 否则鼠标停着不动也会反复 insertBefore（返回 true 让人误以为拖动了）。
+  const curNext = kids[kids.indexOf(el) + 1] || null;
+  if (el === nextEl || curNext === nextEl) return false;
+  box.insertBefore(el, nextEl);
+  return true;
+}
+function szSaveOrder(root) {
+  const r = root || toolbarRoot();
+  if (!r || !r.children) return;
+  try { localStorage.setItem(SORT_KEY, JSON.stringify(szOrderOf(r))); } catch (e) {}
+}
+function szResetSort() {                            // 还原默认顺序并清掉记忆
+  try { localStorage.removeItem(SORT_KEY); } catch (e) {}
+  if (sortDefaults) szApplyOrder(toolbarRoot(), sortDefaults);
+}
+function szOnMove(e) {
+  if (!szDrag) return;
+  if (!szDrag.on) {
+    if (Math.abs(e.clientY - szDrag.y) < 5 && Math.abs(e.clientX - szDrag.x) < 5) return;   // 小抖动不算拖
+    szDrag.on = true;
+    szDrag.el.classList.add('sz-drag');
+    if (document.body) document.body.classList.add('sz-sorting');
+  }
+  e.preventDefault();
+  if (szMoveTo(szDrag.box, szDrag.el, e.clientY)) szDrag.moved = true;
+}
+function szOnUp() {
+  if (!szDrag) return;
+  window.removeEventListener('mousemove', szOnMove, true);
+  window.removeEventListener('mouseup', szOnUp, true);
+  if (szDrag.on) {
+    szDrag.el.classList.remove('sz-drag');
+    if (document.body) document.body.classList.remove('sz-sorting');
+    // ⚠️ 只有「真的换过位置」才落盘 + 吞掉紧随的 click。
+    // 否则：想点「水平线」时手抖 6px 会被判成拖拽，click 被吞 → 工具点不动，看起来像坏了。
+    if (!szDrag.moved) { szDrag = null; return; }
+    szSaveOrder();
+    // 吞掉紧随其后那一次 click：否则「拖完 连画」会顺手把复选框点掉、拖完工具会把工具切了
+    szSwallow = true;
+    // 只吞紧随的那一次：浏览器在 mouseup 后几乎立刻派发 click，200ms 足够；
+    // 窗口太长会把用户拖完顺手点的别的按钮也吃掉。
+    setTimeout(() => { szSwallow = false; }, 200);
+  }
+  szDrag = null;
+}
+function initSort() {
+  const root = toolbarRoot();
+  if (!root || !root.children) return;               // 无工具条（或非浏览器环境）直接跳过
+  sortDefaults = szOrderOf(root);                    // 先记原始顺序，再套用用户保存的顺序
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(SORT_KEY) || 'null'); } catch (e) {}
+  if (saved) szApplyOrder(root, saved);
+  if (root.querySelectorAll) root.querySelectorAll('.group-label').forEach(l => {
+    const g = l.parentElement;
+    l.title = (g && g.classList.contains('tools'))
+      ? '按住拖动：上下移动「画线工具」模块；按住下面任一工具可调整工具顺序'
+      : '按住拖动：上下移动这个模块';
+  });
+  window.addEventListener('click', e => {
+    if (szSwallow) { szSwallow = false; e.stopPropagation(); e.preventDefault(); }
+  }, true);
+  root.addEventListener('mousedown', e => {
+    if (e.button !== 0) return;
+    let el = null, box = null;
+    const lbl = e.target.closest ? e.target.closest('.group-label') : null;
+    if (lbl && lbl.parentElement && lbl.parentElement.parentElement === root) {
+      el = lbl.parentElement; box = root;                       // ① 抓标签 = 移动整个模块
+    } else {
+      const t = szToolsBox(root);
+      if (t && t.contains(e.target)) {
+        if (e.target.closest && e.target.closest('input, select, textarea')) return;   // 输入控件不参与拖动
+        let n = e.target;
+        while (n && n !== t && n.parentElement !== t) n = n.parentElement;
+        if (n && n.parentElement === t && szKey(n)) { el = n; box = t; }               // ② 抓组内条目 = 排工具顺序
+      }
+    }
+    if (!el) return;
+    szDrag = { el, box, x: e.clientX, y: e.clientY, on: false, moved: false };
+    window.addEventListener('mousemove', szOnMove, true);
+    window.addEventListener('mouseup', szOnUp, true);
+  });
+}
+initSort();
+
 document.getElementById('resetSession').addEventListener('click', () => {
   try { localStorage.removeItem(SESSION_KEY); } catch (e) {}
+  szResetSort();   // §27 连同工具条排序一起还原默认
   linesStore = {}; viewStore = {}; lines = []; selectedLine = null; drawingTrend = null; drawingMeasure = null; drawingChannel = null; drawingHChannel = null;
   RESTORE = null;
   const len = dataLen();

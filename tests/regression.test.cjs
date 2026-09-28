@@ -138,6 +138,9 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     simOpen, simAdd, simExit, simEvaluatePosition, simReplay, simAvgEntry, simOpenSize, simActiveStop, simLiqPrice, simRealizedPnl, simUnrealized, simDir, simMargin,
     loadSim, saveSim, simKey, simClearAll: () => { simStore = {}; saveSim(); },
     simDropMemory: () => { simStore = {}; },
+    // §27 工具条排序
+    szKey, szKids, szOrderOf, szApplyOrder, szDropTarget, szMoveTo, szSaveOrder, szResetSort,
+    getSortKey: () => SORT_KEY,
     // §19.5 UI 控制器 + 渲染数据
     simMarks, simOpenAtCursor, simAddAtCursor, simExitAtCursor, simCursorTs, simCursorPrice, simLeverage, simStopVal, simSizeVal, drawSim, renderSim
   };`);
@@ -1344,6 +1347,220 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     }
   }
 
+  // ============ 27. 工具条排序：模块 + 画线工具组内条目（拖拽自定义 + 记忆） ============
+  {
+    const root = mkBar();
+    const keys = () => API.szKids(root).map(API.szKey);
+    const T = root.querySelector('.group.tools');
+    const toolKeys = () => API.szKids(T).map(API.szKey);
+    const g = k => API.szKids(root).find(n => API.szKey(n) === k);
+    const rect = n => n.getBoundingClientRect();
+
+    check('§27 模块键齐全且按 DOM 顺序',
+      keys().join(',') === 'symbols,periods,ma,tools,axis,view,memory,focus,trades,sim', keys().join(','));
+    check('§27 标题不是模块、不参与排序', !keys().includes('title'));
+    check('§27 画线工具组内条目键齐全',
+      toolKeys().join(',') === 'tool:cursor,tool:hline,#clearLines,#tradeEnter,#tradeDirSeg,cont', toolKeys().join(','));
+    check('§27 键的优先级 dataset.key > id > data-tool',
+      API.szKey(g('symbols')) === 'symbols' && API.szKey(API.szKids(T)[2]) === '#clearLines' &&
+      API.szKey(API.szKids(T)[0]) === 'tool:cursor');
+
+    // --- 拖动落点：按 y 找最近兄弟，上半 → 插前，下半 → 插后 ---
+    check('§27 已在原位时拖动返回 false（不做无谓改动）', API.szMoveTo(root, g('symbols'), 10) === false);
+    check('§27 拖到最上 → 变成第 1 个模块',
+      API.szMoveTo(root, g('tools'), rect(g('symbols')).top + 5) === true && keys()[0] === 'tools', keys().join(','));
+    const fr = rect(g('focus'));
+    check('§27 拖到 focus 下半区 → 插到 focus 之后',
+      API.szMoveTo(root, g('tools'), fr.top + fr.height * 0.75) === true &&
+      keys().indexOf('tools') === keys().indexOf('focus') + 1, keys().join(','));
+    const ar = rect(g('axis'));
+    check('§27 再拖回 axis 之前',
+      API.szMoveTo(root, g('tools'), ar.top + 1) === true && keys().indexOf('tools') === keys().indexOf('axis') - 1,
+      keys().join(','));
+    check('§27 y 远超下方 → 落到最后一个模块',
+      API.szMoveTo(root, g('tools'), 99999) === true && keys()[keys().length - 1] === 'tools', keys().join(','));
+
+    // --- 组内条目（画线工具）同样能排 ---
+    check('§27 组内把第一项拖到末尾',
+      API.szMoveTo(T, API.szKids(T)[0], 99999) === true && toolKeys()[toolKeys().length - 1] === 'tool:cursor',
+      toolKeys().join(','));
+    const lastTool = toolKeys()[toolKeys().length - 1];
+    check('§27 组内把末项拖到最上',
+      API.szMoveTo(T, API.szKids(T)[API.szKids(T).length - 1], -99999) === true && toolKeys()[0] === lastTool,
+      lastTool + ' → 队首 | ' + toolKeys().join(','));
+
+    // --- 落盘 / 还原 ---
+    const snap = API.szOrderOf(root);
+    API.szSaveOrder(root);
+    let raw = {};
+    try { raw = JSON.parse(store[API.getSortKey()] || '{}'); } catch (e) {}
+    check('§27 模块顺序写入 localStorage',
+      !!raw.groups && raw.groups.join(',') === snap.groups.join(','), String(raw.groups));
+    check('§27 组内条目顺序一并写入',
+      !!raw.items && !!raw.items.tools && raw.items.tools.join(',') === snap.items.tools.join(','),
+      String(raw.items && raw.items.tools));
+
+    const rev = snap.groups.slice().reverse();
+    API.szApplyOrder(root, { groups: rev, items: { tools: ['tool:cursor', '#id不存在', 'tool:hline'] } });
+    check('§27 按记忆还原模块顺序', keys().join(',') === rev.join(','), keys().join(','));
+    check('§27 未知键被忽略、未列出的条目留在末尾',
+      toolKeys()[0] === 'tool:cursor' && toolKeys()[1] === 'tool:hline' && toolKeys().length === 6, toolKeys().join(','));
+
+    store[API.getSortKey()] = '{"groups":["x"]}';
+    API.szResetSort();
+    check('§27 重置刷新会清掉排序记忆', !(API.getSortKey() in store), String(store[API.getSortKey()]));
+
+    let threw = false;
+    try {
+      API.szApplyOrder(root, null);
+      API.szApplyOrder(root, { groups: 'nope', items: {} });
+      API.szApplyOrder(root, { groups: ['symbols'] });
+    } catch (e) { threw = true; }
+    check('§27 残缺/异常记忆不会让页面崩', threw === false && keys().length === 10, keys().join(','));
+
+    // --- 静态检查真实 index.html：新增模块/按钮忘了给键会被这里抓住 ---
+    const barHtml = html.slice(html.indexOf('<div id="toolbar">'), html.indexOf('<div id="main">'));
+    // 注意正则要排除 .group-label：class="group[^"]*" 会把 10 个标签也数进来
+    const gCount = (barHtml.match(/class="group(?: [^"]*)?"/g) || []).length;
+    const kCount = (barHtml.match(/class="group(?: [^"]*)?"[^>]*data-key=/g) || []).length;
+    check('§27 真实工具条每个模块都带 data-key', gCount === 10 && kCount === 10, gCount + ' 个模块 / ' + kCount + ' 个有键');
+    const toolsHtml = barHtml.slice(barHtml.indexOf('class="group tools"'), barHtml.indexOf('data-key="axis"'));
+    const iCount = (toolsHtml.match(/<(button|label|div)[^>]*(data-tool=|id="(clearLines|tradeEnter|tradeDirSeg)"|data-key="cont")/g) || []).length;
+    check('§27 画线工具组内条目全部可识别（工具/连画/清除/盈亏比/多空）', iCount === 12, iCount + ' 项');
+    check('§27 排序逻辑已注入页面', html.includes('function initSort()') && html.includes('kline_toolbar_order_v1'));
+  }
+
+  // ============ 28. 真 DOM（jsdom）端到端：派发真实鼠标事件走完整拖拽排序 ============
+  // §27 用迷你 DOM 测的是「算法」；这里用真 DOM 测「交互」——真 HTML 结构 + 真事件 + 真 localStorage。
+  // jsdom 没有布局引擎（getBoundingClientRect 全 0），所以手工合成纵向坐标：等价于「工具条是竖排的」这一事实。
+  {
+    const { JSDOM } = loadJsdom();
+    if (!JSDOM) {
+      console.log('SKIP  §28 未找到 jsdom（真 DOM 拖拽端到端验证跳过）');
+      console.log('      装法：cd /Users/mac/.workbuddy/binaries/node/workspace && npm install jsdom');
+    } else {
+      const barHtml = html.slice(html.indexOf('<div id="toolbar">'), html.indexOf('<div id="main">'));
+      const js = scripts.join('\n');
+      const s0 = js.indexOf('// ================= §27 工具条排序');
+      const s1 = js.indexOf('initSort();', s0) + 'initSort();'.length;
+      const block = js.slice(s0, s1);
+      check('§28 从 index.html 抽到 §27 代码块', s0 > 0 && block.includes('function initSort') && block.includes('initSort();'),
+        block.length + ' 字节');
+
+      const store = {};
+      const fakeLS = {
+        getItem: k => (k in store ? store[k] : null),
+        setItem: (k, v) => { store[k] = String(v); },
+        removeItem: k => { delete store[k]; }
+      };
+      const DEFAULT = 'symbols,periods,ma,tools,axis,view,memory,focus,trades,sim';
+      let pend = [];                             // 可控定时器：模拟「200ms 过去了」
+      const fakeSetTimeout = fn => { pend.push(fn); return pend.length; };
+      const tick = () => { const t = pend; pend = []; t.forEach(f => f()); };
+      const setRect = (el, top, h) => {
+        el.getBoundingClientRect = () => ({ top, bottom: top + h, height: h, left: 0, right: 100, width: 100 });
+      };
+      // 真浏览器里布局永远跟着 DOM 实时更新；jsdom 没有布局引擎，所以每次交互前重算一遍合成坐标。
+      const relayout = a => {
+        let y = 20;
+        for (const g of a.root.children) {
+          if (g.classList.contains('group')) { setRect(g, y, 80); y += 100; } else setRect(g, 0, 20);
+        }
+        let ty = 2000;                            // 组内条目用独立区间，避免和模块区间重叠
+        for (const it of a.T.children) { setRect(it, ty, 30); ty += 36; }
+      };
+      const boot = () => {                       // 每次调用 = 「打开/刷新一次页面」
+        const dom = new JSDOM('<!doctype html><html><body>' + barHtml + '</body></html>',
+          { url: 'https://t.test/', pretendToBeVisual: true });
+        const { window } = dom;
+        const fn = new Function('window', 'document', 'localStorage', 'setTimeout', 'clearTimeout', 'console',
+          block + '\n;return { root: document.getElementById("toolbar"), szOrderOf, szKey, szKids, szResetSort };');
+        const api = fn(window, window.document, fakeLS, fakeSetTimeout, () => {}, console);
+        const a = { window, api, root: api.root, T: api.root.querySelector('.group.tools'), items: 0 };
+        a.items = a.T.children.length;
+        relayout(a);
+        return a;
+      };
+      const fire = (win, type, x, y, target) => {
+        const ev = new win.MouseEvent(type, { clientX: x, clientY: y, button: 0, bubbles: true, cancelable: true });
+        (target || win).dispatchEvent(ev);
+        return ev;
+      };
+      const groupsOf = a => a.api.szOrderOf(a.root).groups.join(',');
+      const itemsOf = a => a.api.szOrderOf(a.root).items.tools.join(',');
+      const drag = (a, el, toY) => {
+        relayout(a);
+        fire(a.window, 'mousedown', 40, el.getBoundingClientRect().top + 6, el);
+        fire(a.window, 'mousemove', 40, toY);
+        fire(a.window, 'mouseup', 40, toY);
+      };
+      const nudge = (a, el, dy) => {              // 按住后小幅抖动（不换位）
+        relayout(a);
+        const t = el.getBoundingClientRect().top + 6;
+        fire(a.window, 'mousedown', 40, t, el);
+        fire(a.window, 'mousemove', 40, t + dy);
+        fire(a.window, 'mouseup', 40, t + dy);
+        return t + dy;
+      };
+
+      const A = boot();
+      const maLabel = A.window.document.querySelector('.group[data-key="ma"] > .group-label');
+      check('§28 真 HTML 里每个模块都能按 data-key 找到', !!maLabel && !!A.window.document.querySelector('.group[data-key="sim"]'));
+      check('§28 首次打开 = 原始顺序', groupsOf(A) === DEFAULT, groupsOf(A));
+
+      // ① 拖「均线」的标签到最顶部
+      drag(A, maLabel, 25);
+      check('§28 拖动模块标签 → DOM 真的换了位置', groupsOf(A) === 'ma,symbols,periods,tools,axis,view,memory,focus,trades,sim', groupsOf(A));
+      check('§28 拖完立刻写入 localStorage',
+        !!store['kline_toolbar_order_v1'] && JSON.parse(store['kline_toolbar_order_v1']).groups[0] === 'ma',
+        String(store['kline_toolbar_order_v1']).slice(0, 60));
+
+      // ② 拖「画线工具」组内第一个按钮到本组最末（组内真实条目数：12 个）
+      const cursorBtn = A.window.document.querySelector('.group.tools button[data-tool="cursor"]');
+      drag(A, cursorBtn, 2000 + (A.items - 1) * 36 + 28);
+      check('§28 拖动组内按钮 → 工具顺序变化（挪到本组最末）',
+        itemsOf(A).split(',').pop() === 'tool:cursor', itemsOf(A));
+
+      // ③ 真拖动之后紧随的那一次 click 要被吞掉（否则会误点复选框/误切工具）
+      const rl = () => { relayout(A); return maLabel.getBoundingClientRect(); };
+      check('§28 拖完那一下 click 被吞掉', fire(A.window, 'click', 40, rl().top + 10, maLabel).defaultPrevented === true);
+      // ④ 吞点击只针对「紧随那一次」：窗口过后再点必须正常放行（否则会连累别的按钮）
+      tick();
+      check('§28 窗口过后的点击正常放行',
+        fire(A.window, 'click', 40, rl().top + 10, maLabel).defaultPrevented === false);
+
+      // ⑤ 只点一下（没有位移）不该改变任何顺序，也不该吞 click
+      const before = groupsOf(A);
+      fire(A.window, 'mousedown', 40, rl().top + 10, maLabel);
+      fire(A.window, 'mouseup', 40, rl().top + 10);
+      check('§28 只点击不拖动 → 顺序不变', groupsOf(A) === before, groupsOf(A));
+      check('§28 只点击不拖动 → click 正常放行',
+        fire(A.window, 'click', 40, rl().top + 10, maLabel).defaultPrevented === false);
+
+      // ⑥ 手抖式微拖（超过 5px 阈值、但没跨过任何兄弟）：不算排序，也不能吞 click，
+      //    否则想点「水平线」时会因为手抖而点不动工具（这是最容易踩的手感坑）
+      const hlineBtn = A.window.document.querySelector('.group.tools button[data-tool="hline"]');
+      const itemsBefore = itemsOf(A);
+      const hy = nudge(A, hlineBtn, 6);
+      check('§28 手抖微拖 → 顺序不变', itemsOf(A) === itemsBefore, itemsOf(A));
+      check('§28 手抖微拖 → click 未被吞（工具照样能选中）',
+        fire(A.window, 'click', 40, hy, hlineBtn).defaultPrevented === false);
+
+      // ⑦ 「刷新一次」：新开一个 DOM，共用同一份 localStorage
+      const B = boot();
+      check('§28 刷新后仍按记忆的顺序', groupsOf(B) === groupsOf(A), groupsOf(B) + ' vs ' + groupsOf(A));
+      check('§28 且确实不是原始顺序（证明真读了记忆）', groupsOf(B) !== DEFAULT, groupsOf(B));
+
+      // ⑧ 重置刷新 → 还原默认并清记忆
+      B.api.szResetSort();
+      check('§28 重置刷新 → 回到原始顺序', groupsOf(B) === DEFAULT, groupsOf(B));
+      check('§28 重置刷新 → 清掉排序记忆', !('kline_toolbar_order_v1' in store), String(store['kline_toolbar_order_v1']));
+      check('§28 重置刷新按钮已接上排序还原', html.includes('szResetSort();   // §27'));
+      check('§28 拖拽样式已注入（.sz-drag / cursor:grab）',
+        html.includes('.sz-drag {') && html.includes('cursor: grab;'));
+    }
+  }
+
   // ============ 汇总 ============
   // 摘要必须在 stdout 回调里再 exit：直接 console.log + process.exit 在 stdout 是管道/重定向时
   // 会丢掉缓冲区里最后几行（页面代码带 setInterval，不能靠等事件循环自己退出）。
@@ -1351,6 +1568,64 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     (errors.length ? '失败项:\n  ' + errors.join('\n  ') + '\n' : '');
   process.stdout.write(summary, () => process.exit(fail ? 1 : 0));
 })().catch(e => { console.error('测试执行异常:', e); process.exit(2); });
+
+// ---------- §27 迷你 DOM ----------
+// 只实现排序逻辑真正用到的那部分：children / classList / dataset / getBoundingClientRect / insertBefore。
+// 真实 DOM 里 children 是 HTMLCollection、rect 来自布局，这里用数组 + 手写坐标替代，行为等价。
+function mkEl(cls, key, top, h) {
+  const el = {
+    id: '', dataset: {}, children: [], parentElement: null,
+    classList: {
+      _s: new Set(), add(c) { this._s.add(c); }, remove(c) { this._s.delete(c); },
+      contains(c) { return this._s.has(c); }
+    },
+    getBoundingClientRect() { return { top, bottom: top + h, height: h, left: 0, right: 100, width: 100 }; },
+    appendChild(n) { if (n.parentElement) n.parentElement.removeChild(n); n.parentElement = this; this.children.push(n); return n; },
+    insertBefore(n, ref) {
+      if (n.parentElement) n.parentElement.removeChild(n);
+      n.parentElement = this;
+      const i = ref ? this.children.indexOf(ref) : this.children.length;
+      this.children.splice(i < 0 ? this.children.length : i, 0, n);
+      return n;
+    },
+    removeChild(n) { const i = this.children.indexOf(n); if (i >= 0) this.children.splice(i, 1); n.parentElement = null; return n; },
+    contains(n) { let p = n; while (p) { if (p === this) return true; p = p.parentElement; } return false; },
+    querySelector(sel) {
+      if (sel !== '.group.tools') return null;
+      return this.children.find(c => c.classList.contains('group') && c.classList.contains('tools')) || null;
+    }
+  };
+  if (cls) cls.split(' ').forEach(c => el.classList.add(c));
+  if (key) {
+    if (key[0] === '#') el.id = key.slice(1);
+    else if (key.indexOf('tool:') === 0) el.dataset.tool = key.slice(5);
+    else el.dataset.key = key;
+  }
+  return el;
+}
+function mkBar() {
+  const root = mkEl('', '#toolbar', 0, 0);
+  const groups = ['symbols', 'periods', 'ma', 'tools', 'axis', 'view', 'memory', 'focus', 'trades', 'sim'];
+  const clsOf = { symbols: 'group symbols', periods: 'group periods', tools: 'group tools', focus: 'group focus-group', sim: 'group sim-group' };
+  const title = mkEl('title', 'title', 0, 20);
+  root.appendChild(title);
+  let y = 30;
+  for (const k of groups) { root.appendChild(mkEl(clsOf[k] || 'group', k, y, 80)); y += 100; }
+  const T = root.querySelector('.group.tools');
+  let ty = 0;
+  for (const [key, tag] of [['tool:cursor', 'button'], ['tool:hline', 'button'], ['#clearLines', 'button'],
+                            ['#tradeEnter', 'button'], ['#tradeDirSeg', 'div'], ['cont', 'label']]) {
+    T.appendChild(mkEl('', key, ty, 30)); ty += 36;
+  }
+  return root;
+}
+
+// ---------- §28 真 DOM：jsdom（可选依赖，装不上就跳过 §28） ----------
+function loadJsdom() {
+  const cands = ['jsdom', '/Users/mac/.workbuddy/binaries/node/workspace/node_modules/jsdom'];
+  for (const c of cands) { try { return require(c); } catch (e) {} }
+  return {};
+}
 
 // ---------- 辅助 ----------
 function deleteLine(type, obj) {
