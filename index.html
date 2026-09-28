@@ -309,7 +309,7 @@
   </div>
   <canvas id="chart"></canvas>
   <div id="hint">
-    <span class="tip-text">滚轮缩放 · 拖拽平移 · <kbd>←</kbd><kbd>→</kbd> 逐根步进 · <kbd>G</kbd> 日期跳转 · <kbd>Del</kbd> 删除选中 · 拖线或 <kbd>↑</kbd><kbd>↓</kbd> 上下移 · 「盈亏比」拖出入场/止盈/止损</span>
+    <span class="tip-text">滚轮缩放 · 拖拽平移 · <kbd>←</kbd><kbd>→</kbd> 逐根步进 · <kbd>G</kbd> 日期跳转 · <kbd>Del</kbd> 删除选中 · 拖线或 <kbd>↑</kbd><kbd>↓</kbd> 上下移 · 重叠处可再点一次切换 · 「盈亏比」拖出入场/止盈/止损</span>
     <button id="hintClose" title="隐藏提示">×</button>
   </div>
   <div id="simPanel" class="sim-panel" style="display:none">
@@ -1963,6 +1963,26 @@ function draw() {
   ctx.rect(PAD_L, mainTop, plotW, mainBot - mainTop);
   ctx.clip();
   drawLines();
+  // §29 重叠提示：光标下若压着多个可选中对象，明说「再点一次切换」（否则用户不知道底下还有第二条，只能眼睁睁删不掉）
+  if (toolMode === 'cursor' && !dragTarget && !dragStart && !dragVol &&
+      hover.x >= PAD_L && hover.x <= PAD_L + SCALE.plotW && hover.y >= PAD_T && lines.length > 1) {
+    const cs = hitTestAll(hover.x, hover.y);
+    if (cs.length > 1) {
+      const txt = '重叠 ' + cs.length + ' 个对象 · 再点一次切换';
+      ctx.save();
+      ctx.font = '11px system-ui, sans-serif';   // 与页面其它标注同一套字体
+      const tw = ctx.measureText(txt).width;
+      const bx = Math.max(PAD_L + 2, Math.min(PAD_L + SCALE.plotW - tw - 14, hover.x + 14));
+      const by = Math.max(PAD_T + 4, Math.min(H - PAD_B - 26, hover.y + 14));
+      ctx.fillStyle = 'rgba(20,27,42,0.94)';
+      ctx.fillRect(bx, by, tw + 12, 19);
+      ctx.strokeStyle = 'rgba(126,166,255,0.55)'; ctx.lineWidth = 1; ctx.setLineDash([]);
+      ctx.strokeRect(bx + 0.5, by + 0.5, tw + 11, 18);
+      ctx.fillStyle = '#bcc9e2'; ctx.textAlign = 'left';
+      ctx.fillText(txt, bx + 6, by + 13.5);
+      ctx.restore();
+    }
+  }
   drawTrades();
   try { simReplay(curSym, cur, simCursorTs()); drawSim(); renderSim(); } catch (e) {}
   drawRRDraft();
@@ -2357,27 +2377,47 @@ function ptSegDist(px, py, x1, y1, x2, y2) {
   t = Math.max(0, Math.min(1, t));
   return dist(px, py, x1 + t * dx, y1 + t * dy);
 }
-function hitTest(mx, my) {
+// §29 命中测试：从「命中即返回」改为「收集全部候选再排序」。
+//   旧写法（从最新往最旧扫、命中即 return）在对象重叠时会让被压住的那条永远点不中 → 也就删不掉：
+//     · 供应线/需求线落在「水平通道」区间带内部  → 带内区域先命中，线本体点不到；
+//     · 供应线与水平线价格几乎重合              → 只有后画的那条能选中。
+//   新排序：① 优先级（端点手柄 0 < 细线本体 1 < 面状区域 2）
+//          ② 距离（同优先级取更近的）
+//          ③ 越新越优先（完全同距时保持「后画的在上」的直觉）
+//   再配合 mousedown 里的「同一位置再点一次 → 轮换到下一个候选」，任何重叠对象都能选中并 Del 删除。
+const HIT_TOL_EDGE = 6;     // 单点水平线 / 水平通道上下边
+const HIT_TOL_HANDLE = 7;   // 端点手柄
+const HIT_TOL_BODY = 5;     // 斜线本体
+function hitTestAll(mx, my) {
+  const out = [];
   for (let i = lines.length - 1; i >= 0; i--) {
     const ln = lines[i];
+    const rank = lines.length - 1 - i;                 // 0 = 最新画的
+    const add = (handle, d, prio) => out.push({ line: ln, handle, d, prio, rank });
     if (ln.type === 'hline' || ln.type === 'supply' || ln.type === 'demand') {
       // §24 三者都是只有 price 的单点水平线，判定逻辑一致
-      const y = priceToY(ln.price);
-      if (Math.abs(my - y) < 6) return { line: ln, handle: 'body' };
+      const d = Math.abs(my - priceToY(ln.price));
+      if (d < HIT_TOL_EDGE) add('body', d, 1);
     } else if (ln.type === 'trend') {
       // 端点手柄按原始两点判定；body 命中按延长后的直线判定
       const i1 = lnIdx(ln, 'x1'), i2 = lnIdx(ln, 'x2');
       const idxL = SCALE.viewStart - 0.5, idxR = SCALE.viewStart + SCALE.plotW / SCALE.xW - 0.5;
       const tdx = i2 - i1;
       const k = tdx !== 0 ? (ln.y2 - ln.y1) / tdx : 0;
-      if (dist(mx, my, dataXToScreenX(i1), priceToY(ln.y1)) < 7) return { line: ln, handle: 'p1' };
-      if (dist(mx, my, dataXToScreenX(i2), priceToY(ln.y2)) < 7) return { line: ln, handle: 'p2' };
-      if (ptSegDist(mx, my, dataXToScreenX(idxL), priceToY(ln.y1 + k * (idxL - i1)), dataXToScreenX(idxR), priceToY(ln.y1 + k * (idxR - i1))) < 5) return { line: ln, handle: 'body' };
+      const d1 = dist(mx, my, dataXToScreenX(i1), priceToY(ln.y1));
+      const d2 = dist(mx, my, dataXToScreenX(i2), priceToY(ln.y2));
+      if (d1 < HIT_TOL_HANDLE) add('p1', d1, 0);
+      if (d2 < HIT_TOL_HANDLE) add('p2', d2, 0);
+      const dB = ptSegDist(mx, my, dataXToScreenX(idxL), priceToY(ln.y1 + k * (idxL - i1)), dataXToScreenX(idxR), priceToY(ln.y1 + k * (idxR - i1)));
+      if (dB < HIT_TOL_BODY) add('body', dB, 1);
     } else if (ln.type === 'channel') {
       const i1 = lnIdx(ln, 'x1'), i2 = lnIdx(ln, 'x2'), i3 = lnIdx(ln, 'x3');
-      if (dist(mx, my, dataXToScreenX(i1), priceToY(ln.y1)) < 7) return { line: ln, handle: 'p1' };
-      if (dist(mx, my, dataXToScreenX(i2), priceToY(ln.y2)) < 7) return { line: ln, handle: 'p2' };
-      if (dist(mx, my, dataXToScreenX(i3), priceToY(ln.y3)) < 7) return { line: ln, handle: 'p3' };
+      const d1 = dist(mx, my, dataXToScreenX(i1), priceToY(ln.y1));
+      const d2 = dist(mx, my, dataXToScreenX(i2), priceToY(ln.y2));
+      const d3 = dist(mx, my, dataXToScreenX(i3), priceToY(ln.y3));
+      if (d1 < HIT_TOL_HANDLE) add('p1', d1, 0);
+      if (d2 < HIT_TOL_HANDLE) add('p2', d2, 0);
+      if (d3 < HIT_TOL_HANDLE) add('p3', d3, 0);
       const k = (i2 - i1) !== 0 ? (ln.y2 - ln.y1) / (i2 - i1) : 0;
       const idxL = SCALE.viewStart - 0.5, idxR = SCALE.viewStart + SCALE.plotW / SCALE.xW - 0.5;
       const bL = Math.max(i1, idxL), pL = Math.max(i3, idxL);   // 各自射线起点
@@ -2387,40 +2427,56 @@ function hitTest(mx, my) {
       const p2 = { x: dataXToScreenX(idxR), y: priceToY(ln.y3 + k * (idxR - i3)) };
       const dB = ptSegDist(mx, my, b1.x, b1.y, b2.x, b2.y);
       const dP = ptSegDist(mx, my, p1.x, p1.y, p2.x, p2.y);
-      if (dB < 5 || dP < 5) return { line: ln, handle: 'body' };
-      const wPx = Math.hypot(b2.x - p2.x, b2.y - p2.y);
-      if (dB + dP <= wPx + 8) return { line: ln, handle: 'body' };
+      const dMin = Math.min(dB, dP);
+      if (dB < HIT_TOL_BODY) add('body', dB, 1);
+      else if (dP < HIT_TOL_BODY) add('body', dP, 1);
+      else {
+        const wPx = Math.hypot(b2.x - p2.x, b2.y - p2.y);
+        if (dB + dP <= wPx + 8) add('body', dMin + 3, 2);   // 通道内部的「面」：最低优先级
+      }
     } else if (ln.type === 'hchannel') {
       const y1 = priceToY(ln.price1), y2 = priceToY(ln.price2);
-      if (Math.abs(my - y1) < 6) return { line: ln, handle: 'p1' };
-      if (Math.abs(my - y2) < 6) return { line: ln, handle: 'p2' };
+      const d1 = Math.abs(my - y1), d2 = Math.abs(my - y2);
+      if (d1 < HIT_TOL_EDGE) add('p1', d1, 1);
+      if (d2 < HIT_TOL_EDGE) add('p2', d2, 1);
       const top = Math.min(y1, y2), bot = Math.max(y1, y2);
-      if (my > top && my < bot) return { line: ln, handle: 'body' };
+      // §29 区间带内部优先级最低：否则「放在通道带里的供应线/需求线」会被整条带子吞掉，点不中
+      if (my > top && my < bot) add('body', Math.min(d1, d2), 2);
     } else if (ln.type === 'measure') {
       const x1 = dataXToScreenX(lnIdx(ln, 'x1')), y1 = priceToY(ln.y1);
       const x2 = dataXToScreenX(lnIdx(ln, 'x2')), y2 = priceToY(ln.y2);
-      if (dist(mx, my, x1, y1) < 7) return { line: ln, handle: 'p1' };
-      if (dist(mx, my, x2, y2) < 7) return { line: ln, handle: 'p2' };
-      if (ptSegDist(mx, my, x1, y1, x2, y2) < 5) return { line: ln, handle: 'body' };
+      const d1 = dist(mx, my, x1, y1), d2 = dist(mx, my, x2, y2);
+      if (d1 < HIT_TOL_HANDLE) add('p1', d1, 0);
+      if (d2 < HIT_TOL_HANDLE) add('p2', d2, 0);
+      const dB = ptSegDist(mx, my, x1, y1, x2, y2);
+      if (dB < HIT_TOL_BODY) add('body', dB, 1);
     } else if (ln.type === 'trade') {
       const plotL = PAD_L, plotR = PAD_L + SCALE.plotW;
       const cx = (typeof ln.idx === 'number') ? dataXToScreenX(ln.idx)
                 : plotL + (ln.cx ?? 0.5) * SCALE.plotW, rw = Math.min(170, SCALE.plotW * 0.40);
       const rx = cx - rw / 2;
       for (const key of ['tp', 'entry', 'sl']) {
-        const y = priceToY(ln[key]);
-        if (mx >= rx - 16 && mx <= rx + rw + 16 && Math.abs(my - y) <= 26) return { line: ln, handle: key };
+        const d = Math.abs(my - priceToY(ln[key]));
+        if (mx >= rx - 16 && mx <= rx + rw + 16 && d <= 26) add(key, d, 1);   // 命中明细按距离排序
       }
       // 矩形主体空白处：拖动 = 整体移动（水平移 cx，垂直平移三线）
       const rTop = Math.min(priceToY(ln.tp), priceToY(ln.sl)), rBot = Math.max(priceToY(ln.tp), priceToY(ln.sl));
-      if (mx >= rx && mx <= rx + rw && my >= rTop && my <= rBot) return { line: ln, handle: 'move' };
+      if (mx >= rx && mx <= rx + rw && my >= rTop && my <= rBot) add('move', Math.min(Math.abs(my - rTop), Math.abs(my - rBot)), 2);
     }
   }
-  return null;
+  // ① 优先级 ② 距离 ③ 越新越优先
+  out.sort((a, b) => (a.prio - b.prio) || (a.d - b.d) || (a.rank - b.rank));
+  return out;
+}
+// 兼容旧调用：返回最佳候选（原 {line, handle} 结构）
+function hitTest(mx, my) {
+  const c = hitTestAll(mx, my)[0];
+  return c ? { line: c.line, handle: c.handle } : null;
 }
 
 // ---------- 鼠标事件 ----------
 let drag = false, lastX = 0, dragStart = null;
+let lastPick = null;   // §29 上一次命中的对象与位置（同一位置再点一次 → 轮换到下一个候选）
 let dragVol = false;   // 正在拖动成交量分隔条
 
 // 画完一条线后退出画线模式，回到光标（保存结果，不再连续画）
@@ -2525,7 +2581,16 @@ canvas.addEventListener('mousedown', e => {
       dragVol = true; canvas.style.cursor = 'row-resize'; draw(); return;
     }
   }
-  const hit = hitTest(mx, my);
+  // §29 命中：同一处可能压着多个对象（重叠线 / 线落在水平通道带内）——
+  //     取最优候选；若「同一位置再点一次」，则轮换到下一个候选（保证任何一条都能选中 → Del 删除）
+  const cands = hitTestAll(mx, my);
+  let hit = cands.length ? cands[0] : null;
+  if (cands.length > 1 && lastPick &&
+      Math.abs(mx - lastPick.mx) < 5 && Math.abs(my - lastPick.my) < 5) {
+    const pi = cands.findIndex(c => c.line === lastPick.line && c.handle === lastPick.handle);
+    hit = cands[(pi + 1) % cands.length];
+  }
+  lastPick = hit ? { mx, my, line: hit.line, handle: hit.handle } : null;
   if (hit) {
     selectedLine = hit.line;
     dragTarget = hit;

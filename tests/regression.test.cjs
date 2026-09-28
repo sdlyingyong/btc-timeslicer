@@ -141,6 +141,8 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     // §27 工具条排序
     szKey, szKids, szOrderOf, szApplyOrder, szDropTarget, szMoveTo, szSaveOrder, szResetSort,
     getSortKey: () => SORT_KEY,
+    // §29 重叠对象命中：全部候选 + 同点轮换状态
+    hitTestAll, getLastPick: () => lastPick, setLastPick: v => { lastPick = v; },
     // §19.5 UI 控制器 + 渲染数据
     simMarks, simOpenAtCursor, simAddAtCursor, simExitAtCursor, simCursorTs, simCursorPrice, simLeverage, simStopVal, simSizeVal, drawSim, renderSim
   };`);
@@ -1559,6 +1561,194 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
       check('§28 拖拽样式已注入（.sz-drag / cursor:grab）',
         html.includes('.sz-drag {') && html.includes('cursor: grab;'));
     }
+  }
+
+  // ============ 29. 重叠对象也能选中并删除（用户报告：供应线落在水平通道带里时点不到） ============
+  // 旧版 hitTest：从最新往最旧扫、命中即 return。对象一重叠就让被压住的那条永远选不中 → 也就删不掉：
+  //   ① 先画供应线、后画把它包住的水平通道 → 通道带（面）先命中，供应线点不到；
+  //   ② 供应线与水平线几乎同价 → 只有后画的那条能选中。
+  // §29 改为「收集全部候选 + 排序（手柄0 < 细线1 < 面2，同优先级比距离，同距比新旧）」，
+  //     并在 mousedown 里做「同一位置再点一次 → 轮换到下一个候选」。
+  {
+    const yOf = p => API.priceToY(p);
+    const last = () => API.getLines()[API.getLines().length - 1];
+    // ⚠️ 坐标一律按真实 SCALE 锚定，别硬编码：更早的用例会把 volFrac 拖到 0.317，
+    //    此时 mainBot 只有 418（成交量分隔条在 ~422），硬编码 y=420 会正好压在分隔条上 → 点击被当成「拖 VOL 高度」。
+    const sc0 = API.getScale();
+    const yA = f => Math.round(sc0.mainTop + (sc0.mainBot - sc0.mainTop) * f);
+    const Y_TOP = yA(0.15), Y_BOT = yA(0.92), Y_MID = yA(0.50);
+
+    // ---- 29.1 复现原始 bug：先画供应线，再画把它包在里面的水平通道 ----
+    clearLines();
+    API.setTool('supply'); down(600, Y_MID);
+    const spA = last();
+    API.setTool('hchannel'); down(400, Y_TOP); down(400, Y_BOT);
+    const hcA = last();
+    const ySpA = yOf(spA.price);
+    check('§29 场景就位：供应线落在水平通道带内部',
+      !!spA && !!hcA && spA.type === 'supply' && hcA.type === 'hchannel' &&
+      ySpA > Math.min(yOf(hcA.price1), yOf(hcA.price2)) && ySpA < Math.max(yOf(hcA.price1), yOf(hcA.price2)),
+      'sp@' + ySpA.toFixed(0) + ' band ' + yOf(hcA.price1).toFixed(0) + '~' + yOf(hcA.price2).toFixed(0));
+
+    const cA = API.hitTestAll(500, ySpA);
+    check('§29 首次命中即供应线（不再被通道带吞掉）', cA.length > 1 && cA[0].line === spA,
+      cA.map(c => c.line.type + '/' + c.handle + '/prio' + c.prio).join(' > '));
+    check('§29 通道带仍是候选（没丢，只是排后）', cA.some(c => c.line === hcA));
+    check('§29 带内「面」优先级最低 prio=2', cA.find(c => c.line === hcA).prio === 2);
+    check('§29 细线 prio=1（高于带内面）', cA[0].prio === 1);
+
+    // 端到端：点 → 选中 → Del → 真删掉
+    down(500, ySpA);
+    check('§29 点击带内供应线 → 选中供应线', API.getSelected() === spA);
+    up();
+    key('Delete');
+    check('§29 Del 真的删掉供应线（用户诉求达成）', !API.getLines().includes(spA), '剩余 ' + API.getLines().length + ' 条');
+    check('§29 通道带未被误删', API.getLines().includes(hcA));
+
+    // ---- 29.2 水平通道自身：带边 prio=1 高于带内面 prio=2 ----
+    clearLines();
+    API.setTool('hchannel'); down(400, Y_TOP); down(400, Y_BOT);
+    const hcB = last();
+    const yEdgeB = yOf(hcB.price1);
+    const cEdge = API.hitTestAll(500, yEdgeB);
+    check('§29 带边命中 p1 且 prio=1', cEdge.length >= 1 && cEdge[0].handle === 'p1' && cEdge[0].prio === 1,
+      cEdge.map(c => c.handle + '/prio' + c.prio).join(' > '));
+    const midB = (yOf(hcB.price1) + yOf(hcB.price2)) / 2;
+    const cMid = API.hitTestAll(500, midB);
+    check('§29 带内空白只命中通道本体 body 且 prio=2',
+      cMid.length === 1 && cMid[0].line === hcB && cMid[0].handle === 'body' && cMid[0].prio === 2,
+      cMid.map(c => c.handle + '/prio' + c.prio).join(' > '));
+    // 带内空白点击仍能选中通道本体（可平移）
+    down(500, midB);
+    check('§29 带内空白仍可选中通道本体', API.getSelected() === hcB);
+    up();
+
+    // ---- 29.3 两条单点水平线完全重合：同点再点一次 → 轮换 ----
+    clearLines();
+    API.setTool('hline'); down(500, Y_MID);
+    const hlC = last();
+    API.setTool('supply'); down(500, Y_MID);          // 与水平线同价位
+    const spC = last();
+    const yC = yOf(spC.price);
+    check('§29 两条单点水平线真重合', !!hlC && !!spC && near(hlC.price, spC.price, 1e-9));
+    const cC = API.hitTestAll(500, yC);
+    check('§29 重合处两个候选都在', cC.length === 2 && cC.some(c => c.line === hlC) && cC.some(c => c.line === spC));
+    check('§29 完全同距时越新越优先（供应线在后 → 先命中）', cC[0].line === spC);
+
+    down(500, yC);
+    check('§29 第一次点 → 选中供应线', API.getSelected() === spC);
+    up();
+    down(500, yC);
+    check('§29 同点再点一次 → 轮换到被压住的水平线（关键修复）', API.getSelected() === hlC);
+    up();
+    down(500, yC);
+    check('§29 再点一次 → 循环回供应线', API.getSelected() === spC);
+    up();
+    key('Delete');
+    check('§29 轮换后 Del 删掉的正是轮换到的那条', !API.getLines().includes(spC) && API.getLines().includes(hlC));
+
+    down(500, yC);
+    check('§29 只剩一条时同点点击直接选中它', API.getSelected() === hlC);
+    up();
+
+    // ---- 29.4 轮换以「位置」为界：点到别处再回来 → 回到首选 ----
+    clearLines();
+    API.setTool('hline'); down(500, Y_MID);
+    API.setTool('demand'); down(500, Y_MID);
+    const dmD = last();
+    const yD = yOf(dmD.price);
+    down(500, yD);
+    check('§29 首选 = 后画的需求线', API.getSelected() === dmD);
+    up();
+    down(800, Y_TOP + 20);                                   // 点到别处（空处 → 取消选中）
+    up();
+    check('§29 点到别处 → 取消选中', API.getSelected() === null);
+    down(500, yD);
+    check('§29 回到原位置 → 重新从首选开始（不记忆轮换位）', API.getSelected() === dmD);
+    up();
+
+    // ---- 29.5 重叠提示：画布上出现「重叠 N 个对象 · 再点一次切换」 ----
+    move(500, yD);
+    let n0 = ctxTexts.length; API.draw();
+    const badge = ctxTexts.slice(n0).filter(t => /重叠 \d+ 个对象/.test(t));
+    check('§29 重叠处给出可切换提示', badge.length === 1, JSON.stringify(badge.slice(0, 2)));
+    check('§29 提示里报出的重叠数量正确', badge.length === 1 && badge[0].indexOf('重叠 2 个') === 0, badge[0] || '');
+
+    // 不重叠时不该刷提示
+    down(800, Y_TOP + 20); up();                             // 取消选中
+    API.setLastPick(null);
+    move(300, Y_BOT + 40);                            // 主图下方的空白（成交量副图区域）
+    n0 = ctxTexts.length; API.draw();
+    const badge2 = ctxTexts.slice(n0).filter(t => /重叠 \d+ 个对象/.test(t));
+    check('§29 无重叠时不显示提示', badge2.length === 0, JSON.stringify(badge2.slice(0, 2)));
+
+    // ---- 29.6 盈亏比面板：面板「空白面」不该吞掉穿过的供应线 ----
+    move(-1, -1);
+    clearLines();
+    API.setTradeMode(true);
+    goLatest();
+    down(600, 400); move(600, 330); up(); move(600, 470); up();
+    API.setTradeMode(false);
+    const tr = API.getLines().find(l => l.type === 'trade');
+    check('§29.6 盈亏比面板已创建', !!tr && tr.entry != null && tr.tp != null && tr.sl != null);
+    if (tr) {
+      // 在矩形横向范围内、且在矩形内部、离 tp/entry/sl 都超过 26px 的价位上放一条供应线
+      const yMid = (yOf(tr.tp) + yOf(tr.sl)) / 2;
+      API.setTool('supply'); down(600, yMid);
+      const spE = last();
+      check('§29.6 供应线落在面板矩形内部',
+        !!spE && spE.type === 'supply' && Math.abs(yOf(spE.price) - yMid) < 1.5,
+        'y=' + yOf(spE.price).toFixed(1) + ' 期望 ' + yMid.toFixed(1));
+      const cE = API.hitTestAll(600, yOf(spE.price));
+      check('§29.6 面板空白面不吞穿过的线（细线优先于面）',
+        cE.length > 1 && cE[0].line === spE, cE.map(c => c.line.type + '/' + c.handle + '/prio' + c.prio).join(' > '));
+      check('§29.6 面板本体仍是候选（prio=2）',
+        cE.some(c => c.line === tr && c.prio === 2));
+      check('§29.6 同点再点也能轮换到面板', (() => {
+        down(600, yOf(spE.price)); const a = API.getSelected(); up();
+        down(600, yOf(spE.price)); const b = API.getSelected(); up();
+        return a === spE && b === tr;
+      })());
+    }
+
+    // ---- 29.7 无重叠时的行为与旧版一致（回归保护） ----
+    clearLines();
+    check('§29.7 无画线时 hitTest 返回 null', API.hitTest(500, 300) === null);
+    check('§29.7 无画线时候选为空数组', API.hitTestAll(500, 300).length === 0);
+    API.setTool('demand'); down(500, Y_MID);
+    const dmF = last();
+    const cF = API.hitTestAll(500, yOf(dmF.price));
+    check('§29.7 只有一条线 → 候选恰一个且就是它',
+      cF.length === 1 && cF[0].line === dmF && cF[0].handle === 'body' && cF[0].prio === 1);
+    check('§29.7 only-one 时 hitTest 仍返回 {line, handle} 结构', (() => {
+      const r = API.hitTest(500, yOf(dmF.price));
+      return !!r && r.line === dmF && r.handle === 'body' && Object.keys(r).length === 2;
+    })());
+    check('§29.7 偏离 40px 仍点不中（容差没被放大）', API.hitTest(500, yOf(dmF.price) + 40) === null);
+    check('§29.7 偏离 7px 仍点得中（容差没被缩小）', API.hitTest(500, yOf(dmF.price) + 5) !== null);
+    // 单点水平线仍是单点拖动（§26 行为不能被改坏）
+    const pBefore = dmF.price;
+    down(500, yOf(dmF.price)); move(500, yOf(dmF.price) - 30); up();
+    check('§29.7 单点水平线拖动仍然生效', !near(dmF.price, pBefore));
+    clearLines();
+    move(-1, -1);
+
+    // ---- 29.8 肉眼复核（RENDER=1）：供应线压在水平通道带里 + 光标停在重叠处 → 应出现切换提示 ----
+    if (process.env.RENDER) {
+      await API.setView(null, '1d');
+      const L2 = API.dataLen();
+      API.setViewRange(Math.max(0, L2 - 260), Math.min(260, L2));
+      const sc2 = API.getScale();
+      const yy = f => Math.round(sc2.mainTop + (sc2.mainBot - sc2.mainTop) * f);
+      API.setTool('supply'); down(620, yy(0.5));               // 绿：供应线（后画的通道把它包住）
+      API.setTool('hchannel'); down(380, yy(0.14)); down(380, yy(0.9));
+      for (let k = 0; k < 90; k++) API.draw();
+      move(620, yy(0.5));                                      // 光标停在重叠处
+      for (let k = 0; k < 5; k++) API.draw();
+      require('fs').writeFileSync('/tmp/shot_overlap.png', canvasMock.toBuffer('image/png'));
+      console.log('§29 wrote /tmp/shot_overlap.png');
+    }
+    clearLines();
   }
 
   // ============ 汇总 ============
