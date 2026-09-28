@@ -22,12 +22,20 @@ const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps;
 let md = null, mm = null, ml = null, wmm = null, wkd = null, wmu = null, wl = null;
 const ctxTexts = [];   // §20：记录所有 fillText 文本，供年度标签断言
 const ctxRects = [];   // §21 诊断：记录所有 fillRect 参数
+const ctxStrokes = []; // §25：记录每次 stroke() 的 {color, y}，用于校验通道上线绿/下线红的「颜色↔价位」对应
+let ctxLastMoveY = null;
+const ctxState = {};   // §25：mock 里被 set 的样式（如 strokeStyle），get 需能回读（hline 有 fillStyle = strokeStyle）
 const ctx2d = new Proxy({
   measureText: () => ({ width: 40 }),
   createRadialGradient: () => ({ addColorStop() {} }),
   fillText: t => { ctxTexts.push(String(t)); },
-  fillRect: (x, y, w, h) => { ctxRects.push([x, y, w, h]); }
-}, { get: (t, k) => (k in t ? t[k] : typeof k === 'string' ? (() => {}) : undefined), set: () => true });
+  fillRect: (x, y, w, h) => { ctxRects.push([x, y, w, h]); },
+  moveTo: (x, y) => { ctxLastMoveY = y; },
+  stroke: () => { ctxStrokes.push({ color: String(ctxState.strokeStyle), y: ctxLastMoveY }); }
+}, {
+  get: (t, k) => (k in t ? t[k] : (k in ctxState ? ctxState[k] : (typeof k === 'string' ? (() => {}) : undefined))),
+  set: (t, k, v) => { ctxState[k] = v; return true; }
+});
 const canvasMock = process.env.RENDER ? (() => {          // 真实渲染模式（额外导出 PNG 供肉眼复核）
   const { createCanvas } = require('@napi-rs/canvas');
   const c = createCanvas(1200, 700);
@@ -38,6 +46,8 @@ const canvasMock = process.env.RENDER ? (() => {          // 真实渲染模式�
     get: (t, k) => {
       if (k === 'fillRect') return (x, y, w, h) => { ctxRects.push([x, y, w, h]); return t.fillRect(x, y, w, h); };
       if (k === 'fillText') return (s, x, y) => { ctxTexts.push(String(s)); return t.fillText(s, x, y); };
+      if (k === 'moveTo') return (x, y) => { ctxLastMoveY = y; return t.moveTo(x, y); };
+      if (k === 'stroke') return () => { ctxStrokes.push({ color: String(t.strokeStyle), y: ctxLastMoveY }); return t.stroke(); };
       const v = t[k];
       return typeof v === 'function' ? v.bind(t) : v;
     },
@@ -116,6 +126,10 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     getTradePlan, exitToolMode,
     findIdxSync, lnIdx, barTs, draw,
     clearLines: () => { lines = []; linesStore[lineKey()] = []; saveSessionNow(); },
+    // §24 供应线/需求线
+    getHLevelStyle: () => HLEVEL_STYLE, saveSessionNow,
+    // §25 水平通道配色
+    getHChannelStyle: () => HCHANNEL_STYLE,
     setView, getCur: () => cur, getRightTs: () => rightTs,
     setViewRange: (vs, vc) => { viewStart = vs; viewCount = vc; },
     parseDateInput,
@@ -1112,6 +1126,115 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     }
   }
 
+  // ============ 24. 供应线（绿）/ 需求线（红）水平线类型 ============
+  {
+    const st = (() => { try { return API.getHLevelStyle(); } catch (e) { return null; } })();
+    check('§24 HLEVEL_STYLE 已定义 supply/demand', !!st && !!st.supply && !!st.demand);
+    check('§24 供应线配色为绿 #2fbf71', !!st && st.supply.color === '#2fbf71', st && st.supply.color);
+    check('§24 需求线配色为红 #ef4d4d', !!st && st.demand.color === '#ef4d4d', st && st.demand.color);
+    check('§24 名称标签为 供应线/需求线', !!st && st.supply.label === '供应线' && st.demand.label === '需求线');
+
+    // 供应线：单点创建 + 命中 + 拖动
+    API.setTool('supply');
+    down(420, 260);
+    let arr = API.getLines();
+    const sp = arr[arr.length - 1];
+    check('§24 供应线单点创建', !!sp && sp.type === 'supply' && near(sp.price, API.yToPrice(260)));
+    check('§24 供应线创建后自动退出工具', API.getTool() === 'cursor');
+    const hSp = API.hitTest(420, 260);
+    check('§24 供应线命中 body', !!hSp && hSp.handle === 'body');
+    down(420, 260); move(420, 300);
+    check('§24 供应线拖动改价', !!sp && near(sp.price, API.yToPrice(300)));
+    up(); move(-1, -1);
+
+    // 需求线：单点创建 + 命中 + 拖动
+    API.setTool('demand');
+    down(520, 480);
+    arr = API.getLines();
+    const dm = arr[arr.length - 1];
+    check('§24 需求线单点创建', !!dm && dm.type === 'demand' && near(dm.price, API.yToPrice(480)));
+    check('§24 需求线创建后自动退出工具', API.getTool() === 'cursor');
+    const hDm = API.hitTest(520, 480);
+    check('§24 需求线命中 body', !!hDm && hDm.handle === 'body');
+    down(520, 480); move(520, 440);
+    check('§24 需求线拖动改价', !!dm && near(dm.price, API.yToPrice(440)));
+    up(); move(-1, -1);
+
+    // 标签文本（draw 的 fillText 记录）
+    let n0 = ctxTexts.length; API.draw();
+    const tSp = ctxTexts.slice(n0).join('|');
+    check('§24 供应线标签含「供应线」', tSp.includes('供应线'), tSp.slice(0, 60));
+    n0 = ctxTexts.length; API.draw();
+    const tDm = ctxTexts.slice(n0).join('|');
+    check('§24 需求线标签含「需求线」', tDm.includes('需求线'), tDm.slice(0, 60));
+
+    // 持久化（创建走 500ms 防抖，显式落盘一次再断言）
+    API.saveSessionNow();
+    const raw = store['kline_session_v1'] || '';
+    check('§24 供应线/需求线已持久化到 session',
+      raw.includes('"type":"supply"') && raw.includes('"type":"demand"'), raw.length + ' bytes');
+
+    // 共存 + 删除（互不干扰）
+    check('§24 供应线与需求线共存', API.getLines().some(l => l.type === 'supply') && API.getLines().some(l => l.type === 'demand'));
+    const nAll = API.getLines().length;
+    check('§24 供应线删除', !!sp && deleteLine('supply', sp));
+    check('§24 需求线删除', !!dm && deleteLine('demand', dm));
+    check('§24 删除只减少两条，其余不受影响', API.getLines().length === nAll - 2, '' + API.getLines().length);
+  }
+
+  // ============ 25. 水平通道配色：上线绿（供应）/ 下线红（需求） ============
+  {
+    const st = (() => { try { return API.getHChannelStyle(); } catch (e) { return null; } })();
+    check('§25 HCHANNEL_STYLE 已定义 up/dn', !!st && !!st.up && !!st.dn);
+    check('§25 上限线配色为绿 #2fbf71', !!st && st.up === '#2fbf71', st && st.up);
+    check('§25 下限线配色为红 #ef4d4d', !!st && st.dn === '#ef4d4d', st && st.dn);
+    const hl = API.getHLevelStyle();
+    check('§25 与供应线/需求线同色（单一来源）',
+      !!st && !!hl && st.up === hl.supply.color && st.dn === hl.demand.color);
+
+    // 建一条「上高下低」的水平通道，用绘制的 stroke 记录校验颜色 ↔ 价位
+    // 注：蜡烛 wick 也用同色 stroke，故只取该次 draw 的「末两条」——lines 里通道是最后一个对象，
+    //     drawLines() 的画序（上限绿 → 下限红）保证这两条 stroke 就是通道自身的两条线。
+    API.setTool('hchannel');
+    down(500, 200);   // 上限（高价）
+    down(500, 400);   // 下限（低价）
+    const arr = API.getLines();
+    const hc = arr[arr.length - 1];
+    check('§25 水平通道两点创建', !!hc && hc.type === 'hchannel' &&
+      near(hc.price1, API.yToPrice(200)) && near(hc.price2, API.yToPrice(400)));
+    check('§25 创建后自动退出工具', API.getTool() === 'cursor');
+
+    const n0 = ctxStrokes.length; API.draw();
+    const seg = ctxStrokes.slice(n0).filter(s => s.color === '#2fbf71' || s.color === '#ef4d4d');
+    check('§25 通道两条线各画一次（绿 + 红）',
+      seg.filter(s => s.color === '#2fbf71').length >= 1 && seg.filter(s => s.color === '#ef4d4d').length >= 1);
+    const t2 = seg.slice(-2);
+    const yHi = API.priceToY(Math.max(hc.price1, hc.price2));   // 高价线 y（更小）
+    const yLo = API.priceToY(Math.min(hc.price1, hc.price2));   // 低价线 y（更大）
+    check('§25 上限（高价）绿线、下限（低价）红线', t2.length === 2 &&
+      t2[0].color === '#2fbf71' && Math.abs(t2[0].y - yHi) < 0.5 &&
+      t2[1].color === '#ef4d4d' && Math.abs(t2[1].y - yLo) < 0.5,
+      t2.map(s => s.color + '@y' + (s.y == null ? '?' : s.y.toFixed(1))).join(' ') +
+      ' 期望 #2fbf71@y' + yHi.toFixed(1) + ' #ef4d4d@y' + yLo.toFixed(1));
+
+    // 价格反转（先点低价再点高价）时，颜色仍按「高价绿 / 低价红」分配
+    API.setTool('hchannel');
+    down(500, 420); down(500, 180);
+    const hc2 = API.getLines()[API.getLines().length - 1];
+    const n1 = ctxStrokes.length; API.draw();
+    const seg2 = ctxStrokes.slice(n1).filter(s => s.color === '#2fbf71' || s.color === '#ef4d4d');
+    const t2b = seg2.slice(-2);
+    const yHi2 = API.priceToY(Math.max(hc2.price1, hc2.price2));
+    const yLo2 = API.priceToY(Math.min(hc2.price1, hc2.price2));
+    check('§25 反向点选仍为「高价绿/低价红」', t2b.length === 2 &&
+      t2b[0].color === '#2fbf71' && Math.abs(t2b[0].y - yHi2) < 0.5 &&
+      t2b[1].color === '#ef4d4d' && Math.abs(t2b[1].y - yLo2) < 0.5,
+      t2b.map(s => s.color + '@y' + (s.y == null ? '?' : s.y.toFixed(1))).join(' '));
+    check('§25 反向通道删除', !!hc2 && deleteLine('hchannel', hc2));
+
+    check('§25 通道删除', !!hc && deleteLine('hchannel', hc));
+  }
+
   // ============ 汇总 ============
   console.log('\n======== 结果: ' + pass + ' PASS / ' + fail + ' FAIL ========');
   if (errors.length) { console.log('失败项:\n  ' + errors.join('\n  ')); process.exit(1); }
@@ -1122,7 +1245,7 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
 function deleteLine(type, obj) {
   // 按对象真实坐标点击命中并选中，再 Del 删除
   let px, py;
-  if (type === 'hline') { px = 8 + 400; py = sy(obj.price); }
+  if (type === 'hline' || type === 'supply' || type === 'demand') { px = 8 + 400; py = sy(obj.price); }
   else if (type === 'hchannel') { px = 8 + 400; py = sy(obj.price1); }
   else if (type === 'trade') { px = 600; py = sy(obj.entry); }
   else { px = sx(API.lnIdx(obj, 'x1')); py = sy(obj.y1); }

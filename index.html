@@ -43,6 +43,9 @@
   .periods button.active { background: rgba(59,130,246,.13); color: #8ab4ff; border-color: rgba(59,130,246,.45); }
   .tools button.active { background: rgba(255,138,47,.12); color: #ffb072; border-color: rgba(255,138,47,.45); }
   .tools button[data-tool="cursor"].active { background: rgba(77,210,255,.13); color: #9fe4ff; border-color: rgba(77,210,255,.45); box-shadow: 0 0 0 1px rgba(77,210,255,.15); }
+  /* §24 供应线(绿)/需求线(红)：active 态与线色同色系 */
+  .tools button[data-tool="supply"].active { background: rgba(47,191,113,.13); color: #74f0a8; border-color: rgba(47,191,113,.45); box-shadow: 0 0 0 1px rgba(47,191,113,.15); }
+  .tools button[data-tool="demand"].active { background: rgba(239,77,77,.13); color: #ff9a9a; border-color: rgba(239,77,77,.45); box-shadow: 0 0 0 1px rgba(239,77,77,.15); }
   .periods button:disabled { opacity: .35; cursor: not-allowed; }
   /* action variants */
   button.danger:hover { background: rgba(239,77,77,.14); color: #ff9a9a; border-color: rgba(239,77,77,.5); }
@@ -198,6 +201,12 @@
     <button data-tool="hline" title="水平线：点击定位一条水平价格线">
       <svg class="btn-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 12h16"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/></svg>水平线
     </button>
+    <button data-tool="supply" title="供应线：点击定位一条绿色水平线（上方供给/压力）">
+      <svg class="btn-ic" viewBox="0 0 24 24" fill="none" stroke="#2fbf71" stroke-width="2" stroke-linecap="round"><path d="M4 12h16"/><circle cx="12" cy="12" r="1.6" fill="#2fbf71" stroke="none"/></svg>供应线
+    </button>
+    <button data-tool="demand" title="需求线：点击定位一条红色水平线（下方需求/支撑）">
+      <svg class="btn-ic" viewBox="0 0 24 24" fill="none" stroke="#ef4d4d" stroke-width="2" stroke-linecap="round"><path d="M4 12h16"/><circle cx="12" cy="12" r="1.6" fill="#ef4d4d" stroke="none"/></svg>需求线
+    </button>
     <button data-tool="trend" title="趋势线：点两点画趋势，自动向两端延长">
       <svg class="btn-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18L20 6"/><path d="M14 6h6v6"/></svg>趋势线
     </button>
@@ -327,6 +336,17 @@ let drawingTrend = null;
 let drawingMeasure = null;
 let drawingChannel = null;   // 价格通道草稿 {phase:1定A,2定B,3定C, x1,y1,x2,y2}
 let drawingHChannel = null;  // 水平通道草稿 {price1, price2?}（两条水平线成区间带）
+// §24 供应线/需求线：单点水平线，固定配色 + 名称标签（选中不变色，靠线宽/实线/手柄反馈）
+const HLEVEL_STYLE = {
+  supply: { color: '#2fbf71', label: '供应线' },   // 绿：上方供给 / 压力
+  demand: { color: '#ef4d4d', label: '需求线' }    // 红：下方需求 / 支撑
+};
+// §25 水平通道配色：上线（高价）绿 = 供应，下线（低价）红 = 需求（与 §24 同色，单一来源）
+const HCHANNEL_STYLE = {
+  up: HLEVEL_STYLE.supply.color,
+  dn: HLEVEL_STYLE.demand.color,
+  fill: 'rgba(177,140,255,0.12)'
+};
 let selectedLine = null;
 let dragTarget = null;
 let keepCursorTime = false;   // 切换标的/周期时保留鼠标所在K线时间，不跳最新
@@ -2018,6 +2038,18 @@ function drawLines() {
       ctx.fillStyle = ctx.strokeStyle; ctx.textAlign = 'left';
       ctx.fillText('H ' + fmtPrice(ln.price), PAD_L + 4, y - 4);
       if (isSel) drawHandle(PAD_L + SCALE.plotW - 4, y);
+    } else if (ln.type === 'supply' || ln.type === 'demand') {
+      // §24 供应线（绿）/ 需求线（红）：单点水平线；选中不改色，仅加粗+实线+右端手柄
+      const st = HLEVEL_STYLE[ln.type];
+      const y = priceToY(ln.price);
+      ctx.strokeStyle = st.color;
+      ctx.lineWidth = isSel ? 2.4 : 1.6;
+      ctx.setLineDash(isSel ? [] : [6, 4]);
+      ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(PAD_L + SCALE.plotW, y); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = st.color; ctx.textAlign = 'left';
+      ctx.fillText(st.label + ' ' + fmtPrice(ln.price), PAD_L + 4, y - 4);
+      if (isSel) drawHandle(PAD_L + SCALE.plotW - 4, y);
     } else if (ln.type === 'trend') {
       // 延长线：直线两端延伸至绘图区左右边缘（price 随 bar 索引线性外推）
       const i1 = lnIdx(ln, 'x1'), i2 = lnIdx(ln, 'x2');
@@ -2071,7 +2103,7 @@ function drawLines() {
         ctx.fillStyle = '#b18cff'; ctx.fillText(txt, b2x - 5, cy);
       }
     } else if (ln.type === 'hchannel') {
-      // 水平通道：两条水平线（上限亮紫 / 下限深紫，与斜通道同色系）+ 淡紫区间填充，纯区间带、无任何数字标注
+      // 水平通道：两条水平线（§25 上限绿=供应 / 下限红=需求）+ 淡紫区间填充，纯区间带、无任何数字标注
       const y1 = priceToY(ln.price1), y2 = priceToY(ln.price2);
       const plotL = PAD_L, plotR = PAD_L + SCALE.plotW;
       ctx.fillStyle = 'rgba(177,140,255,0.12)';   // 淡紫区间填充（选中/未选中一致）
@@ -2079,9 +2111,9 @@ function drawLines() {
       ctx.lineWidth = isSel ? 2 : 1.4;
       ctx.setLineDash(isSel ? [] : [6, 4]);
       const upY = Math.min(y1, y2), dnY = Math.max(y1, y2);   // 上限=高价线，下限=低价线
-      ctx.strokeStyle = '#b18cff';                              // 上限线：亮紫（与斜通道同色）
+      ctx.strokeStyle = HCHANNEL_STYLE.up;                      // §25 上限线：绿（供应）
       ctx.beginPath(); ctx.moveTo(plotL, upY); ctx.lineTo(plotR, upY); ctx.stroke();
-      ctx.strokeStyle = '#7a5af0';                              // 下限线：同色系深一档
+      ctx.strokeStyle = HCHANNEL_STYLE.dn;                      // §25 下限线：红（需求）
       ctx.beginPath(); ctx.moveTo(plotL, dnY); ctx.lineTo(plotR, dnY); ctx.stroke();
       ctx.setLineDash([]);
       if (isSel) { drawHandle(plotR - 4, y1); drawHandle(plotR - 4, y2); }
@@ -2134,9 +2166,9 @@ function drawLines() {
     ctx.fillStyle = 'rgba(177,140,255,0.12)';  // 预览填充与成品一致（淡紫）
     ctx.fillRect(plotL, Math.min(y1, y2), plotR - plotL, Math.abs(y2 - y1));
     ctx.setLineDash([4, 3]); ctx.lineWidth = 1.2;
-    ctx.strokeStyle = '#b18cff';
+    ctx.strokeStyle = HCHANNEL_STYLE.up;   // §25 预览与成品同色：上限绿
     ctx.beginPath(); ctx.moveTo(plotL, Math.min(y1, y2)); ctx.lineTo(plotR, Math.min(y1, y2)); ctx.stroke();
-    ctx.strokeStyle = '#7a5af0';
+    ctx.strokeStyle = HCHANNEL_STYLE.dn;   // §25 下限红
     ctx.beginPath(); ctx.moveTo(plotL, Math.max(y1, y2)); ctx.lineTo(plotR, Math.max(y1, y2)); ctx.stroke();
     ctx.setLineDash([]);
   }
@@ -2320,7 +2352,8 @@ function ptSegDist(px, py, x1, y1, x2, y2) {
 function hitTest(mx, my) {
   for (let i = lines.length - 1; i >= 0; i--) {
     const ln = lines[i];
-    if (ln.type === 'hline') {
+    if (ln.type === 'hline' || ln.type === 'supply' || ln.type === 'demand') {
+      // §24 三者都是只有 price 的单点水平线，判定逻辑一致
       const y = priceToY(ln.price);
       if (Math.abs(my - y) < 6) return { line: ln, handle: 'body' };
     } else if (ln.type === 'trend') {
@@ -2410,6 +2443,12 @@ canvas.addEventListener('mousedown', e => {
 
   if (toolMode === 'hline') {
     lines.push({ type: 'hline', price: yToPrice(my) });
+    selectedLine = lines[lines.length - 1];
+    draw(); scheduleSessionSave(); exitToolMode(); return;
+  }
+  if (toolMode === 'supply' || toolMode === 'demand') {
+    // §24 供应线/需求线：单击即创建（与 hline 一致，不受「连画」影响）
+    lines.push({ type: toolMode, price: yToPrice(my) });
     selectedLine = lines[lines.length - 1];
     draw(); scheduleSessionSave(); exitToolMode(); return;
   }
@@ -2505,7 +2544,7 @@ canvas.addEventListener('mousemove', e => {
   const rect = canvas.getBoundingClientRect();
   hover.x = e.clientX - rect.left; hover.y = e.clientY - rect.top;
 
-  if (toolMode === 'hline' || toolMode === 'trend' || toolMode === 'channel' || toolMode === 'hchannel') { redrawSoon(); return; }
+  if (toolMode === 'hline' || toolMode === 'supply' || toolMode === 'demand' || toolMode === 'trend' || toolMode === 'channel' || toolMode === 'hchannel') { redrawSoon(); return; }
 
   // 盈亏比创建：拖动预览 TP/SL
   if (tradeMode && rrDraft && !getTradePlan()) {
@@ -2516,7 +2555,8 @@ canvas.addEventListener('mousemove', e => {
 
   if (dragTarget) {
     const ln = dragTarget.line;
-    if (ln.type === 'hline') {
+    if (ln.type === 'hline' || ln.type === 'supply' || ln.type === 'demand') {
+      // §24 单点水平线：整体上下拖动改价
       if (dragTarget.handle === 'body') ln.price = yToPrice(hover.y);
     } else if (ln.type === 'hchannel') {
       if (dragTarget.handle === 'p1') ln.price1 = yToPrice(hover.y);
