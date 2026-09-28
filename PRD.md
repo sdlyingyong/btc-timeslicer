@@ -1852,7 +1852,7 @@ const HLEVEL_STYLE = {
 - [x] `index.html` 七处改动落地（工具栏/CSS/常量/渲染/命中/创建/拖动）
 - [x] `tests/regression.test.cjs` 全绿（0 FAIL，含全部既有断言）
 - [ ] mac 手动验收 E1–E10
-- [ ] 提交并推送
+- [x] 提交并推送（commit `9a0c329`，`5a4ff43 → 9a0c329`；raw 线上已含 `HLEVEL_STYLE`/按钮/分支）
 
 ---
 
@@ -1974,4 +1974,4 @@ const HCHANNEL_STYLE = {
 - [x] `tests/regression.test.cjs` 全绿（243 PASS / 0 FAIL）
 - [x] 真画布复核：上线绿 / 下线红 + 淡紫填充 ✓
 - [ ] mac 手动验收 E1–E8
-- [ ] 提交并推送
+- [x] 提交并推送（同 commit `9a0c329`，与 §24 一起上线）
