@@ -302,7 +302,7 @@
   </div>
   <canvas id="chart"></canvas>
   <div id="hint">
-    <span class="tip-text">滚轮缩放 · 拖拽平移 · <kbd>←</kbd><kbd>→</kbd> 逐根步进 · <kbd>G</kbd> 日期跳转 · <kbd>Del</kbd> 删除选中 · 「盈亏比」拖出入场/止盈/止损</span>
+    <span class="tip-text">滚轮缩放 · 拖拽平移 · <kbd>←</kbd><kbd>→</kbd> 逐根步进 · <kbd>G</kbd> 日期跳转 · <kbd>Del</kbd> 删除选中 · 拖线或 <kbd>↑</kbd><kbd>↓</kbd> 上下移 · 「盈亏比」拖出入场/止盈/止损</span>
     <button id="hintClose" title="隐藏提示">×</button>
   </div>
   <div id="simPanel" class="sim-panel" style="display:none">
@@ -2047,8 +2047,9 @@ function drawLines() {
       ctx.setLineDash(isSel ? [] : [6, 4]);
       ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(PAD_L + SCALE.plotW, y); ctx.stroke();
       ctx.setLineDash([]);
+      // §26 标注只留名称、不带价格数值（用户明确：供应线/需求线不需要给出数值）
       ctx.fillStyle = st.color; ctx.textAlign = 'left';
-      ctx.fillText(st.label + ' ' + fmtPrice(ln.price), PAD_L + 4, y - 4);
+      ctx.fillText(st.label, PAD_L + 4, y - 4);
       if (isSel) drawHandle(PAD_L + SCALE.plotW - 4, y);
     } else if (ln.type === 'trend') {
       // 延长线：直线两端延伸至绘图区左右边缘（price 随 bar 索引线性外推）
@@ -2527,6 +2528,9 @@ canvas.addEventListener('mousedown', e => {
       dragStart = { mx: e.clientX, my: e.clientY, y1: hit.line.y1, y2: hit.line.y2, y3: hit.line.y3, line: hit.line };
     } else if (hit.line.type === 'hchannel' && hit.handle === 'body') {
       dragStart = { mx: e.clientX, my: e.clientY, price1: hit.line.price1, price2: hit.line.price2, line: hit.line };
+    } else if (hit.line.type === 'hline' || hit.line.type === 'supply' || hit.line.type === 'demand') {
+      // §26 单点水平线：整条上下拖动改价（window mousemove 也兜住「光标移出画布」的继续拖动）
+      dragStart = { mx: e.clientX, my: e.clientY, price: hit.line.price, line: hit.line };
     } else if (hit.line.type === 'trade' && hit.handle === 'move') {
       const idx0 = (typeof hit.line.idx === 'number') ? hit.line.idx : (hit.line.cx ?? 0.5) * viewCount + SCALE.viewStart;
       dragStart = { mx: e.clientX, my: e.clientY, entry: hit.line.entry, tp: hit.line.tp, sl: hit.line.sl, idx: idx0, line: hit.line };
@@ -2601,6 +2605,13 @@ canvas.addEventListener('mousemove', e => {
 
 window.addEventListener('mousemove', e => {
   if (!dragStart) return;
+  if (dragStart.line.type === 'hline' || dragStart.line.type === 'supply' || dragStart.line.type === 'demand') {
+    // §26 单点水平线：直接用光标高度定价格（价格恒定 → 拖出画布再回来不会跳动）
+    const rect = canvas.getBoundingClientRect();
+    dragStart.line.price = yToPrice(e.clientY - rect.top);
+    redrawSoon();
+    return;
+  }
   if (dragStart.line.type === 'trade') {
     // 入场点铆钉到所在K线收盘：水平移动改 idx，entry 始终 = 该K线收盘
     const dIdx = (e.clientX - dragStart.mx) / SCALE.xW;
@@ -2660,7 +2671,7 @@ window.addEventListener('mouseup', () => {
       rrDraft = null;
       tradeMode = false;
       document.getElementById('tradeEnter').classList.remove('trade-active');
-      setTradeHint('滚轮缩放 · 拖拽平移 · <kbd>←</kbd><kbd>→</kbd> 逐根步进 · <kbd>G</kbd> 日期跳转 · <kbd>Del</kbd> 删除选中 · 「盈亏比」拖出入场/止盈/止损');
+      setTradeHint('滚轮缩放 · 拖拽平移 · <kbd>←</kbd><kbd>→</kbd> 逐根步进 · <kbd>G</kbd> 日期跳转 · <kbd>Del</kbd> 删除选中 · 拖线或 <kbd>↑</kbd><kbd>↓</kbd> 上下移 · 「盈亏比」拖出入场/止盈/止损');
       exitToolMode();
       draw(); scheduleSessionSave();
       return;
@@ -2681,6 +2692,22 @@ window.addEventListener('keydown', e => {
     if (toolMode !== 'cursor') return;
     e.preventDefault();
     showGoToDialog();
+    return;
+  }
+  // §26 ↑/↓ 上下微调「选中的水平线」（供应线/需求线/水平线 单点线，以及水平通道整体）；按住 Shift 步长 ×5
+  if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+    if (toolMode !== 'cursor' || !selectedLine || !SCALE || SCALE.plotW <= 1) return;
+    const ln = selectedLine;
+    const dPx = (e.key === 'ArrowUp' ? -1 : 1) * (e.shiftKey ? 10 : 2);   // 屏幕上移 = 价格上行
+    if (ln.type === 'hline' || ln.type === 'supply' || ln.type === 'demand') {
+      const np = yToPrice(priceToY(ln.price) + dPx);
+      if (Number.isFinite(np) && np > 0) ln.price = np; else return;
+    } else if (ln.type === 'hchannel') {
+      const n1 = yToPrice(priceToY(ln.price1) + dPx), n2 = yToPrice(priceToY(ln.price2) + dPx);
+      if (Number.isFinite(n1) && n1 > 0 && Number.isFinite(n2) && n2 > 0) { ln.price1 = n1; ln.price2 = n2; } else return;
+    } else return;                        // 斜线/盈亏比不参与，避免误移
+    e.preventDefault();
+    draw(); scheduleSessionSave();
     return;
   }
   if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;

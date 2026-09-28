@@ -151,6 +151,7 @@ const move = (x, y) => mm({ clientX: x, clientY: y });
 const wmove = (x, y) => wmm({ clientX: x, clientY: y });
 const up = () => wmu({});
 const key = (k) => wkd({ key: k, preventDefault() {} });
+const keyShift = (k) => wkd({ key: k, shiftKey: true, preventDefault() {} });   // §26 Shift+↑/↓ 加速
 const wheel = (dy, dx) => wl({ deltaY: dy || 0, deltaX: dx || 0, preventDefault() {} });
 // §18：把视图平移顶到右边界（viewStart=len-vc，最新一根在屏幕最右、右边缘=len）。
 // §18 放开 viewStart 下限后，平移可能停在历史/空白区，凡需「最新在屏」前提的断言都先 goLatest() 复位。
@@ -1160,13 +1161,15 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     check('§24 需求线拖动改价', !!dm && near(dm.price, API.yToPrice(440)));
     up(); move(-1, -1);
 
-    // 标签文本（draw 的 fillText 记录）
+    // 标签文本（draw 的 fillText 记录）：§26 起改为「只留名称、不给价格数值」
     let n0 = ctxTexts.length; API.draw();
-    const tSp = ctxTexts.slice(n0).join('|');
-    check('§24 供应线标签含「供应线」', tSp.includes('供应线'), tSp.slice(0, 60));
+    const tSpArr = ctxTexts.slice(n0).filter(t => t.includes('供应线'));
+    check('§24/§26 供应线标签恰为「供应线」', tSpArr.includes('供应线'), JSON.stringify(tSpArr));
+    check('§24/§26 供应线标签不含任何数字', tSpArr.length > 0 && !tSpArr.some(t => /\d/.test(t)), JSON.stringify(tSpArr));
     n0 = ctxTexts.length; API.draw();
-    const tDm = ctxTexts.slice(n0).join('|');
-    check('§24 需求线标签含「需求线」', tDm.includes('需求线'), tDm.slice(0, 60));
+    const tDmArr = ctxTexts.slice(n0).filter(t => t.includes('需求线'));
+    check('§24/§26 需求线标签恰为「需求线」', tDmArr.includes('需求线'), JSON.stringify(tDmArr));
+    check('§24/§26 需求线标签不含任何数字', tDmArr.length > 0 && !tDmArr.some(t => /\d/.test(t)), JSON.stringify(tDmArr));
 
     // 持久化（创建走 500ms 防抖，显式落盘一次再断言）
     API.saveSessionNow();
@@ -1235,10 +1238,118 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     check('§25 通道删除', !!hc && deleteLine('hchannel', hc));
   }
 
+  // ============ 26. 供应/需求线：不给数值 + 上下移动（拖动 / ↑↓）+ 记忆 ============
+  {
+    const px = (p, d) => API.yToPrice(API.priceToY(p) + d);   // 按屏幕像素位移换算价格
+    API.clearLines();
+
+    // --- ① 标注只留名称、不带价格数值 ---
+    API.setTool('supply');
+    down(420, 300);
+    const sp = API.getLines()[API.getLines().length - 1];
+    check('§26 供应线已创建', !!sp && sp.type === 'supply' && near(sp.price, API.yToPrice(300)));
+    let n0 = ctxTexts.length; API.draw();
+    let texts = ctxTexts.slice(n0);
+    check('§26 供应线标注恰为「供应线」（无价格）', texts.includes('供应线'), JSON.stringify(texts.filter(t => t.includes('供应线'))));
+    check('§26 供应线标注不含数字', !texts.some(t => t.includes('供应线') && /\d/.test(t)));
+
+    API.setTool('demand');
+    down(520, 460);
+    const dm = API.getLines()[API.getLines().length - 1];
+    n0 = ctxTexts.length; API.draw();
+    check('§26 需求线标注恰为「需求线」（无价格）', ctxTexts.slice(n0).includes('需求线'),
+      JSON.stringify(ctxTexts.slice(n0).filter(t => t.includes('需求线'))));
+    check('§26 需求线标注不含数字', !ctxTexts.slice(n0).some(t => t.includes('需求线') && /\d/.test(t)));
+
+    // --- ② 先选后拖：整条线上下平移（画布内 move） ---
+    down(420, API.priceToY(sp.price));          // 按下 = 选中该线
+    up();
+    check('§26 供应线可被选中', API.getSelected() === sp);
+    down(420, API.priceToY(sp.price)); move(420, 380);
+    check('§26 拖动整条线上下移动', near(sp.price, API.yToPrice(380)), sp.price + ' 期望 ' + API.yToPrice(380));
+    up();
+
+    // --- ③ 拖动时光标移出画布仍跟随（window mousemove 分支） ---
+    down(420, API.priceToY(sp.price)); wmove(420, 250);
+    check('§26 光标移出画布仍跟随', near(sp.price, API.yToPrice(250)), '' + sp.price);
+    up();
+
+    // --- ④ ↑/↓ 微调：2px/次，Shift ×5（10px）；↑ = 价格上行 ---
+    const p0 = sp.price;
+    key('ArrowUp');
+    check('§26 ↑ 上移 2px（价格变高）', near(sp.price, px(p0, -2)), p0 + ' → ' + sp.price);
+    key('ArrowDown'); key('ArrowDown');
+    check('§26 ↓ 下移 2px（两次回落到 +2px）', near(sp.price, px(p0, 2)), p0 + ' → ' + sp.price);
+    const pA = sp.price;
+    keyShift('ArrowUp');
+    check('§26 Shift+↑ 步长 10px', near(sp.price, px(pA, -10)), pA + ' → ' + sp.price);
+    const pB = sp.price;
+    keyShift('ArrowDown');
+    check('§26 Shift+↓ 步长 10px', near(sp.price, px(pB, 10)), pB + ' → ' + sp.price);
+
+    // --- ⑤ 记忆：等 500ms 防抖后从 localStorage 读回，价格与拖动结果一致 ---
+    const pNudged = sp.price;
+    await sleep(700);
+    let saved = {};
+    try { saved = JSON.parse(store['kline_session_v1'] || '{}'); } catch (e) {}
+    const savedLines = (saved.linesStore && saved.linesStore.BTC) || [];
+    const savedSp = savedLines.find(l => l.type === 'supply');
+    check('§26 微调后的价格已写入 localStorage', !!savedSp && savedSp.price === pNudged,
+      savedSp ? 'saved=' + savedSp.price + ' 期望=' + pNudged : '未找到 supply');
+    const savedDm = savedLines.find(l => l.type === 'demand');
+    check('§26 需求线一并被记住', !!savedDm && savedDm.price === dm.price, savedDm ? '' + savedDm.price : '未找到 demand');
+
+    // --- ⑥ 选中的是别的类型时不误移 ---
+    API.setTool('trend'); down(200, 500); down(320, 440);
+    const tr = API.getLines()[API.getLines().length - 1];
+    check('§26 趋势线已创建', !!tr && tr.type === 'trend');
+    down(sx(API.lnIdx(tr, 'x1')), sy(tr.y1)); up();
+    check('§26 趋势线已被选中', API.getSelected() === tr);
+    const ty1 = tr.y1, ty2 = tr.y2;
+    key('ArrowUp'); key('ArrowDown');
+    check('§26 斜线不受 ↑↓ 影响', tr.y1 === ty1 && tr.y2 === ty2);
+    check('§26 斜线未被误改价', near(sp.price, pNudged), '' + sp.price);
+
+    // --- ⑦ 水平通道：↑/↓ 整体平移，区间宽度不变 ---
+    API.setTool('hchannel'); down(500, 200); down(500, 400);
+    const hc = API.getLines()[API.getLines().length - 1];
+    check('§26 水平通道已创建', !!hc && hc.type === 'hchannel');
+    down(500, sy(hc.price1)); up();
+    check('§26 水平通道整体被选中', API.getSelected() === hc);
+    const gapPx = Math.abs(API.priceToY(hc.price1) - API.priceToY(hc.price2));
+    const hcP1 = hc.price1, hcP2 = hc.price2;
+    key('ArrowUp');
+    check('§26 通道整体上移（两条边同步）', near(hc.price1, px(hcP1, -2)) && near(hc.price2, px(hcP2, -2)),
+      `${hcP1}→${hc.price1} / ${hcP2}→${hc.price2}`);
+    check('§26 通道上下边间距不变', Math.abs(Math.abs(API.priceToY(hc.price1) - API.priceToY(hc.price2)) - gapPx) < 1e-6,
+      'gap ' + gapPx.toFixed(3));
+    deleteLine('hchannel', hc);
+    deleteLine('trend', tr);
+    deleteLine('supply', sp);
+    deleteLine('demand', dm);
+    check('§26 清理完成', API.getLines().length === 0, '' + API.getLines().length);
+
+    // --- ⑧ 肉眼复核（RENDER=1）：三条水平线并列，确认标注只剩名称、没有价格数字 ---
+    if (process.env.RENDER) {
+      await API.setView(null, '1d');
+      const L = API.dataLen();
+      API.setViewRange(Math.max(0, L - 260), Math.min(260, L));
+      for (let k = 0; k < 90; k++) API.draw();
+      API.setTool('supply'); down(420, 180);      // 上方绿色「供应线」
+      API.setTool('demand'); down(520, 560);      // 下方红色「需求线」
+      API.setTool('hchannel'); down(300, 250); down(300, 450);   // 水平通道（应无任何标注）
+      for (let k = 0; k < 90; k++) API.draw();
+      require('fs').writeFileSync('/tmp/shot_levels.png', canvasMock.toBuffer('image/png'));
+      console.log('§26 wrote /tmp/shot_levels.png');
+    }
+  }
+
   // ============ 汇总 ============
-  console.log('\n======== 结果: ' + pass + ' PASS / ' + fail + ' FAIL ========');
-  if (errors.length) { console.log('失败项:\n  ' + errors.join('\n  ')); process.exit(1); }
-  process.exit(0);
+  // 摘要必须在 stdout 回调里再 exit：直接 console.log + process.exit 在 stdout 是管道/重定向时
+  // 会丢掉缓冲区里最后几行（页面代码带 setInterval，不能靠等事件循环自己退出）。
+  const summary = '\n======== 结果: ' + pass + ' PASS / ' + fail + ' FAIL ========\n' +
+    (errors.length ? '失败项:\n  ' + errors.join('\n  ') + '\n' : '');
+  process.stdout.write(summary, () => process.exit(fail ? 1 : 0));
 })().catch(e => { console.error('测试执行异常:', e); process.exit(2); });
 
 // ---------- 辅助 ----------
