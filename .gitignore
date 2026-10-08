@@ -6,3 +6,6 @@ k--data/
 
 # WorkBuddy 工作区数据（自动化任务的日志/记忆）。仓库是公开的，绝不能推上去
 .workbuddy/
+
+# build_offline.cjs 产出的「真·单文件离线版」（17MB，本地用/发给别人，不进仓库）
+btc-timeslicer-offline.html

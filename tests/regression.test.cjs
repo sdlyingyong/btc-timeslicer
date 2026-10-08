@@ -6,9 +6,12 @@ const path = require('path');
 
 const HTML = path.join(__dirname, '..', 'index.html');
 const html = fs.readFileSync(HTML, 'utf8');
-const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
-let code = scripts.filter(s => !s.startsWith('window.BTCFUT_DATA')).join('\n');
-const DATA = JSON.parse(scripts.find(s => s.startsWith('window.BTCFUT_DATA')).match(/window\.BTCFUT_DATA=(\{.*?\});/s)[1]);
+// §30 起 index.html 只是「入口壳」，代码与数据都抽走了：
+//   逻辑 → share/app.js      数据 → share/data.js（两个入口共用这一份）
+const APP_JS = path.join(__dirname, '..', 'share', 'app.js');
+const DATA_JS = path.join(__dirname, '..', 'share', 'data.js');
+let code = fs.readFileSync(APP_JS, 'utf8');
+const DATA = JSON.parse(fs.readFileSync(DATA_JS, 'utf8').match(/window\.BTCFUT_DATA=(\{.*?\});/s)[1]);
 
 let pass = 0, fail = 0;
 const errors = [];
@@ -104,6 +107,7 @@ const sandbox = {
   location: { protocol: 'http:' }, Blob: class {}, Worker: function () {}, canvas: canvasMock, devicePixelRatio: 1
 };
 sandbox.window.document = sandbox.document;
+sandbox.window.__APP_INSTANCE__ = 'review';   // §30 主用例跑「复盘」实例（键名不加前缀，与历史断言一致）
 sandbox.window.requestAnimationFrame = f => f && f();
 global.requestAnimationFrame = sandbox.window.requestAnimationFrame;
 
@@ -1429,7 +1433,7 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     const toolsHtml = barHtml.slice(barHtml.indexOf('class="group tools"'), barHtml.indexOf('data-key="axis"'));
     const iCount = (toolsHtml.match(/<(button|label|div)[^>]*(data-tool=|id="(clearLines|tradeEnter|tradeDirSeg)"|data-key="cont")/g) || []).length;
     check('§27 画线工具组内条目全部可识别（工具/连画/清除/盈亏比/多空）', iCount === 12, iCount + ' 项');
-    check('§27 排序逻辑已注入页面', html.includes('function initSort()') && html.includes('kline_toolbar_order_v1'));
+    check('§27 排序逻辑已注入页面', code.includes('function initSort()') && code.includes('kline_toolbar_order_v1'));
   }
 
   // ============ 28. 真 DOM（jsdom）端到端：派发真实鼠标事件走完整拖拽排序 ============
@@ -1442,11 +1446,11 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
       console.log('      装法：cd /Users/mac/.workbuddy/binaries/node/workspace && npm install jsdom');
     } else {
       const barHtml = html.slice(html.indexOf('<div id="toolbar">'), html.indexOf('<div id="main">'));
-      const js = scripts.join('\n');
+      const js = code;   // §30 起逻辑在 share/app.js，直接切片即可
       const s0 = js.indexOf('// ================= §27 工具条排序');
       const s1 = js.indexOf('initSort();', s0) + 'initSort();'.length;
       const block = js.slice(s0, s1);
-      check('§28 从 index.html 抽到 §27 代码块', s0 > 0 && block.includes('function initSort') && block.includes('initSort();'),
+      check('§28 从 share/app.js 抽到 §27 代码块', s0 > 0 && block.includes('function initSort') && block.includes('initSort();'),
         block.length + ' 字节');
 
       const store = {};
@@ -1475,9 +1479,9 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
         const dom = new JSDOM('<!doctype html><html><body>' + barHtml + '</body></html>',
           { url: 'https://t.test/', pretendToBeVisual: true });
         const { window } = dom;
-        const fn = new Function('window', 'document', 'localStorage', 'setTimeout', 'clearTimeout', 'console',
+        const fn = new Function('window', 'document', 'localStorage', 'setTimeout', 'clearTimeout', 'console', 'STORAGE_NS',
           block + '\n;return { root: document.getElementById("toolbar"), szOrderOf, szKey, szKids, szResetSort };');
-        const api = fn(window, window.document, fakeLS, fakeSetTimeout, () => {}, console);
+        const api = fn(window, window.document, fakeLS, fakeSetTimeout, () => {}, console, '');   // '' = 复盘实例（不加前缀）
         const a = { window, api, root: api.root, T: api.root.querySelector('.group.tools'), items: 0 };
         a.items = a.T.children.length;
         relayout(a);
@@ -1557,7 +1561,7 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
       B.api.szResetSort();
       check('§28 重置刷新 → 回到原始顺序', groupsOf(B) === DEFAULT, groupsOf(B));
       check('§28 重置刷新 → 清掉排序记忆', !('kline_toolbar_order_v1' in store), String(store['kline_toolbar_order_v1']));
-      check('§28 重置刷新按钮已接上排序还原', html.includes('szResetSort();   // §27'));
+      check('§28 重置刷新按钮已接上排序还原', code.includes('szResetSort();   // §27'));
       check('§28 拖拽样式已注入（.sz-drag / cursor:grab）',
         html.includes('.sz-drag {') && html.includes('cursor: grab;'));
     }
@@ -1751,7 +1755,116 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     clearLines();
   }
 
+  // ============ 30. 双入口（复盘 / 看盘）+ 进度隔离 + 单一数据源 ============
+  // 背景：两个入口都部署在 <user>.github.io 下，而 origin 只看「协议+域名」，不看路径
+  //       —— 两个入口**共享** localStorage / IndexedDB。不隔离的话，一边的进度会覆盖另一边。
+  // 结构：index.html（复盘壳） / live/index.html（看盘壳，由 build_live.cjs 生成）
+  //       share/app.js（唯一逻辑） / share/data.js（唯一数据源，两个入口共用）
+  {
+    const REPO2 = path.join(__dirname, '..');
+    const APP_SRC = fs.readFileSync(APP_JS, 'utf8');
+    const IDX = html;
+    const LIVE = fs.existsSync(path.join(REPO2, 'live', 'index.html'))
+      ? fs.readFileSync(path.join(REPO2, 'live', 'index.html'), 'utf8') : '';
+
+    // ---- 30.1 文件结构就位 ----
+    check('§30 share/app.js 存在（唯一逻辑）', fs.existsSync(APP_JS));
+    check('§30 share/data.js 存在（唯一数据源）', fs.existsSync(DATA_JS));
+    check('§30 live/index.html 存在（看盘入口）', LIVE.length > 0, LIVE.length + ' 字节');
+
+    // ---- 30.2 数据只有一份（防止以后又被内联回 HTML → 仓库每天多涨 17MB）----
+    check('§30 复盘入口不含内联数据', !IDX.includes('window.BTCFUT_DATA='));
+    check('§30 看盘入口不含内联数据', !LIVE.includes('window.BTCFUT_DATA='));
+    check('§30 数据源里确实有 BTCFUT_DATA', DATA_JS && fs.readFileSync(DATA_JS, 'utf8').includes('window.BTCFUT_DATA='));
+
+    // ---- 30.3 入口页引用路径 ----
+    check('§30 复盘入口引用 share/data.js + share/app.js',
+      IDX.includes('<script src="share/data.js"><\/script>') && IDX.includes('<script src="share/app.js"><\/script>'));
+    check('§30 看盘入口引用 ../share/（多一层目录）',
+      LIVE.includes('<script src="../share/data.js"><\/script>') && LIVE.includes('<script src="../share/app.js"><\/script>'));
+
+    // ---- 30.4 实例标记 ----
+    check('§30 复盘入口标记 review', /__APP_INSTANCE__\s*=\s*'review'/.test(IDX));
+    check('§30 看盘入口标记 live', /__APP_INSTANCE__\s*=\s*'live'/.test(LIVE));
+    check('§30 标题可区分（复盘/看盘）',
+      IDX.includes('<title>BTC 时光机 · 复盘</title>') && LIVE.includes('<title>BTC 时光机 · 看盘</title>'));
+
+    // ---- 30.5 看盘入口是生成物，必须与 index.html 同步（防改一边忘另一边）----
+    let driftOk = false, driftMsg = '';
+    try {
+      const { buildLive } = require(path.join(REPO2, 'build_live.cjs'));
+      const want = buildLive(IDX);
+      driftOk = want === LIVE;
+      driftMsg = driftOk ? '与 index.html 一致' : '不一致（跑 node build_live.cjs）';
+    } catch (e) { driftMsg = '构建脚本不可用: ' + e.message; }
+    check('§30 看盘入口与 index.html 完全同步（只有 3 处差异）', driftOk, driftMsg);
+
+    // ---- 30.6 §30 命名空间：instance → 前缀 ----
+    const begMark = '// ==== §30 INSTANCE NS BEGIN ====';
+    const endMark = '// ==== §30 INSTANCE NS END ====';
+    const b0 = APP_SRC.indexOf(begMark), b1 = APP_SRC.indexOf(endMark);
+    check('§30 app.js 里有可切片的命名空间块', b0 > 0 && b1 > b0, (b1 - b0) + ' 字节');
+    let nsOf = null;
+    if (b0 > 0 && b1 > b0) {
+      const block = APP_SRC.slice(b0, b1 + endMark.length);
+      nsOf = marker => {
+        const fn = new Function('window', block + '\n;return { APP_INSTANCE, STORAGE_NS };');
+        return fn(typeof marker === 'undefined' ? {} : { __APP_INSTANCE__: marker });
+      };
+    }
+    if (nsOf) {
+      check('§30 复盘实例不加前缀（保住已有进度）', nsOf('review').STORAGE_NS === '', JSON.stringify(nsOf('review').STORAGE_NS));
+      check('§30 看盘实例加 live__ 前缀', nsOf('live').STORAGE_NS === 'live__', nsOf('live').STORAGE_NS);
+      check('§30 没注入标记时默认按复盘处理', nsOf().STORAGE_NS === '' && nsOf().APP_INSTANCE === 'review');
+      // 组合出「真实键名」：复盘必须与历史键名完全一致，否则老进度读不出来
+      const k = (ns, name) => ns.STORAGE_NS + name;
+      check('§30 复盘键名与历史完全一致', k(nsOf('review'), 'kline_session_v1') === 'kline_session_v1');
+      check('§30 看盘键名与复盘不再冲突', k(nsOf('live'), 'kline_session_v1') === 'live__kline_session_v1');
+    }
+
+    // ---- 30.7 六个存储点必须全部走 STORAGE_NS（漏一个就会互相覆盖）----
+    {
+      const names = ['kline_view_prefs_v1', 'kline_session_v1', 'kline_trades_v1', 'kline_sim_v1', 'kline_toolbar_order_v1', 'kline_cache_v1', 'focus_timer', 'focus_history'];
+      const all = names.every(n => APP_SRC.includes("STORAGE_NS + '" + n + "'"));
+      check('§30 8 个存储键（含 IndexedDB 库名与专注计时）全部带前缀', all,
+        names.filter(n => !APP_SRC.includes("STORAGE_NS + '" + n + "'")).join(',') || '全部 OK');
+      // 兜底：不能再出现「裸键名」写法（前面必须紧跟 STORAGE_NS + ）
+      const bare = names.filter(n => new RegExp("(?<!STORAGE_NS \\+ )[\"']" + n + "[\"']").test(APP_SRC));
+      check('§30 没有遗留的裸键名引用', bare.length === 0, bare.join(',') || '无');
+    }
+
+    // ---- 30.8 页面标题与实例挂钩（肉眼能分辨当前在哪个入口）----
+    check('§30 页内标题区分复盘/看盘',
+      APP_SRC.includes("(APP_INSTANCE === 'live' ? '（看盘）' : '（复盘）')"));
+
+    // ---- 30.9 工具链已全部指向 share/data.js（防止改回去又内联）----
+    const tool = f => fs.existsSync(path.join(REPO2, f)) ? fs.readFileSync(path.join(REPO2, f), 'utf8') : '';
+    check('§30 update_data.cjs 写 share/data.js',
+      /DATA_FILE = path\.join\(REPO, 'share', 'data\.js'\)/.test(tool('update_data.cjs')));
+    check('§30 validate_data.cjs 读 share/data.js',
+      /DATA_FILE = path\.join\(__dirname, 'share', 'data\.js'\)/.test(tool('validate_data.cjs')));
+    check('§30 每日自动化只提交 share/data.js',
+      tool('run_daily.sh').includes('git add share/data.js') && !/git add index\.html/.test(tool('run_daily.sh')));
+    check('§30 Actions 只提交 share/data.js',
+      tool('.github/workflows/daily-update.yml').includes('git add share/data.js'));
+
+    // ---- 30.10 单文件离线版仍可造出来（本仓库曾经的核心卖点，不能被拆没）----
+    {
+      let okOff = false, msg = '';
+      try {
+        const shell = fs.readFileSync(path.join(REPO2, 'index.html'), 'utf8');
+        const re = /<script src="share\/data\.js"><\/script>\s*<script src="share\/app\.js"><\/script>/;
+        const single = shell.replace(re,
+          '<script>\n' + fs.readFileSync(DATA_JS, 'utf8') + '\n</script>\n<script>\n' + APP_SRC + '\n</script>');
+        okOff = re.test(shell) && single.includes('window.BTCFUT_DATA=') && !/src="share\//.test(single);
+        msg = okOff ? '可内联成单文件' : '内联失败（结构变了？）';
+      } catch (e) { msg = e.message; }
+      check('§30 单文件离线版仍可构建（build_offline.cjs 逻辑有效）', okOff, msg);
+    }
+  }
+
   // ============ 汇总 ============
+
   // 摘要必须在 stdout 回调里再 exit：直接 console.log + process.exit 在 stdout 是管道/重定向时
   // 会丢掉缓冲区里最后几行（页面代码带 setInterval，不能靠等事件循环自己退出）。
   const summary = '\n======== 结果: ' + pass + ' PASS / ' + fail + ' FAIL ========\n' +

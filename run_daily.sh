@@ -1,5 +1,6 @@
 #!/bin/bash
-# 每日自动更新 btc-timeslicer 数据：拉取最新 15m K 线 -> 重写 index.html -> 提交并推送 GitHub Pages
+# 每日自动更新 btc-timeslicer 数据：拉取最新 15m K 线 -> 重写 share/data.js -> 提交并推送 GitHub Pages
+# （2026-10-08 起数据不再内联在 index.html；两个入口页共用 share/data.js）
 # 由 launchd (com.btctimeslicer.update.plist) 在凌晨 4 点触发。
 set -u
 
@@ -34,8 +35,8 @@ if [ "$RC" -ne 0 ]; then
   exit $RC
 fi
 
-if git diff --quiet index.html; then
-  echo "$(date '+%F %T') index.html 无变化，跳过提交"
+if git diff --quiet share/data.js; then
+  echo "$(date '+%F %T') share/data.js 无变化，跳过提交"
   echo "===== 结束 ====="
   exit 0
 fi
@@ -47,7 +48,7 @@ if ! git "${GIT_PX[@]}" pull --ff-only "origin" "$BRANCH"; then
   exit 1
 fi
 
-git add index.html
+git add share/data.js
 git commit -m "data: daily update $(date '+%F') (source=$SOURCE)"
 if git "${GIT_PX[@]}" push "origin" "$BRANCH"; then
   echo "$(date '+%F %T') 已提交并推送到 GitHub Pages"

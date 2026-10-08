@@ -6,9 +6,11 @@
 //   - 非致命(仅警告，不阻断推送)：网格缺口(gap)或时间戳不对齐(mis)——真实交易所数据偶尔会缺一根。
 'use strict';
 const fs = require('fs');
+const path = require('path');
 
-const HTML = 'index.html';
-const h = fs.readFileSync(HTML, 'utf8');
+// 数据已从 index.html 抽到唯一数据源 share/data.js（两个入口共用）
+const DATA_FILE = path.join(__dirname, 'share', 'data.js');
+const h = fs.readFileSync(DATA_FILE, 'utf8');
 const m = h.match(/window\.BTCFUT_DATA\s*=\s*(\{[\s\S]*?\})\s*;/);
 if (!m) { console.error('[FAIL] 未找到 window.BTCFUT_DATA'); process.exit(1); }
 

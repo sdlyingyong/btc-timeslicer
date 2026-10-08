@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // btc-timeslicer 数据更新脚本（OKX BTC-USDT 永续合约）
-// 仅重写 index.html 里的 window.BTCFUT_DATA 数据段，代码逻辑原样保留。
+// 只重写唯一数据源 share/data.js 里的 window.BTCFUT_DATA（两个入口共用这一份）。
+// ⚠️ 2026-10-08 起数据不再内联进 index.html：入口页只引用 share/data.js。
 // 用法:
 //   本地(走代理): HTTPS_PROXY=http://127.0.0.1:10809 node update_data.cjs
 //   云端/直连(无需代理): node update_data.cjs   # 不设 HTTPS_PROXY 即直连 OKX
@@ -10,7 +11,7 @@ const path = require('path');
 const { execSync } = require('child_process');
 
 const REPO = __dirname;
-const HTML = path.join(REPO, 'index.html');
+const DATA_FILE = path.join(REPO, 'share', 'data.js');
 // 仅在显式设置 HTTPS_PROXY/HTTP_PROXY 时才走代理；否则直连（云端 runner 适用）
 const USE_PROXY = !!(process.env.HTTPS_PROXY || process.env.HTTP_PROXY);
 const PROXY = USE_PROXY ? (process.env.HTTPS_PROXY || process.env.HTTP_PROXY) : '';
@@ -44,7 +45,7 @@ function fetchJson(url, attempt = 0) {
 const sleep = ms => execSync(`sleep ${ms / 1000}`);
 
 // ---- 读取现有数据 ----
-const html = fs.readFileSync(HTML, 'utf8');
+const html = fs.readFileSync(DATA_FILE, 'utf8');
 const m = html.match(/window\.BTCFUT_DATA\s*=\s*(\{[\s\S]*?\})\s*;/);
 if (!m) { console.error('未找到 window.BTCFUT_DATA'); process.exit(2); }
 const data = JSON.parse(m[1]);
@@ -160,15 +161,15 @@ console.log(`合计: 新增 ${totalAdded} 根, 刷新 ${totalReplaced} 根`);
 if (totalAdded + totalReplaced === 0) {
   // 能走到这里说明每个周期都取到了数据、只是末端已是最新（与「取数失败」是两回事，
   // 后者已在翻页处显式 exit 1）。留一行明确日志，避免以后误判成静默失败。
-  console.log(`无新数据（已成功取到 OKX 数据，末端已是最新：1d ${new Date(data['1d'][data['1d'].length - 1][0] * 60000).toISOString()}），index.html 未改动`);
+  console.log(`无新数据（已成功取到 OKX 数据，末端已是最新：1d ${new Date(data['1d'][data['1d'].length - 1][0] * 60000).toISOString()}），share/data.js 未改动`);
   process.exit(0);
 }
 
 const newData = JSON.stringify(data);
 const lastD1 = data['1d'][data['1d'].length - 1];
 const stamp = new Date(lastD1[0] * 60000).toISOString().slice(0, 10);
-const newHtml = html
+const newDataJs = html
   .replace(/window\.BTCFUT_DATA\s*=\s*(\{[\s\S]*?\})\s*;/, 'window.BTCFUT_DATA=' + newData + ';')
   .replace(/window\.BTCFUT_UPDATED\s*=\s*"[^"]*";/, 'window.BTCFUT_UPDATED="' + stamp + '";');
-fs.writeFileSync(HTML, newHtml);
-console.log('index.html 已重写数据段，BTCFUT_UPDATED=' + stamp);
+fs.writeFileSync(DATA_FILE, newDataJs);
+console.log('share/data.js 已重写数据段，BTCFUT_UPDATED=' + stamp);
