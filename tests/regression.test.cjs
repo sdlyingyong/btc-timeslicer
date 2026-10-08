@@ -147,6 +147,9 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     getSortKey: () => SORT_KEY,
     // §29 重叠对象命中：全部候选 + 同点轮换状态
     hitTestAll, getLastPick: () => lastPick, setLastPick: v => { lastPick = v; },
+    // §31 看盘实例：直连 OKX 自动补数
+    liveShouldRun, liveSetEnabled, liveSetFetch, liveUrl, liveParse, liveMerge, liveDeriveDaily,
+    liveRefreshTick, liveRefreshStart, liveRefreshStop, liveGetStatus, liveIntervalMs, livePeriods,
     // §19.5 UI 控制器 + 渲染数据
     simMarks, simOpenAtCursor, simAddAtCursor, simExitAtCursor, simCursorTs, simCursorPrice, simLeverage, simStopVal, simSizeVal, drawSim, renderSim
   };`);
@@ -1861,6 +1864,139 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
       } catch (e) { msg = e.message; }
       check('§30 单文件离线版仍可构建（build_offline.cjs 逻辑有效）', okOff, msg);
     }
+  }
+
+  // ============ §31 看盘实例：直连 OKX 自动补数（方案 A，浏览器端，零仓库数据）============
+  {
+    // 快照/还原，避免污染前面的用例依赖的数据
+    const snap = name => { const a = DATA[name]; return { a, n: a.length, tail: a.slice(-8).map(x => x.slice()) }; };
+    const restore = s => {
+      s.a.length = s.n;
+      for (let i = 0; i < s.tail.length; i++) s.a[s.n - s.tail.length + i] = s.tail[i];
+    };
+    // OKX 原始蜡烛是 9 字段、数字是字符串：[ts,o,h,l,c,vol(张),volCcy(币),volCcyQuote,confirm]
+    const okxRow = (tsMin, close, volCcy) => [
+      String(tsMin * 60000), String(close), String(close + 10), String(close - 10), String(close),
+      String(volCcy * 100), String(volCcy), '150', '0'
+    ];
+    const S15 = snap('15m'), S1H = snap('1h'), S4H = snap('4h'), S1D = snap('1d');
+    const APP31 = fs.readFileSync(APP_JS, 'utf8');     // §30 块里的 APP_SRC 不在本作用域，单独读一份
+
+    // ---- 31.1 抓取参数（OKX 大小写铁律）----
+    const P = API.livePeriods ? API.livePeriods() : null;
+    check('§31 只补 15m/1h/4h（1d 由 4h 派生，不直接抓）',
+      Array.isArray(P) && P.join(',') === '15m,1h,4h', P && P.join(','));
+    check('§31 OKX bar 参数大写 1H/4H（写小写会 51000 Parameter bar error）',
+      API.liveUrl('1h').indexOf('bar=1H') >= 0 && API.liveUrl('4h').indexOf('bar=4H') >= 0 && API.liveUrl('15m').indexOf('bar=15m') >= 0,
+      API.liveUrl('1h'));
+    check('§31 URL 带 instId 与 limit', /instId=BTC-USDT-SWAP/.test(API.liveUrl('15m')) && /limit=\d+/.test(API.liveUrl('15m')));
+    check('§31 刷新间隔 = 5 分钟', API.liveIntervalMs() === 300000, String(API.liveIntervalMs()));
+
+    // ---- 31.2 解析：量能必须取 volCcy（第 7 列），不是 vol（第 6 列）----
+    const parsed = API.liveParse([okxRow(29857245, 81324.1, 2419.0704)]);
+    check('§31 解析取第 7 列 volCcy（币）而非第 6 列 vol（张）',
+      parsed.length === 1 && near(parsed[0][5], 2419.0704, 1e-6), JSON.stringify(parsed[0]));
+    check('§31 解析出的 ts 是「分钟」', parsed[0][0] === Math.floor(29857245 * 60000 / 60000));
+    check('§31 解析结果按时间升序', (() => {
+      const p = API.liveParse([okxRow(29857305, 1, 1), okxRow(29857245, 1, 1)]);
+      return p.length === 2 && p[0][0] < p[1][0];
+    })());
+    check('§31 脏数据（空行/字段不足/非数字）被丢弃',
+      API.liveParse([[], null, ['x'], ['1791473400000']]).length === 0);
+
+    // ---- 31.3 合并：补齐 / 覆盖 ----
+    const arr15 = DATA['15m'];
+    const last15 = arr15[arr15.length - 1][0];
+    const r1 = API.liveMerge('15m', [[last15 + 15, 1, 2, 0.5, 1.5, 7], [last15 + 30, 1, 2, 0.5, 1.5, 8]]);
+    check('§31 补齐缺口：末尾追加 2 根', r1.added === 2 && arr15[arr15.length - 1][0] === last15 + 30, JSON.stringify(r1));
+    const r2 = API.liveMerge('15m', [[last15 + 30, 9, 9, 9, 9, 9]]);
+    check('§31 覆盖已存在的末根：不重复追加，值被更新',
+      r2.added === 0 && r2.replaced === 1 && r2.minIdx === arr15.length - 1 &&
+      arr15[arr15.length - 1][4] === 9 && arr15[arr15.length - 1][5] === 9, JSON.stringify(r2));
+    check('§31 合并是幂等的（同一批再合一次无新增）',
+      (() => { const r = API.liveMerge('15m', [[last15 + 30, 9, 9, 9, 9, 9]]); return r.added === 0; })());
+
+    // ---- 31.4 1d 由 4h 重聚合（UTC 00:00 锚定，只覆盖最近几天）----
+    {
+      const h4last = DATA['4h'][DATA['4h'].length - 1][0];
+      const nextDay = (Math.floor(h4last / 1440) + 1) * 1440;      // 下一个 UTC 零点
+      API.liveMerge('4h', [
+        [nextDay, 100, 120, 90, 110, 1],
+        [nextDay + 240, 110, 150, 105, 140, 2],
+        [nextDay + 480, 140, 145, 130, 135, 3],
+        [nextDay + 720, 135, 160, 130, 155, 4]
+      ]);
+      const n = API.liveDeriveDaily();
+      const d1 = DATA['1d'];
+      const bar = d1[d1.length - 1];
+      check('§31 1d 重聚合：新增当日，开高低收与 vol 汇总正确',
+        n >= 1 && bar[0] === nextDay && bar[1] === 100 && bar[2] === 160 && bar[3] === 90 && bar[4] === 155 && near(bar[5], 10, 1e-9),
+        JSON.stringify(bar));
+      check('§31 1d 锚定 UTC 00:00（不是 OKX 原生的 16:00）', bar[0] % 1440 === 0);
+    }
+
+    restore(S15); restore(S1H); restore(S4H); restore(S1D);
+
+    // ---- 31.5 端到端 tick：mock fetch ----
+    // 主沙箱跑的是「复盘」实例（§30 起历史断言都按 review 的无前缀键名写的），
+    // 所以这里显式把 §31 的开关掰到开，测完再掰回 null 让真实门控生效。
+    API.liveSetEnabled(true);
+    await API.setView('BTC', '15m');
+    const base = { '15m': DATA['15m'].length, '1h': DATA['1h'].length, '4h': DATA['4h'].length };
+    const storeKeys0 = Object.keys(store).join(',');
+    const calls = [];
+    let vc = 1000;
+    API.liveSetFetch(async url => {
+      calls.push(url);
+      const rows = [];
+      if (/bar=15m/.test(url)) {
+        const t = DATA['15m'][DATA['15m'].length - 1][0];
+        rows.push(okxRow(t + 15, vc++, 1.5), okxRow(t + 30, vc++, 1.6));
+      } else if (/bar=1H/.test(url)) {
+        const t = Math.floor((DATA['1h'][DATA['1h'].length - 1][0] + 60) / 60) * 60;
+        rows.push(okxRow(t, vc++, 2.5));
+      } else {
+        const t = Math.floor((DATA['4h'][DATA['4h'].length - 1][0] + 240) / 240) * 240;
+        rows.push(okxRow(t, vc++, 3.5));
+      }
+      return { ok: true, json: async () => ({ code: '0', msg: '', data: rows }) };
+    });
+    const st = await API.liveRefreshTick();
+    check('§31 tick 拉了 3 个周期（15m/1H/4H）', calls.length === 3 && calls.every(u => /^https:\/\/www\.okx\.com\//.test(u)), calls.length + ' 次');
+    check('§31 tick 成功 → 状态 ok 且带时间戳', st.ok === true && st.lastBarTs > 0, JSON.stringify(st));
+    check('§31 tick 真的补了数据（三周期各 +1 以上）',
+      DATA['15m'].length === base['15m'] + 2 && DATA['1h'].length === base['1h'] + 1 && DATA['4h'].length === base['4h'] + 1,
+      JSON.stringify({ '15m': DATA['15m'].length, '1h': DATA['1h'].length, '4h': DATA['4h'].length }));
+    check('§31 合并后当前周期数据源已重建（DS.len 跟着涨，len 不是快照）',
+      API.dataLen() === DATA['15m'].length, API.dataLen() + ' vs ' + DATA['15m'].length);
+    check('§31 自动补数不写 localStorage（不污染复盘进度）', Object.keys(store).join(',') === storeKeys0);
+
+    // ---- 31.6 失败必须静默降级，不能抛错、不能改数据 ----
+    const afterOk = { '15m': DATA['15m'].length, '1h': DATA['1h'].length, '4h': DATA['4h'].length };
+    API.liveSetFetch(async () => { throw new Error('network down'); });
+    const stNet = await API.liveRefreshTick();
+    check('§31 fetch 抛异常 → 静默失败、状态离线', stNet.ok === false && /离线/.test(stNet.msg || ''), JSON.stringify(stNet));
+    API.liveSetFetch(async () => ({ json: async () => ({ code: '51001', msg: 'bad param' }) }));
+    const stCode = await API.liveRefreshTick();
+    check('§31 OKX 返回非 0 code → 同样当失败', stCode.ok === false, JSON.stringify(stCode));
+    check('§31 失败时一个字节都没改数据',
+      DATA['15m'].length === afterOk['15m'] && DATA['1h'].length === afterOk['1h'] && DATA['4h'].length === afterOk['4h']);
+
+    // ---- 31.7 只在「看盘」实例启用：复盘页必须一动不动 ----
+    API.liveSetEnabled(null);                    // 掰回「按真实实例判定」
+    check('§31 复盘实例不启用（APP_INSTANCE=review）', API.liveShouldRun() === false, String(API.liveShouldRun()));
+    let hit = 0;
+    API.liveSetFetch(async () => { hit++; return { json: async () => ({ code: '0', data: [] }) }; });
+    await API.liveRefreshTick();
+    check('§31 复盘实例下 tick 一个请求都不发', hit === 0, hit + ' 次');
+    check('§31 App 静态检查：自动启动被 liveShouldRun() 包住',
+      APP31.indexOf('if (liveShouldRun()) liveRefreshStart();') >= 0);
+    check('§31 App 静态检查：切回前台立刻补一次（visibilitychange）',
+      APP31.indexOf("document.addEventListener('visibilitychange'") >= 0);
+    check('§31 App 静态检查：量能列注明取 volCcy 而不是 vol',
+      /volCcy/.test(APP31) && /第\s*7\s*列|索引\s*6|\[6\]/.test(APP31));
+
+    restore(S15); restore(S1H); restore(S4H); restore(S1D);
   }
 
   // ============ 汇总 ============

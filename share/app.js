@@ -2829,6 +2829,248 @@ document.getElementById('clearTrades').addEventListener('click', () => {
 });
 document.getElementById('hintClose').addEventListener('click', () => { document.getElementById('hint').style.display = 'none'; });
 
+// ================= §31 看盘实例：直连 OKX 自动补数 =================
+// 目标：/live/ 的数据最多旧 5 分钟，且**仓库里一个字节都不新增**。
+// 依据（实测）：OKX 公开行情接口支持浏览器跨域（反射 Origin；且是简单请求，连预检都不发）。
+// 边界：只在 APP_INSTANCE === 'live' 时启用；复盘页一行都不碰（复盘必须可复现）。
+// 兜底：任何一步失败都静默退回内置数据 —— 最差等于「每天更新一次」的现状，不会更差。
+const LIVE_INTERVAL_MS = 5 * 60 * 1000;      // 5 分钟
+const LIVE_LIMIT = 300;                      // 实测 market/candles 单页上限可到 300（15m 覆盖约 75 小时）
+const LIVE_INST = 'BTC-USDT-SWAP';
+const LIVE_PERIODS = ['15m', '1h', '4h'];    // 1d 不直接抓：OKX 原生 1D 锚定 16:00 UTC，与历史 00:00 UTC 网格错位
+const LIVE_BAR = { '15m': '15m', '1h': '1H', '4h': '4H' };   // ⚠️ 大小写铁律：小写 1h/4h 会返回 51000 Parameter bar error
+const LIVE_DAILY_RECOMPUTE = 5;              // 1d 每次重算最近 N 个 UTC 日（当日那根是未收盘的，必须跟着更新）
+
+let liveFetchImpl = (typeof fetch === 'function') ? fetch : null;
+let liveTimer = null;
+let liveBusy = false;
+let liveEl = null;
+let liveForce = null;                        // 仅测试用：强制开/关；null = 按真实实例判定
+let liveStatus = { ok: false, ts: 0, msg: '' };
+
+function liveShouldRun() { return liveForce === null ? (APP_INSTANCE === 'live') : liveForce; }
+function liveSetEnabled(v) { liveForce = (v === null || v === undefined) ? null : !!v; }
+function liveSetFetch(f) { liveFetchImpl = f; }
+function liveIntervalMs() { return LIVE_INTERVAL_MS; }
+function livePeriods() { return LIVE_PERIODS.slice(); }
+function liveGetStatus() { return { ok: liveStatus.ok, ts: liveStatus.ts, msg: liveStatus.msg, lastBarTs: liveDataTs() }; }
+function liveUrl(period) {
+  return 'https://www.okx.com/api/v5/market/candles?instId=' + LIVE_INST +
+         '&bar=' + LIVE_BAR[period] + '&limit=' + LIVE_LIMIT;
+}
+
+// OKX 原始蜡烛（9 字段、数字是字符串）→ 内部格式 [tsMin, o, h, l, c, volCcy]
+// ⚠️ 量能取第 7 列（索引 6）volCcy＝「币」，绝不是第 6 列（索引 5）vol＝「张」——
+//    BTC-USDT-SWAP 的 ctVal=0.01，两者恒差 100 倍，误用会造成「半屏看不见、半屏顶满」的单位事故。
+function liveParse(rows) {
+  const out = [];
+  if (!Array.isArray(rows)) return out;
+  for (const c of rows) {
+    if (!Array.isArray(c) || c.length < 7) continue;
+    const ts = Math.floor(+c[0] / 60000), o = +c[1], h = +c[2], l = +c[3], cl = +c[4], v = +c[6];
+    if (!isFinite(ts) || !isFinite(o) || !isFinite(h) || !isFinite(l) || !isFinite(cl) || !isFinite(v)) continue;
+    out.push([ts, o, h, l, cl, v]);
+  }
+  out.sort((a, b) => a[0] - b[0]);
+  return out;
+}
+
+// 二分：第一个 ts >= t 的下标
+function liveLowerBound(arr, t) {
+  let lo = 0, hi = arr.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m][0] < t) lo = m + 1; else hi = m; }
+  return lo;
+}
+function liveArrOf(period) {
+  const s = SYMBOLS[curSym] || SYMBOLS.BTC;
+  if (!s || !s.data) return null;
+  return s.data[(s.map && s.map[period]) || period] || null;
+}
+
+// 就地合并（保持升序）：同 ts 覆盖、新 ts 插入。返回改动统计供 EMA 失效与测试使用。
+function liveMerge(period, bars) {
+  const res = { added: 0, replaced: 0, minIdx: -1, total: 0 };
+  const arr = liveArrOf(period);
+  if (!Array.isArray(arr) || !Array.isArray(bars) || !bars.length) return res;
+  let minIdx = Infinity;
+  for (const b of bars) {
+    const at = liveLowerBound(arr, b[0]);
+    if (at < arr.length && arr[at][0] === b[0]) { arr[at] = b; res.replaced++; }
+    else { arr.splice(at, 0, b); res.added++; }
+    if (at < minIdx) minIdx = at;
+  }
+  if (res.added) arr.sort((a, b) => a[0] - b[0]);
+  res.minIdx = minIdx === Infinity ? -1 : minIdx;
+  res.total = arr.length;
+  return res;
+}
+
+// 1d 由 4h 重聚合，锚定 UTC 00:00（沿用 update_data.cjs 的 deriveDailyFrom4h 口径）。
+// 与仓库脚本的差别：这里要**连当日那根一起重算**（当日未收盘，4h 每多一根它就该变），
+// 而脚本只补「比现有末日更晚」的天。
+function liveDeriveDaily(days) {
+  const n = days || LIVE_DAILY_RECOMPUTE;
+  const h4 = liveArrOf('4h'), d1 = liveArrOf('1d');
+  if (!Array.isArray(h4) || !Array.isArray(d1) || !h4.length || !d1.length) return 0;
+  const fromDay = Math.floor(h4[h4.length - 1][0] / 1440) * 1440 - (n - 1) * 1440;
+  const byDay = new Map();
+  for (const b of h4) {
+    const day = Math.floor(b[0] / 1440) * 1440;
+    if (day < fromDay) continue;
+    if (!byDay.has(day)) byDay.set(day, []);
+    byDay.get(day).push(b);
+  }
+  const at = new Map();
+  for (let i = 0; i < d1.length; i++) at.set(d1[i][0], i);
+  let changed = 0;
+  for (const day of [...byDay.keys()].sort((a, b) => a - b)) {
+    const bs = byDay.get(day).slice().sort((a, b) => a[0] - b[0]);
+    const bar = [day, bs[0][1],
+      bs.reduce((m, x) => Math.max(m, x[2]), -Infinity),
+      bs.reduce((m, x) => Math.min(m, x[3]), Infinity),
+      bs[bs.length - 1][4],
+      bs.reduce((s, x) => s + x[5], 0)];
+    const i = at.get(day);
+    if (i === undefined) { d1.push(bar); at.set(day, d1.length - 1); changed++; }
+    else if (d1[i][1] !== bar[1] || d1[i][2] !== bar[2] || d1[i][3] !== bar[3] || d1[i][4] !== bar[4] || d1[i][5] !== bar[5]) {
+      d1[i] = bar; changed++;
+    }
+  }
+  if (changed) d1.sort((a, b) => a[0] - b[0]);
+  return changed;
+}
+
+// 取「当前数据显示到哪」（分钟）—— 状态栏用它，永远与真实数据一致
+function liveDataTs() {
+  const a = liveArrOf('15m');
+  return (Array.isArray(a) && a.length) ? a[a.length - 1][0] : 0;
+}
+
+function liveStatusEl() {
+  if (liveEl) return liveEl;
+  try {
+    const tb = document.getElementById('topbar');
+    if (!tb || !tb.appendChild) return null;
+    const el = document.createElement('span');
+    el.id = 'liveStatus';
+    // margin-left:auto 把它顶到顶栏最右，不挤压左半边的 #info
+    el.style.cssText = 'margin-left:auto;font-size:11.5px;color:#7f8ea8;font-variant-numeric:tabular-nums;white-space:nowrap;';
+    tb.appendChild(el);
+    liveEl = el;
+  } catch (e) { return null; }
+  return liveEl;
+}
+function liveAgo(ts) {
+  const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (s < 45) return '刚刚';
+  if (s < 3600) return Math.round(s / 60) + ' 分钟前';
+  return Math.round(s / 3600) + ' 小时前';
+}
+function liveRenderStatus(prefix) {
+  const el = liveStatusEl();
+  if (!el) return;
+  if (prefix) { el.textContent = prefix; el.style.color = '#6b7689'; return; }
+  if (!liveStatus.ts) { el.textContent = ''; return; }
+  const t = liveDataTs();
+  const d = t ? new Date(t * 60000) : null;
+  const p2 = x => (x < 10 ? '0' : '') + x;
+  const stamp = d ? (p2(d.getMonth() + 1) + '-' + p2(d.getDate()) + ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes())) : '--';
+  if (liveStatus.ok) {
+    el.textContent = '数据至 ' + stamp + ' · ' + liveAgo(liveStatus.ts);
+    el.style.color = '#4ade80';
+  } else {
+    el.textContent = '离线 · 数据至 ' + stamp;
+    el.style.color = '#ffd166';
+  }
+}
+
+// 合并后把视图摆回原处：
+//   ① 原本停在最右（最新）→ 跟着新数据继续停在最右；
+//   ② 滚在历史里 → 按右边缘时间戳对齐，不跳来跳去。
+//   ⚠️ 必须重建 DS：makeInlineDS 的 len 是**创建时的快照**，直接 push 进原数组不会生效。
+async function liveAfterMerge(touched) {
+  if (!touched || touched.indexOf(cur) < 0) return;
+  const oldLen = dataLen();
+  if (!oldLen) return;
+  const atRight = (viewStart + viewCount) >= oldLen - 1;
+  const rIdx = Math.max(0, Math.min(oldLen - 1, Math.floor(viewStart + viewCount) - 1));
+  const rBar = getBar(rIdx);
+  const rightTs = rBar ? rBar[0] : null;
+  const s = SYMBOLS[curSym];
+  DS = makeInlineDS(s.data[s.map[cur]]);
+  const len = DS.len;
+  if (viewCount > len) viewCount = Math.min(260, len);
+  if (atRight) {
+    viewStart = Math.max(vsLo(), len - viewCount);
+  } else if (rightTs != null) {
+    const ni = await findIdxByTime(rightTs);
+    viewStart = ni >= 0 ? Math.max(vsLo(), Math.min(len - viewCount, ni - viewCount + 1))
+                        : Math.max(vsLo(), len - viewCount);
+  }
+  draw();
+  resolveMarks();
+}
+
+// 一轮刷新：拉 3 个周期 → 合并 → 重聚合 1d → 失效 EMA → 摆视图。
+// 任何一步失败都吞掉，只改状态栏文字。
+async function liveRefreshTick() {
+  if (!liveShouldRun() || liveBusy) return liveGetStatus();
+  if (!liveFetchImpl) {
+    liveStatus = { ok: false, ts: Date.now(), msg: '离线' };
+    liveRenderStatus();
+    return liveGetStatus();
+  }
+  liveBusy = true;
+  liveRenderStatus('补数据中…');
+  try {
+    const got = await Promise.all(LIVE_PERIODS.map(async p => {
+      const resp = await liveFetchImpl(liveUrl(p), { cache: 'no-store' });
+      const j = await resp.json();
+      if (!j || j.code !== '0' || !Array.isArray(j.data) || !j.data.length) {
+        throw new Error('okx ' + ((j && j.code) || 'empty'));
+      }
+      return [p, liveParse(j.data)];
+    }));
+    const touched = [];
+    const minIdxOf = {};
+    for (const pair of got) {
+      const r = liveMerge(pair[0], pair[1]);
+      if (r.added || r.replaced) { touched.push(pair[0]); minIdxOf[pair[0]] = r.minIdx; }
+    }
+    const dDay = liveDeriveDaily();
+    if (dDay) {
+      touched.push('1d');
+      const d1 = liveArrOf('1d');
+      minIdxOf['1d'] = Math.max(0, d1.length - dDay - 2);   // 保守：覆盖到变化区之前
+    }
+    // 当前周期被改了 → EMA 从改动处重算（emaFull/emaFullLen 是按 EMA 长度 20/120 键的，
+    // 且切周期时 setView 会整体清空，所以只需管当前这一份）
+    if (minIdxOf[cur] !== undefined && minIdxOf[cur] >= 0) {
+      const from = minIdxOf[cur];
+      [20, 120].forEach(n => { if (typeof emaFullLen[n] === 'number' && emaFullLen[n] > from) emaFullLen[n] = from; });
+    }
+    liveStatus = { ok: true, ts: Date.now(), msg: touched.length ? ('已更新 ' + touched.length + ' 个周期') : '无新数据' };
+    await liveAfterMerge(touched);
+  } catch (e) {
+    liveStatus = { ok: false, ts: Date.now(), msg: '离线' };
+  } finally {
+    liveBusy = false;
+    liveRenderStatus();
+  }
+  return liveGetStatus();
+}
+
+function liveRefreshStart() {
+  if (!liveShouldRun() || liveTimer) return;
+  liveStatusEl();
+  liveRenderStatus('补数据中…');
+  liveRefreshTick();
+  liveTimer = setInterval(() => { if (!document.hidden) liveRefreshTick(); }, LIVE_INTERVAL_MS);
+  // 切回前台立刻补一次：合上笔记本再打开时，等到下一个 5 分钟太蠢
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) liveRefreshTick(); });
+}
+function liveRefreshStop() { if (liveTimer) { clearInterval(liveTimer); liveTimer = null; } }
+
 window.addEventListener('resize', resize);
 loadPrefs();
 loadSession();
@@ -2848,3 +3090,5 @@ document.querySelectorAll('.symbols button').forEach(x => x.classList.remove('ac
  document.querySelector('.symbols button[data-sym="BTC"]')).classList.add('active');
 resize();
 setView(START_SYM, START_PERIOD);
+// §31 看盘实例：每 5 分钟直连 OKX 补一次数据（复盘实例不启用）
+if (liveShouldRun()) liveRefreshStart();

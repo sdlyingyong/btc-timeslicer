@@ -77,6 +77,12 @@ check('看盘入口无脚本错误', B.errs.length === 0, B.errs.join(' | ') || 
 check('看盘入口实例标记 = live', B.marker === 'live', String(B.marker));
 check('看盘入口数据已挂上 window.BTCFUT_DATA', !!B.w.BTCFUT_DATA && B.w.BTCFUT_DATA['15m'].length > 100000,
   B.w.BTCFUT_DATA ? B.w.BTCFUT_DATA['15m'].length + ' 根 15m' : 'null');
+// §31：只有看盘入口会挂「实时补数」的状态位（复盘实例必须一动不动）
+check('§31 看盘入口已挂上实时补数状态位 #liveStatus',
+  !!B.w.document.getElementById('liveStatus'),
+  B.w.document.getElementById('liveStatus') ? String(B.w.document.getElementById('liveStatus').textContent).slice(0, 40) : 'null');
+check('§31 复盘入口不挂实时补数（复盘不碰活数据）',
+  !A.w.document.getElementById('liveStatus'));
 
 // 关键：让两个入口各写一次同名的进度，确认落到不同的键上
 A.w.localStorage.setItem('kline_session_v1', 'REVIEW');

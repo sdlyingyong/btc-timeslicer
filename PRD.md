@@ -1975,3 +1975,177 @@ const HCHANNEL_STYLE = {
 - [x] 真画布复核：上线绿 / 下线红 + 淡紫填充 ✓
 - [ ] mac 手动验收 E1–E8
 - [x] 提交并推送（同 commit `9a0c329`，与 §24 一起上线）
+
+---
+
+# 附：§31 本次修改 — 看盘入口每 5 分钟自动补数（浏览器直连 OKX）
+
+| 项 | 内容 |
+|---|---|
+| 需求 | 「能不能给**看盘**这个每十五分钟更新下数据」→ 看过方案对比后拍板：**方案 A（浏览器直连 OKX）**、**四个周期都要**、**5 分钟一次** |
+| 结论 | `/live/` 打开即自动补数、之后每 5 分钟一次；**仓库新增数据 0 字节**；每次刷新 **3 个请求 ≈ 30 KB**；拉不到就静默退回内置数据 |
+| 影响面 | `share/app.js`（两入口共用）+ `tests/regression.test.cjs` + `tests/smoke_entries.cjs`；**`index.html` / `live/index.html` 一行未改** |
+| 日期 | 2026-10-08 |
+
+## 31.1 背景与问题
+
+现状是**每天 04:00 本机跑一次 `update_data.cjs` → 提交整份 `share/data.js`（16.24 MB）→ push**。
+
+于是「看盘」看到的最新一根，可能已经是 **24 小时前**的 —— 对一个盯盘页面来说，这个粒度基本没用。
+
+架构硬约束：纯静态 GitHub Pages，**没有后端**，数据全部烤进 `share/data.js`。
+
+本机调度能力也实测过，**做不到 15 分钟级**：
+
+- 内置 automation 的 RRULE：`BYHOUR` 有效、**`BYMINUTE` 被忽略 → 最小粒度「每小时一次」**
+- `crontab` 被禁；`launchctl` 写操作需 sudo → 只能写 `~/Library/LaunchAgents/*.plist`，**下次登录才加载**
+- `python3 -m http.server` 之类的后台进程随工具调用结束被回收，无法常驻
+
+## 31.2 目标 / 非目标
+
+**目标**
+- 看盘页 `数据至 …` 与实际时间差 **≤ 5 分钟**（页面打开期间）
+- 补数**只补 4 个周期的尾部**，全量历史口径不变
+- **复盘页 `/` 行为逐字节不变**（复盘要可复现，绝不能被「活数据」污染）
+- 网络不通时**静默降级**：不弹错、不打断、不白屏，退化成「和以前完全一样」
+- **不写 localStorage / IndexedDB**：补进来的数据只活在内存里
+
+**非目标**
+- 不改每日 04:00 的全量更新链路（它仍是历史的唯一来源）
+- 不做 WebSocket / 逐笔推送（`market/candles` 轮询足够）
+- 不治 `.git` 每天 +6 MB 的增长（**独立议题**，留待后续）
+
+## 31.3 方案选型
+
+| 方案 | 做法 | 判决 |
+|---|---|---|
+| **A｜浏览器直连 OKX** ✅ | 页面打开时 + 每 5 分钟，前端自己拉 OKX 补尾部 | **采用** |
+| B｜本机 launchd 每 N 分钟写近段小文件 | 新增 `share/live_data.js`（精简版 168 KB），看盘优先读它 | 否 |
+| C｜GitHub Actions `cron: */15` | 云端定时提交 | 否 |
+| D｜自建中转（CF Worker / Vercel） | 给 OKX 加 CORS + 边缘缓存 | 暂不必要，留作 A 失效时的 Plan B |
+
+**为什么是 A**
+
+- **零服务器、零 CI、零 git 增长、零维护**——仓库一行数据都不用加
+- **天然 fail-safe**：拉不到就退回内置数据，**不会比现在更差**
+- 打开就是最新，不用等任何定时任务；换台设备（手机）打开也一样新
+- 决定性事实：**OKX 公开行情接口本身就支持浏览器跨域**（实测见 31.3.1），所以 B/C/D 的前提都不成立
+
+**为什么否掉 B/C**
+
+- B：MacBook Air 天天合盖 → 睡眠就停，夜里全是洞；且 **96 次提交 + 96 次 Pages 重建/天**；launchd plist 还有被 Mole/tw93 之类清理工具批量禁用的前科（`com.btctimeslicer.update.plist` 就被改名过一次）
+- C：免费额度下 **cron 常延迟 5–30 分钟**，「15 分钟」名不副实；且**云端能否直连 OKX 从未验证成功**——这条 cron 自 2026-09-08 引入起 **16 天零提交**，正是当初停用它的原因
+- ⚠️ 最反直觉的一条：**换成小文件并不能省体积**。每天落盘量几乎相同（6.0 MB → 6.1 MB），真正的代价是**提交数与 Pages 重建次数暴涨 96 倍**
+
+### 31.3.1 OKX 接口实测事实（决定方案可行性）
+
+```
+GET https://www.okx.com/api/v5/market/candles?instId=BTC-USDT-SWAP&bar=15m&limit=2
+  Origin: http://127.0.0.1:8792
+→ HTTP/2 200
+→ access-control-allow-origin: http://127.0.0.1:8792      （反射任意 Origin）
+```
+
+- 这是个**「简单请求」**（无自定义头、参数全在 query）→ **连 OPTIONS 预检都不会发**
+- ⚠️ **`bar` 大小写是铁律**：`1h` / `4h` 小写 → `{"code":"51000","msg":"Parameter bar error"}`，**必须 `1H` / `4H` / `1D`**（只有分钟级 `15m`/`30m` 是小写）
+- `limit` 实测**上限可到 300**（不是文档常见的 100）
+- ⚠️ **量能取第 7 列 `volCcy`（币），绝不能取第 6 列 `vol`（张）**——`BTC-USDT-SWAP` 的 `ctVal = 0.01`，取错就是**整整 100 倍**（2026-08 踩过，见仓库铁律）
+- ⚠️ 本机 **OKX 直连不通（curl `http=000`）**，必须走 Clash 代理 `127.0.0.1:10809`；curl 直连 + 代理分别实测过
+
+## 31.4 数据量实测（2026-10-08）
+
+**`share/data.js` 构成**：总 **17,025,757 B = 16.24 MB**，gzip **6.04 MB**（≈ 单次提交落盘量）
+
+| 周期 | 根数 | 字节 | 每根 | 占比 |
+|---|---:|---:|---:|---:|
+| **15m** | 248,301 | 12,645,286 | 50.9 | **74%** |
+| 1h | 62,076 | 3,359,779 | 54.1 | 20% |
+| 4h | 15,520 | 870,194 | 56.1 | 5% |
+| 1d | 2,588 | 150,416 | 58.1 | 1% |
+
+覆盖 2019-09-08 → 2026-10-08（2586 天）。
+
+**方案 A 每次刷新要拉多少**（`limit=300` 实测单行 ≈ 101 B）：
+
+| 周期 | 请求 `bar` | 覆盖时长 |
+|---|---|---:|
+| 15m | `15m` | ≈ 75 小时 |
+| 1h | **`1H`** | ≈ 12.5 天 |
+| 4h | **`4H`** | ≈ 50 天 |
+| **合计** | 3 个请求 | **≈ 30 KB / 次** |
+
+- 每 5 分钟一次 → 挂机 24 小时 ≈ **8.6 MB/天**流量，**仓库增长 0**
+- **1d 不单独拉**：沿用铁律，由 4h 重聚合（OKX 原生 1D 锚定 16:00 UTC，会与历史 00:00 UTC 网格错位）——**四个周期"都更新"是通过 3 次抓取 + 1 次重算达成的**
+
+## 31.5 实现要点
+
+全部逻辑在 `share/app.js` 末尾的 `§31` 段（约 137 KB 那个共用文件）。
+
+1. **只在 live 实例启用**：`liveShouldRun()` → `APP_INSTANCE === 'live'`；复盘入口连状态位都不创建
+2. **常量**：`LIVE_INTERVAL_MS = 5 * 60 * 1000`、`LIVE_LIMIT = 300`、`LIVE_PERIODS = ['15m','1h','4h']`、`LIVE_BAR = {'15m':'15m','1h':'1H','4h':'4H'}`、`LIVE_DAILY_RECOMPUTE = 5`
+3. **抓取**：`Promise.all` 并发 3 个 `fetch(url, {cache:'no-store'})`；**任一失败即整体判定失败**（宁可全不补，也不要补出半个错的口径）
+4. **合并 `liveMerge()`**：按 `ts`（分钟）二分定位，**同 ts 覆盖、新 ts 追加**，脏数据丢弃；返回 `{added, replaced, minIdx, total}`
+5. ⚠️ **必须重建数据源**：`makeInlineDS(arr)` 的 `len` 是**创建时的快照**（`len: arr.length`），直接 push 进原数组**不生效** → 合并后必须 `DS = makeInlineDS(...)`
+6. ⚠️ **EMA 缓存要回退**：`emaFull` / `emaFullLen` 以**EMA 周期（20/120）为键**，不是数据周期；合并起点之后的部分必须置 `emaFullLen[n] = minIdx` 才会重算，否则 EMA 会停在旧值
+7. **视图不跳 `liveAfterMerge()`**：合并前记下右边缘 `rightTs`；原本停在最右就继续贴最右，否则用现有 `findIdxByTime(rightTs)` 找回同一根
+8. **1d 重算 `liveDeriveDaily()`**：按 UTC 00:00 锚定重聚合最近 5 个 UTC 日，**连当日那根未收盘的一起重算**
+9. **状态位**：顶栏右侧 `#liveStatus`（`margin-left:auto`），绿 `#4ade80` 成功 / 黄离线 / 灰补数中；**不写 localStorage**
+10. **切回前台立刻补一次**：`visibilitychange` + `document.hidden` 守卫，定时器在隐藏时不空转
+
+## 31.6 交互细节（状态位文案）
+
+| 状态 | 颜色 | 文案 |
+|---|---|---|
+| 补到新数据 | 绿 `#4ade80` | `数据至 10-08 23:45 · 刚刚` |
+| 已是最新 | 绿 | `数据至 … · N 分钟前` |
+| 拉取失败 | 黄 | `离线 · 数据至 10-08 04:45` |
+| 正在补 | 灰 | `补数据中…` |
+
+- 复盘入口：**不创建该元素**（`document.getElementById('liveStatus') === null`）
+- 失败**不弹窗、不打断操作**，图表继续用内置数据正常渲染
+
+## 31.7 验收标准
+
+- E1 `live` 打开后 `数据至` 与实际时间差 ≤ 5 分钟，右上角绿色状态位出现
+- E2 四个周期末根都前进：15m / 1h / 4h 追加、**1d 重算**（锚定 UTC 00:00）
+- E3 **复盘入口数据逐字节不变**（15m 仍是内置末根），且没有 `#liveStatus`
+- E4 断网 / 无代理时退化为黄色 `离线 · 数据至 …`，图表仍可正常缩放、步进
+- E5 合并后 K 线连续、EMA20/EMA120 平滑无断点、**量能柱不出现 100 倍台阶**
+- E6 磁盘上的 `share/data.js` **sha256 不变**（只在内存合并）
+- E7 切走再切回标签页，立刻补一次
+
+## 31.8 测试策略
+
+- `tests/regression.test.cjs` 新增 **§31**（26 条断言）：`__API__` 暴露 `liveShouldRun / liveSetEnabled / liveSetFetch / liveUrl / liveParse / liveMerge / liveDeriveDaily / liveRefreshTick / liveRefreshStart / liveRefreshStop / liveGetStatus / liveIntervalMs / livePeriods`
+  - 31.1 请求参数（`1H`/`4H` 大写、`limit=300`）
+  - 31.2 解析（**取 `volCcy` 而非 `vol`**）
+  - 31.3 合并幂等（同一批数据补两次结果一致）
+  - 31.4 1d 重聚合锚定 UTC 00:00
+  - 31.5 端到端 tick（`liveSetEnabled(true)` 绕过沙箱的 `review` 实例）
+  - 31.6 接口报错 → **一个字节都没改**，静默降级
+  - 31.7 复盘实例下 **tick 一个请求都不发**（`liveSetEnabled(null)`）
+- 基线：**369 → 395 PASS / 0 FAIL**
+- `tests/smoke_entries.cjs`：8 → **10 PASS**（新增两条——看盘有 `#liveStatus`、复盘没有）
+- `NODE_PATH=… RENDER=1 node --max-old-space-size=3072 tests/regression.test.cjs` → 真画布下仍 **395 PASS / 0 FAIL**，出图复核
+
+## 31.9 风险与对策
+
+| 风险 | 对策 |
+|---|---|
+| 浏览器连不上 `www.okx.com`（国内需 Clash 有 OKX 规则 + 系统代理开着） | **自动降级**成"和现在完全一样"，不更差；状态位明示 `离线` |
+| 拉回来的 15m 与历史段口径不一致 | 复用同一个 `volCcy` 口径 + 同一条 1d 聚合规则；`validate_data.cjs` 守 gap/mis/量能台阶 |
+| 两入口共用 `share/app.js`，改坏复盘 | 刷新器整体被 `liveShouldRun()` 包住；§31.7 + smoke 两条专门守这件事 |
+| 长时间挂机流量 | 每次 ≈30 KB / 5 分钟；`document.hidden` 时定时器不空转 |
+| 头部浏览器代理层差异 | 实测：headless Chrome 需 `HTTPS_PROXY=http://127.0.0.1:10809` 才走 Clash；**普通 Chrome/Safari 读系统代理，无需额外设置** |
+
+## 31.10 完成定义
+
+- [x] PRD §31 写完（背景 / 目标 / 方案选型 / 数据量 / 实现要点 / 验收 / 测试 / 风险）
+- [x] `tests/regression.test.cjs` §31 断言先跑出红 → 实现后转绿（**395 PASS / 0 FAIL**）
+- [x] `tests/smoke_entries.cjs` 10 PASS / 0 FAIL；`build_live.cjs --check` → `[OK]`
+- [x] `RENDER=1` 真画布全绿 + 右端出图复核（K 线接续、EMA 平滑、量能无 100 倍台阶）
+- [x] **真浏览器端到端**（headless Chrome + 代理）：
+  - 看盘：`数据至 10-08 23:45 · 刚刚`，15m 248,301 → 248,345（+44 根）、1h +11、4h +2、1d 重算，右端出图无缝
+  - 复盘：等同样 12 秒，四个周期**一根都没加**，无 `#liveStatus`
+  - 访问前后 `share/data.js` **sha256 一致**（`db7075df…`）
+- [x] 提交并推送
