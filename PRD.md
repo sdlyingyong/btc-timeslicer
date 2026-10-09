@@ -2149,3 +2149,153 @@ GET https://www.okx.com/api/v5/market/candles?instId=BTC-USDT-SWAP&bar=15m&limit
   - 复盘：等同样 12 秒，四个周期**一根都没加**，无 `#liveStatus`
   - 访问前后 `share/data.js` **sha256 一致**（`db7075df…`）
 - [x] 提交并推送
+
+---
+
+# 附：§32 本次修改 — 自选看盘 MVP（多币种 + WebSocket 实时）
+
+> 分支：`feat/watchlist-mvp`（从 `main` 切出）。工作流照旧：**先 PRD → 先测试（红）→ 实现（绿）→ 真浏览器端到端 → 部署**。
+
+## 32.1 背景与需求
+
+用户原话（2026-10-09）：
+
+> 「跟我讲讲设计 如何能够做到自选的几个 能够实时看盘 有哪几种方案 优缺点呢」
+> 「先只要最小可用版本吧 然后开一个新的分支 写好部署上去 先 prd 测试」
+
+动机链：用户看 OKX 网页 K 线时发现**缩放被限制**，影响「看图完整性」。现场答疑结论：
+
+- OKX 网页 / App **不能无限缩放**。缩放下界 = 网页自己加载的那批历史（REST `limit` 上限 300、滚到底即止，量级几百~一千多根）；上界 = 单根蜡烛占屏的最大宽度。
+- **更宽的屏只能解决一半**：同一缩放下可视根数 ≈ `横向像素 ÷ 每根占的像素`，1920 → 3440 是 **+79%**（线性）；但撞上「只加载这么多根」的天花板后，宽屏只是把同一批蜡烛拉胖。
+- 宽屏真正的价值在**自己的图**上兑现：本仓库 15m 全量 248,301 根内联在本地、缩放下界 = 全量、无天花板；看全历史时 1920 屏每像素扛 ~146 根、3440 屏 ~82 根（清晰度 +44%）。
+
+结论：**别买屏，先扩渲染与自选**。于是本轮把时光机从「单标的」扩成「自选多币种 + 实时看盘」。
+
+## 32.2 现状与差距
+
+| 项 | 现状（§31 后） | 差距 |
+|---|---|---|
+| 标的 | `SYMBOLS = { BTC }`，单标的 | 需要自选列表 |
+| 数据 | `share/data.js` 内联 BTC 全量（17 MB） | 第二个币不能再来一个 17 MB |
+| 实时 | 看盘实例每 5 分钟 REST 轮询（`limit=300`） | 不是「实时」；且限频 40 次/2s 是**共享**的 |
+| 界面 | 左侧竖排工具条，无自选列表 | 缺「一眼扫多个品种」的入口 |
+
+**🎯 关键发现（决定 MVP 成本）**：`SYMBOLS` 早就是 map，工具栏按 `data-sym` 绑定，`linesStore[curSym]` / `viewStore[curSym + '|' + cur]` 也早已按标的分离 —— **多币种的地基已经在代码里了**。MVP 只需「喂第二个币的数据 + 加一个列表 UI」，不需要重写渲染。
+
+## 32.3 方案选型（四条取数通道）
+
+| 方案 | 机制 | 优点 | 缺点 |
+|---|---|---|---|
+| **A 静态内联**（现状） | 构建时把全量 K 线塞进 `share/data.js` | 离线可看全历史；零后端；缩放下界 = 全量 | **每币 ~17 MB，N 个币直接爆**；仍是分钟级 |
+| **B REST 轮询**（§31 在用） | 前端每 N 秒 `fetch market/candles` | 最简单；断线好恢复；可按需懒加载 | 限频 40 次/2s **共享**，10 币 × 4 周期一刷就顶满；做不到秒级 |
+| **C WebSocket 多订阅** ⭐ | 一条 WS，`args` 里塞 N 个 `instId` | **秒级推送**；请求数**不随币种增长**；一条连接 | 要自管心跳 / 重连 / 断线补数；后台标签被浏览器节流 |
+| **D 自建后端中转** | Worker 维护上游 WS，前端连自己的端点 | 前端只连一处；可统一缓存与口径 | 破掉「纯静态零后端」底线；多一份运维与成本 |
+
+**选型：C 为主 + B 兜底 + A 复用。**
+即「**分层数据源**」：主标的（BTC）沿用内联全量（保住深历史与无限缩放），新增标的（ETH）走 REST 首屏 + WS 增量；WS 断开时**降级**回 §31 的 REST 轮询，绝不假装有数据。
+
+### 32.3.1 界面选型（为什么不做多图网格）
+
+| 方案 | 评价 |
+|---|---|
+| 多图网格（2/4/6 图） | ❌ 每块都小、历史都看不深；M1 / 8 GB 同时渲染 N 个 canvas 会顶满（本机 WorkBuddy 已常驻 ~920 MB） |
+| **列表 + 单主图** ⭐ | ✅ 信息密度与清晰度兼顾；主图完整保留时光机的画线 / 模拟 / 复盘能力 |
+| 单图 + 快捷键切换 | 备选（MVP 不展开） |
+
+## 32.4 MVP 范围
+
+**做：**
+
+1. 新入口 `watch/index.html`（`__APP_INSTANCE__='watch'`），由 `index.html` 派生，复用同一份 `share/app.js` + `share/data.js`。
+2. 自选列表：`BTC`（内联全量）+ `ETH`（REST 首屏 + WS 增量），列表显示 **代码 / 最新价 / 24h 涨跌幅 / 迷你走势**。
+3. 点击列表项 → 主图切换标的（沿用现有 `setView`，画线 / 视图位置按标的独立记忆）。
+4. 实时：OKX 公共 WS `wss://ws.okx.com:8443/ws/v5/public`，一条连接订阅 `candle15m` / `candle1H` / `candle4H` × N 个 `instId`。
+5. 断线 **fail-safe**：状态位显式显示 `离线`，并自动降级为 REST 轮询兜底（60 s），重连成功即停轮询。
+6. 存储：新键一律走 `STORAGE_NS`（watch 实例 → `watch__` 前缀），与复盘 / 看盘互不污染。
+
+**非目标（本期不做）：**
+
+- 自选币种的增删编辑 UI（MVP 先硬编码 BTC + ETH 两个；接口留好，后续接 `kline_watchlist_v1`）
+- IndexedDB 历史缓存与 LRU 淘汰（ETH 历史先靠 REST `limit=300` + 运行期累积）
+- 多图网格布局
+- 把 BTC 也改成 REST/WS 源（复盘要求可复现，BTC 保持内联）
+
+## 32.5 实现要点
+
+全部新增代码集中在 `share/app.js` 末尾的 `// ===== §32 …` 块（可用 `grep -n "§32" share/app.js` 定位），并遵循以下 6 条：
+
+1. **实例门控**：整体被 `watchShouldRun()` 包住（`APP_INSTANCE === 'watch'`）。复盘页与看盘页**一行都不受影响**：自选列表 DOM 只在 watch 实例创建（复盘页连元素都不存在）。
+2. **列表面板运行时创建**：`watchBuildSidebar()` 用 JS 建 DOM 并插进 `#toolbar` 顶部 —— **不改 `index.html` 壳**，因此 `build_live.cjs --check` 的派生物也自动对齐。
+3. **可注入的网络层**：照抄 §31 的 `liveSetFetch` 模式 —— `watchSetFetch(f)` / `watchSetWS(ctor)`，测试注入假实现，**不 patch 全局**。
+4. **量能口径铁律**：复用 §31 的 `liveParse()`（同一套 9 字段 OKX 原始行解析），量能取**第 7 列 `volCcy`**，绝不取第 6 列 `vol`（100 倍事故老规矩）。
+5. **1d 由 4h 重聚合**：新标的同样遵守「1d 锚定 **UTC 00:00**」；`watchDeriveDaily(sym)` 是 `liveDeriveDaily` 的按标的多实例版本。
+6. **合并后必须重建 DS**：`makeInlineDS()` 的 `len` 是创建时快照 —— 追加后必须 `DS = makeInlineDS(s.data[s.map[cur]])`，并且 EMA 缓存 `emaFullLen[n]` 要回退到改动点。
+
+### 32.5.1 新增常量与函数（供测试断言）
+
+| 分组 | 名称 |
+|---|---|
+| 常量 | `WATCH_WS_URL`、`WATCH_NS_MAP`（`15m→candle15m` / `1h→candle1H` / `4h→candle4H`）、`WATCH_SYMBOLS`、`WATCH_KEY`、`WATCH_POLL_MS` |
+| 门控 | `watchShouldRun()` / `watchSetEnabled(v)` |
+| 取数 | `watchSetFetch` / `watchRestUrl(period, inst)` / `watchInstOf(sym)` |
+| 装载 | `watchPutSymbol(sym, period, bars)` / `watchMergeInto(sym, period, bars)` / `watchDeriveDaily(sym)` |
+| WS | `watchSetWS(ctor)` / `watchWsArgs()` / `watchOnWsMessage(raw)` / `watchConnect` / `watchDisconnect` / `watchOnOpen` / `watchOnClose` |
+| 降级 | `watchFallbackPoll()` / `watchGetStatus()` / `watchRenderStatus()` |
+| 视图 | `watchStats(sym)`（纯函数：最新价 / 24h 涨跌幅 / sparkline 点串） / `watchBuildSidebar()` / `watchSelect(sym)` |
+
+## 32.6 交互细节
+
+- 自选列表每行：左侧「代码 + 最新价」（等宽数字），中间 **迷你走势 sparkline**（近 48 根 1h 收盘），右侧 **涨跌幅**（**涨红 `#ef4d4d` / 跌绿 `#2fbf71`**，沿用仓内既有约定，见 `app.js:1453`）。
+- 当前标的一行高亮（`background: var(--color-background-secondary)` 等效色）。
+- 顶栏右侧状态位：`WS 已连接 · 刚刚` / `离线 · 数据至 MM-DD HH:mm`。
+- 点击行 → `setView(sym, null)`，保持当前周期与缩放级别（`setView` 既有语义）。
+
+## 32.7 验收标准
+
+- [ ] `feat/watchlist-mvp` 分支上 `watch/index.html` 可由 `node build_live.cjs` 生成、`--check` 返回 `[OK]`
+- [ ] `watch/` 页能列出 BTC + ETH 两行，价格 / 涨跌幅 / sparkline 正常
+- [ ] 点击 ETH → 主图切换，画线与视图位置按标的独立记忆，切回 BTC 无串台
+- [ ] WS 连上后状态位变**绿**（`WS 已连接`），15m 末根随时间推进
+- [ ] **拔网线 / 关代理后状态位变黄 `离线`，且自动走 REST 轮询兜底；恢复后自动重连**
+- [ ] 复盘 `/` 与看盘 `/live/` 两个入口**行为零变化**（无自选列表、无 `watch__` 键、无额外请求）
+- [ ] 回归测试：既有 395 条全绿 + §32 新增全绿；`smoke_entries.cjs` 覆盖三入口
+
+## 32.8 测试策略
+
+**先红后绿**。§32 断言追加在 `tests/regression.test.cjs` 的「汇总」之前，分 9 组：
+
+| 组 | 覆盖 |
+|---|---|
+| 32.1 自选配置 | `watchList()` = BTC/ETH；`watchInstOf` 映射；REST URL 带 `instId` 与 `bar=15m` / `bar=1H` 大小写铁律 |
+| 32.2 数据装载 | `watchPutSymbol` 建出 `SYMBOLS.ETH` 且四周期 map 齐；写入行按时间升序；量能取第 7 列 `volCcy` |
+| 32.3 合并 | 追加 / 覆盖 / **幂等**；不污染 BTC |
+| 32.4 1d 重聚合 | ETH 的 1d 末根锚定 **UTC 00:00**，OHLC 与 vol 汇总正确 |
+| 32.5 WebSocket | `watchWsArgs()` = 3 周期 × 2 币 = 6 条订阅且 channel 名正确；推送落入对应 symbol+period；未知 `instId` 忽略；脏消息静默丢弃 |
+| 32.6 降级 fail-safe | 未连接 → `离线`；`onOpen` → 连上且停轮询；`onClose` → 转离线并起轮询；断开后不再发消息 |
+| 32.7 实例隔离 | review / live 实例下 `watchShouldRun() === false`；`watchInit()` 一个请求都不发；静态检查自动启动被门控包住 |
+| 32.8 存储命名空间 | `WATCH_KEY` 走 `STORAGE_NS + 'kline_watchlist_v1'`；无裸键名 |
+| 32.9 构建产物 | `watch/index.html` 存在、标记 `watch`、引用 `../share/app.js`、与 `build_live.cjs` 生成结果**逐字节一致** |
+
+`tests/smoke_entries.cjs` 增加第三入口：`watch/` 页无脚本错误、实例标记 = `watch`、**有**自选列表 DOM、复盘/看盘**没有**自选列表 DOM、三入口的 `localStorage` 键互不覆盖。
+
+**⚠️ 需要同步修改的既有断言**：`§30 页内标题区分复盘/看盘` 目前硬断言 `"(APP_INSTANCE === 'live' ? '（看盘）' : '（复盘）')"`。§32 给标题加第三态 `（自选）` 后该字符串失效 —— 这条断言**随实现一起更新**（属预期内的测试演进，会在提交信息里注明）。
+
+## 32.9 风险与对策
+
+| 风险 | 对策 |
+|---|---|
+| WS 在浏览器侧不读系统代理（headless Chrome 尤其） | 与 §31 同一处置：本地 E2E 必须 `export HTTPS_PROXY=http://127.0.0.1:10809`；真实 Chrome/Safari 读系统代理无需设置。连不上时**自动降级**成轮询，不更差 |
+| WS 断了却显示成「有数据」 | 硬约束：状态位与数据源同源 —— `connected=false` 时**必须**显式 `离线`，并落回轮询。**这是本项目与 clash-go 同一条 fail-safe 线** |
+| 多币种又把量能单位搞错（100 倍） | 一律复用 `liveParse()` 取 `volCcy`；新标的接入时用 `validate_data.cjs` 的滚动台阶法抽查 |
+| 改 `share/app.js` 影响复盘 / 看盘 | 全部被 `watchShouldRun()` 包住；§32.7 + smoke 三入口断言专门守这件事 |
+| ETH 只有 300 根历史，缩不出深历史 | **MVP 已知取舍**（写进非目标）：历史靠运行期累积 + 后续接 IndexedDB 缓存；BTC 主标的仍有全量 24.8 万根 |
+| 后台标签被节流 / 长时间挂机流量 | WS 是推送制（无轮询请求）；`document.hidden` 时不空转 |
+
+## 32.10 完成定义
+
+- [ ] PRD §32 写完（背景 / 现状 / 选型 / 范围 / 实现要点 / 交互 / 验收 / 测试 / 风险）
+- [ ] `tests/regression.test.cjs` §32 断言**先红** → 实现后**转绿**（既有 395 条不回归）
+- [ ] `tests/smoke_entries.cjs` 三入口全绿；`build_live.cjs --check` → `[OK]`
+- [ ] **真浏览器端到端**：`watch/` 页 WS 连上状态位变绿、15m 末根推进；断代理后变黄 `离线` 并降级轮询
+- [ ] 分支提交 + 推送 `origin/feat/watchlist-mvp`，远端 sha 与本地一致
+- [ ] 部署上线（或产出可访问预览链接）；线上核验 4+1 个文件哈希
