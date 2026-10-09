@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BTC 时光机 · 自选</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: #0b0e14; color: #cdd3e0;
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    display: flex; flex-direction: row;
+    -webkit-font-smoothing: antialiased;
+  }
+  #toolbar {
+    display: flex; flex-direction: column; align-items: stretch; gap: 16px;
+    padding: 16px 12px; border-right: 1px solid #161c28;
+    width: 178px; min-width: 178px; overflow-y: auto; flex: 0 0 auto;
+    background: #0c0f16;
+  }
+  .title { font-size: 15px; font-weight: 700; color: #f0f3fa; padding: 2px 4px 0; letter-spacing: .3px; }
+  .title small { display:block; font-size:10.5px; font-weight:500; color:#5e6b82; margin-top:3px; letter-spacing:0; }
+  .group { display: flex; flex-direction: column; align-items: stretch; gap: 6px; padding: 13px 0 0; border-top: 1px solid #1a2030; }
+  .group:first-of-type { border-top: none; padding-top: 0; }
+  .group-label { font-size: 10.5px; color: #5e6b82; padding-left: 2px; letter-spacing: 1.2px; text-transform: uppercase; margin-bottom: 2px; }
+
+  /* ---- Button system ---- */
+  .periods button, .tools button, .symbols button, .trade button, .group button {
+    display: flex; align-items: center; gap: 9px;
+    background: #141a26; color: #9aa6bd;
+    border: 1px solid #232c3e; border-radius: 8px;
+    padding: 8px 10px; font-size: 13px; font-weight: 500; line-height: 1;
+    cursor: pointer; font-family: inherit; transition: background .15s, color .15s, border-color .15s, box-shadow .15s;
+    width: 100%; text-align: left;
+  }
+  .periods button:hover, .tools button:hover, .symbols button:hover, .trade button:hover, .group button:hover {
+    background: #1c2433; color: #dde4f1; border-color: #313c52;
+  }
+  .btn-ic { width: 15px; height: 15px; flex: 0 0 auto; opacity: .82; }
+  /* active: subtle tint + colored border + glow (category-colored) */
+  .symbols button.active { background: rgba(47,191,113,.12); color: #74f0a8; border-color: rgba(47,191,113,.45); }
+  .periods button.active { background: rgba(59,130,246,.13); color: #8ab4ff; border-color: rgba(59,130,246,.45); }
+  .tools button.active { background: rgba(255,138,47,.12); color: #ffb072; border-color: rgba(255,138,47,.45); }
+  .tools button[data-tool="cursor"].active { background: rgba(77,210,255,.13); color: #9fe4ff; border-color: rgba(77,210,255,.45); box-shadow: 0 0 0 1px rgba(77,210,255,.15); }
+  /* §24 供应线(绿)/需求线(红)：active 态与线色同色系 */
+  .tools button[data-tool="supply"].active { background: rgba(47,191,113,.13); color: #74f0a8; border-color: rgba(47,191,113,.45); box-shadow: 0 0 0 1px rgba(47,191,113,.15); }
+  .tools button[data-tool="demand"].active { background: rgba(239,77,77,.13); color: #ff9a9a; border-color: rgba(239,77,77,.45); box-shadow: 0 0 0 1px rgba(239,77,77,.15); }
+  .periods button:disabled { opacity: .35; cursor: not-allowed; }
+  /* action variants */
+  button.danger:hover { background: rgba(239,77,77,.14); color: #ff9a9a; border-color: rgba(239,77,77,.5); }
+  button.primary { background: rgba(77,210,255,.10); color: #9fe4ff; border-color: rgba(77,210,255,.4); }
+  button.primary:hover { background: rgba(77,210,255,.18); }
+  .tools button.trade-active { background: rgba(192,132,252,.16); color: #d6b3ff; border-color: rgba(192,132,252,.5); box-shadow: 0 0 0 1px rgba(192,132,252,.18); }
+
+  /* checkboxes */
+  .chk { display: flex; align-items: center; gap: 7px; font-size: 13px; color: #9aa6bd; cursor: pointer; user-select: none; padding: 2px 2px; }
+  .chk input { accent-color: #4dd2ff; width: 15px; height: 15px; }
+  .chk .sw { width: 11px; height: 3px; border-radius: 2px; display: inline-block; }
+
+  /* segmented 做多/做空 */
+  .seg { display: flex; gap: 4px; background: #0e1320; border: 1px solid #232c3e; border-radius: 9px; padding: 3px; }
+  .seg-btn { flex: 1; border: none; background: transparent; color: #9aa6bd; font-size: 12.5px; font-weight: 600; padding: 7px 0; border-radius: 6px; cursor: pointer; transition: .15s; font-family: inherit; }
+  .seg-btn:hover { color: #dde4f1; }
+  .seg-btn.long.active { background: rgba(47,191,113,.20); color: #74f0a8; }
+  .seg-btn.short.active { background: rgba(239,77,77,.20); color: #ff9a9a; }
+
+  /* main */
+  #main { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; position: relative; }
+  #topbar { display: flex; align-items: center; gap: 14px; padding: 9px 16px; border-bottom: 1px solid #161c28; min-height: 36px; background: #0c0f16; }
+  #info { font-family: "SFMono-Regular", Consolas, monospace; font-size: 12.5px; color: #9aa6bd; font-variant-numeric: tabular-nums; }
+  #info b { color: #e8ecf4; }
+  .ema-note { font-size: 10.5px; color: #5a6478; margin-left: 4px; font-variant-numeric: tabular-nums; }
+  #loading { font-size: 11.5px; color: #ffb547; }
+  #tradeInfo { font-size: 11.5px; color: #ffd166; font-variant-numeric: tabular-nums; }
+  #chart { flex: 1; width: 100%; display: block; cursor: crosshair; min-height: 0; background: #0b0e14; }
+
+  /* hint */
+  #hint { display: flex; align-items: center; gap: 12px; padding: 8px 14px; border-top: 1px solid #161c28; background: #0c0f16; }
+  .tip-text { flex: 1; text-align: center; font-size: 11.5px; color: #6b7689; letter-spacing: .2px; }
+  .tip-text b { color: #9aa6bd; font-weight: 600; }
+  #hint kbd { background:#1a2030; border:1px solid #2a3142; border-radius:4px; padding:0 5px; font-size:11px; color:#9aa6bd; font-family: "SFMono-Regular", Consolas, monospace; }
+  #hintClose { flex: 0 0 auto; background: none; border: none; color: #4a5468; font-size: 17px; line-height: 1; cursor: pointer; padding: 0 4px; transition: color .15s; }
+  #hintClose:hover { color: #cdd3e0; }
+
+  /* 盈亏比面板 */
+  #tradePanel {
+    position: absolute; top: 46px; right: 12px; z-index: 20;
+    width: 240px; padding: 14px 15px; border-radius: 12px;
+    background: rgba(15,20,30,0.95); border: 1px solid #2a3142;
+    box-shadow: 0 12px 36px rgba(0,0,0,0.5); backdrop-filter: blur(6px);
+    font-family: "SFMono-Regular", Consolas, monospace; font-variant-numeric: tabular-nums;
+    display: none;
+  }
+  #tradePanel.show { display: block; }
+  #tradePanel h4 { font-size: 13px; color: #e8ecf4; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; font-family: inherit; }
+  #tradePanel h4 .dir { font-size: 11.5px; padding: 2px 10px; border-radius: 7px; font-weight: 600; }
+  .dir-long { background: rgba(47,191,113,.20); color: #74f0a8; }
+  .dir-short { background: rgba(239,77,77,.20); color: #ff9a9a; }
+  #tradePanel .row { display: flex; justify-content: space-between; align-items: center; font-size: 12.5px; padding: 4px 0; color: #8a93a8; border-bottom: 1px solid rgba(42,49,66,.5); }
+  #tradePanel .row:last-of-type { border-bottom: none; }
+  #tradePanel .row b { color: #e8ecf4; font-weight: 600; }
+  #tradePanel .row b#tradeEntry { color: #e8ecf4; }
+  #tradePanel .row b#tradeTP { color: #74f0a8; }
+  #tradePanel .row b#tradeSL { color: #ff8585; }
+  #tradePanel .tp-input { width: 84px; background: #0e1220; border: 1px solid #2a3142; color: #cdd3e0; border-radius: 5px; padding: 3px 6px; font-size: 12px; font-family: monospace; text-align: right; }
+  #tradePanel .tp-input:focus { outline: none; border-color: #4dd2ff; }
+  #tradePanel .rr b { color: #ffce54; font-size: 15px; }
+  #tradePanel .verdict { margin-top: 10px; font-size: 11.5px; padding: 8px 10px; border-radius: 8px; line-height: 1.5; }
+  #tradePanel .vgood { background: rgba(47,191,113,.14); color: #5fe3a1; }
+  #tradePanel .vbad { background: rgba(239,77,77,.14); color: #ff8585; }
+  #tradePanel .vtip { margin-top: 8px; font-size: 10.5px; color: #6b7689; line-height: 1.5; }
+
+  /* 专注计时 */
+  .focus-group .focus-disp {
+    font-family: "SFMono-Regular", Consolas, monospace;
+    font-size: 22px; font-weight: 700; text-align: center;
+    color: #f0f3fa; padding: 6px 0 8px; font-variant-numeric: tabular-nums;
+    letter-spacing: 1px; background: #0e1320; border: 1px solid #232c3e;
+    border-radius: 9px;
+  }
+  .focus-group .focus-disp.running { color: #74f0a8; border-color: rgba(47,191,113,.45); }
+  .focus-btns { display: flex; gap: 6px; }
+  .focus-btns button { flex: 1; }
+  #focusHistory { margin-top: 6px; }
+  #focusPanel {
+    position: absolute; top: 46px; right: 12px; z-index: 20;
+    width: 320px; padding: 14px 15px; border-radius: 12px;
+    background: rgba(15,20,30,0.97); border: 1px solid #2a3142;
+    box-shadow: 0 12px 36px rgba(0,0,0,0.5); backdrop-filter: blur(6px);
+    display: none;
+  }
+  #focusPanel.show { display: block; }
+  #focusPanel h4 { font-size: 13px; color: #e8ecf4; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
+  #focusPanel .f-summary { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  #focusPanel .f-stat { flex: 1 1 45%; background: #0e1320; border: 1px solid #232c3e; border-radius: 8px; padding: 8px 10px; }
+  #focusPanel .f-stat b { display: block; font-size: 16px; color: #74f0a8; font-family: "SFMono-Regular", Consolas, monospace; }
+  #focusPanel .f-stat span { font-size: 10.5px; color: #5e6b82; }
+  #focusPanel .f-list { max-height: 260px; overflow-y: auto; border-top: 1px solid rgba(42,49,66,.5); }
+  #focusPanel .f-item { display: flex; justify-content: space-between; padding: 7px 2px; font-size: 12px; border-bottom: 1px solid rgba(42,49,66,.4); font-variant-numeric: tabular-nums; }
+  #focusPanel .f-item b { color: #e8ecf4; font-family: "SFMono-Regular", Consolas, monospace; font-weight: 600; }
+  #focusPanel .f-item span { color: #8a93a8; font-family: "SFMono-Regular", Consolas, monospace; }
+  #focusPanel .f-empty { color: #5e6b82; font-size: 12px; text-align: center; padding: 14px 0; }
+  #focusClear { margin-top: 10px; width: 100%; }
+
+
+  /* ---- §19 模拟交易 面板 + 工具栏 ---- */
+  .sim-group { flex-wrap: wrap; }
+  .sim-sel, .sim-inp { background: #11161f; color: #dde4f1; border: 1px solid #2a3142; border-radius: 7px; font-size: 12.5px; font-family: inherit; padding: 6px 8px; }
+  .sim-inp { width: 64px; }
+  .sim-inp.sim-size { width: 52px; }
+  .sim-group button { background: #182031; color: #cdd3e0; border: 1px solid #2a3142; border-radius: 7px; font-size: 12.5px; font-weight: 600; padding: 6px 11px; cursor: pointer; transition: .15s; font-family: inherit; }
+  .sim-group button:hover { border-color: #3a4458; }
+  .sim-group button.primary { background: rgba(47,191,113,.16); color: #7ee2a8; border-color: rgba(47,191,113,.45); }
+  .sim-group button.primary:hover { background: rgba(47,191,113,.26); }
+  .sim-group button.danger { background: rgba(239,77,77,.14); color: #ff9a9a; border-color: rgba(239,77,77,.4); }
+  .sim-group button.danger:hover { background: rgba(239,77,77,.24); }
+  .sim-panel { position: absolute; right: 70px; top: 56px; z-index: 30; width: 196px; background: rgba(12,18,28,.94); border: 1px solid #2a3142; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.45); font-size: 12px; color: #cdd3e0; backdrop-filter: blur(4px); }
+  .sim-panel .sim-h { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; font-weight: 700; color: #e7ecf5; border-bottom: 1px solid #1d2433; }
+  .sim-panel .sim-h button { background: none; border: none; color: #6b7689; font-size: 15px; line-height: 1; cursor: pointer; padding: 0 4px; }
+  .sim-panel .sim-h button:hover { color: #cdd3e0; }
+  .sim-panel #simBody { padding: 8px 10px; max-height: 52vh; overflow-y: auto; }
+  .sim-pos { padding: 8px 0; border-bottom: 1px dashed #1d2433; }
+  .sim-pos:last-child { border-bottom: none; }
+  .sim-pos-h { display: flex; align-items: center; justify-content: space-between; margin-bottom: 5px; }
+  .sim-pos-h b { font-size: 13px; }
+  .sim-st { font-size: 11px; color: #9aa6bd; }
+  .sim-row { display: flex; align-items: center; justify-content: space-between; padding: 1.5px 0; }
+  .sim-row span { color: #8590a3; }
+  .sim-row b { font-weight: 600; color: #dde4f1; }
+  .sim-log-h { margin-top: 8px; padding-top: 6px; border-top: 1px solid #1d2433; color: #9aa6bd; font-weight: 600; }
+  .sim-log { max-height: 160px; overflow-y: auto; }
+  .sim-log-i { padding: 2px 0; color: #aeb7c7; font-size: 11px; line-height: 1.4; word-break: break-all; }
+  /* ---- §27 工具条排序：按住拖动自定义顺序 ---- */
+  .group-label { cursor: grab; user-select: none; }
+  .group-label:active { cursor: grabbing; }
+  .tools > button, .tools > label.chk, .tools > .seg { cursor: grab; user-select: none; }
+  .tools > button:active, .tools > label.chk:active, .tools > .seg:active { cursor: grabbing; }
+  .sz-drag { opacity: .42; outline: 1px dashed rgba(120,160,255,.55); outline-offset: 1px; border-radius: 8px; }
+  body.sz-sorting, body.sz-sorting * { cursor: grabbing !important; user-select: none !important; }
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <div class="title" id="title">多品种时光机<small>K线复盘 · 盈亏比</small></div>
+  <div class="group symbols" data-key="symbols">
+    <span class="group-label">标的</span>
+    <button data-sym="BTC" class="active">BTC</button>
+  </div>
+  <div class="group periods" data-key="periods">
+    <span class="group-label">周期</span>
+    <button data-p="1d">日线</button>
+    <button data-p="4h">4 小时</button>
+    <button data-p="1h">1 小时</button>
+    <button data-p="15m">15 分</button>
+  </div>
+  <div class="group" data-key="ma">
+    <span class="group-label">均线</span>
+    <label class="chk"><input type="checkbox" id="ema20" checked><span class="sw" style="background:#ffb454"></span>EMA20</label>
+    <label class="chk"><input type="checkbox" id="ema120" checked><span class="sw" style="background:#4ade80"></span>EMA120</label>
+    <span class="ema-note">均线≠涨跌</span>
+  </div>
+  <div class="group tools" data-key="tools">
+    <span class="group-label">画线工具</span>
+    <button data-tool="cursor" class="active" title="光标：查看数值、选择并拖拽已画对象">
+      <svg class="btn-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="7"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>光标
+    </button>
+    <button data-tool="hline" title="水平线：点击定位一条水平价格线">
+      <svg class="btn-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 12h16"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/></svg>水平线
+    </button>
+    <button data-tool="supply" title="供应线：点击定位一条绿色水平线（上方供给/压力）">
+      <svg class="btn-ic" viewBox="0 0 24 24" fill="none" stroke="#2fbf71" stroke-width="2" stroke-linecap="round"><path d="M4 12h16"/><circle cx="12" cy="12" r="1.6" fill="#2fbf71" stroke="none"/></svg>供应线
+    </button>
+    <button data-tool="demand" title="需求线：点击定位一条红色水平线（下方需求/支撑）">
+      <svg class="btn-ic" viewBox="0 0 24 24" fill="none" stroke="#ef4d4d" stroke-width="2" stroke-linecap="round"><path d="M4 12h16"/><circle cx="12" cy="12" r="1.6" fill="#ef4d4d" stroke="none"/></svg>需求线
+    </button>
+    <button data-tool="trend" title="趋势线：点两点画趋势，自动向两端延长">
+      <svg class="btn-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18L20 6"/><path d="M14 6h6v6"/></svg>趋势线
+    </button>
+    <button data-tool="channel" title="价格通道：点三点画平行通道（A/B 定基线，C 定平行线）">
+      <svg class="btn-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18L20 10"/><path d="M4 12L20 4"/></svg>通道
+    </button>
+    <button data-tool="hchannel" title="水平通道：点两点定位上/下两条水平线，成价格区间带">
+      <svg class="btn-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 8h16"/><path d="M4 16h16"/></svg>水平通道
+    </button>
+    <button data-tool="measure" title="测量%：点两点测量涨跌幅">
+      <svg class="btn-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 19L19 5"/><path d="M5 19v-3M9 15v-3M13 11v-3M17 7v-3"/></svg>测量%
+    </button>
+    <label class="chk" data-key="cont"><input type="checkbox" id="contDraw"><span class="sw" style="background:#6b7689"></span>连画</label>
+    <button id="clearLines" class="danger" title="清除所有画线">清除画线</button>
+    <button id="tradeEnter" title="盈亏比：按下定入场 → 拖出止盈 TP → 拖出止损 SL，三条线均可拖动实时计算">
+      <svg class="btn-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 21V4"/><path d="M6 4h13l-3 4 3 4H6"/></svg>盈亏比
+    </button>
+    <div class="seg" id="tradeDirSeg">
+      <button class="seg-btn long active" data-dir="long">做多</button>
+      <button class="seg-btn short" data-dir="short">做空</button>
+    </div>
+  </div>
+  <div class="group" data-key="axis">
+    <span class="group-label">坐标</span>
+    <label class="chk"><input type="checkbox" id="logscale" checked><span class="sw" style="background:#9aa6bd"></span>对数</label>
+  </div>
+  <div class="group" data-key="view">
+    <span class="group-label">视图</span>
+    <label class="chk"><input type="checkbox" id="keepTime" checked><span class="sw" style="background:#3fd0ff"></span>锁定时间</label>
+  </div>
+  <div class="group" data-key="memory">
+    <span class="group-label">记忆</span>
+    <button id="resetSession" class="danger" title="清除已记住的画线和浏览位置（含工具条排序），回到最新K线">重置刷新</button>
+  </div>
+  <div class="group focus-group" data-key="focus">
+    <span class="group-label">专注</span>
+    <div class="focus-disp" id="focusDisp">00:00</div>
+    <div class="focus-btns">
+      <button id="focusStart" class="primary">开始</button>
+      <button id="focusDone" class="danger" disabled>完成</button>
+    </div>
+    <button id="focusHistory" title="查看历史专注记录">历史记录</button>
+  </div>
+  <div class="group" data-key="trades">
+    <span class="group-label">交割单</span>
+    <button id="importTrades" class="primary">导入交割单 (Excel)</button>
+    <input type="file" id="tradeFile" accept=".xls,.xlsx" style="display:none">
+    <label class="chk"><input type="checkbox" id="showTrades" checked><span class="sw" style="background:#ffd166"></span>显示标注</label>
+    <button id="clearTrades" class="danger">清除交割单</button>
+  </div>
+  <div class="group sim-group" data-key="sim">
+    <span class="group-label">模拟</span>
+    <select id="simLev" class="sim-sel" title="杠杆倍数">
+      <option value="5">5x</option>
+      <option value="10" selected>10x</option>
+    </select>
+    <input id="simStop" class="sim-inp" type="number" placeholder="止损" title="止损价（留空=不设置）">
+    <input id="simSize" class="sim-inp sim-size" type="number" value="1" min="0.0001" step="0.0001" title="仓位数量">
+    <button id="simLong" class="primary">开多</button>
+    <button id="simShort" class="danger">开空</button>
+    <button id="simAdd">加仓</button>
+    <button id="simHalf">平半</button>
+    <button id="simFull">平全</button>
+    <button id="simClear" class="danger">清仓</button>
+  </div>
+</div>
+<div id="main">
+  <div id="tradePanel">
+    <h4>盈亏比 <span class="dir dir-long" id="tradeDir">做多</span></h4>
+    <div class="row"><span>入场价</span><b id="tradeEntry">-</b></div>
+    <div class="row"><span>入场K线</span><b id="tradeEntryTime" style="color:#9aa6bd;font-weight:500">-</b></div>
+    <div class="row"><span>止盈 TP</span><b id="tradeTP">-</b></div>
+    <div class="row"><span>止损 SL</span><b id="tradeSL">-</b></div>
+    <div class="row rr"><span>盈亏比</span><b id="tradeRR">-</b></div>
+    <div class="verdict vgood" id="tradeVerdict">-</div>
+    <div class="vtip">按下定入场 → 拖出止盈 → 拖出止损 · 拖动任一条线实时计算 · 切换多/空自动换位 · Del 删除</div>
+  </div>
+  <div id="focusPanel">
+    <h4>专注记录</h4>
+    <div class="f-summary">
+      <div class="f-stat"><b id="fTotalN">0</b><span>总次数</span></div>
+      <div class="f-stat"><b id="fTotalMs">0s</b><span>累计时长</span></div>
+      <div class="f-stat"><b id="fTodayN">0</b><span>今日次数</span></div>
+      <div class="f-stat"><b id="fTodayMs">0s</b><span>今日时长</span></div>
+    </div>
+    <div class="f-list" id="fList"></div>
+    <button id="focusClear" class="danger">清空历史</button>
+  </div>
+  <div id="topbar">
+    <span id="info"></span>
+    <span id="loading"></span>
+    <span id="tradeInfo"></span>
+  </div>
+  <canvas id="chart"></canvas>
+  <div id="hint">
+    <span class="tip-text">滚轮缩放 · 拖拽平移 · <kbd>←</kbd><kbd>→</kbd> 逐根步进 · <kbd>G</kbd> 日期跳转 · <kbd>Del</kbd> 删除选中 · 拖线或 <kbd>↑</kbd><kbd>↓</kbd> 上下移 · 重叠处可再点一次切换 · 「盈亏比」拖出入场/止盈/止损</span>
+    <button id="hintClose" title="隐藏提示">×</button>
+  </div>
+  <div id="simPanel" class="sim-panel" style="display:none">
+    <div class="sim-h">模拟持仓 <button id="simCloseX" title="隐藏面板">×</button></div>
+    <div id="simBody"></div>
+  </div>
+</div>
+
+
+<!-- ===================================================================
+     本页是「复盘」入口壳：逻辑在 share/app.js、数据在 share/data.js（唯一一份）。
+     另一个入口「看盘」由 build_live.cjs 从本文件生成到 live/index.html，
+     ⚠️ 不要手改 live/index.html —— 改完跑 node build_live.cjs 重新生成。
+     需要真正单文件离线版（发给别人/离线备份）跑：node build_offline.cjs
+     =================================================================== -->
+<script>window.__APP_INSTANCE__='watch';</script>
+<script src="../share/data.js"></script>
+<script src="../share/app.js"></script>
+</body>
+</html>

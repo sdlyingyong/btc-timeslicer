@@ -1297,7 +1297,7 @@ function syncPeriodButtons() {
   });
   if (!avail.has(cur)) cur = PERIODS.find(x => avail.has(x.p)).p;
   document.querySelector(`.periods button[data-p="${cur}"]`)?.classList.add('active');
-  document.getElementById('title').textContent = curSym + ' · 时光机' + (APP_INSTANCE === 'live' ? '（看盘）' : '（复盘）');
+  document.getElementById('title').textContent = curSym + ' · 时光机' + (APP_INSTANCE === 'live' ? '（看盘）' : APP_INSTANCE === 'watch' ? '（自选）' : '（复盘）');
 }
 
 function setLoading(msg) { document.getElementById('loading').textContent = msg || ''; }
@@ -3092,3 +3092,432 @@ resize();
 setView(START_SYM, START_PERIOD);
 // §31 看盘实例：每 5 分钟直连 OKX 补一次数据（复盘实例不启用）
 if (liveShouldRun()) liveRefreshStart();
+
+// =====================================================================
+// §32 自选看盘 MVP（watch 实例）：多币种 + WebSocket 实时
+//
+// 背景：用户看 OKX 网页 K 线时发现「缩放被限制」（缩放下界 = 网页自己加载的那批历史，
+//       量级几百~一千多根），影响看图完整性。结论：OKX / App 不能无限缩放，更宽的屏也
+//       只能提升「同一缩放下看到的根数」而突破不了数据天花板；真正能「一直缩」的只有
+//       本地全量数据 + 自研渲染 —— 也就是本仓库。
+// 方案（PRD §32.3）：C(WebSocket) 为主 + B(REST) 兜底 + A(内联全量) 复用 = 分层数据源
+//   · 主标的 BTC 沿用 share/data.js 内联全量（保住深历史与「无限缩放」）
+//   · 新增标的 ETH 走 REST 首屏 + WS 增量
+//   · WS 断开 → 状态位显式「离线」并降级回 REST 轮询，绝不假装有数据（fail-safe 硬约束）
+// 门控：整体被 watchShouldRun() 包住 —— 复盘页 / 看盘页一行都不受影响。
+// =====================================================================
+const WATCH_KEY = STORAGE_NS + 'kline_watchlist_v1';   // 自选列表（MVP 只读，留给后续编辑 UI）
+const WATCH_WS_URL = 'wss://ws.okx.com:8443/ws/v5/public';
+const WATCH_CH_OF = { candle15m: '15m', candle1H: '1h', candle4H: '4h' };
+const WATCH_NS_MAP = { '15m': 'candle15m', '1h': 'candle1H', '4h': 'candle4H' };
+const WATCH_BAR = { '15m': '15m', '1h': '1H', '4h': '4H' };   // OKX bar 大小写铁律（1h 会报 51000）
+const WATCH_PERIODS = ['15m', '1h', '4h'];                    // 1d 由 4h 重聚合，不直接抓
+const WATCH_REST_LIMIT = 300;
+const WATCH_DAILY_RECOMPUTE = 5;
+const WATCH_POLL_MS = 60000;                                  // WS 断线后的 REST 兜底间隔
+const WATCH_SYMBOLS = [
+  { sym: 'BTC', inst: 'BTC-USDT-SWAP' },
+  { sym: 'ETH', inst: 'ETH-USDT-SWAP' }
+];
+
+let watchForce = null;                                        // 测试钩子：null = 按真实实例判定
+let watchFetchImpl = (typeof fetch === 'function') ? fetch : null;
+let watchWCtor = (typeof WebSocket === 'function') ? WebSocket : null;
+let watchSocket = null;
+let watchPollTimer = null;
+let watchSidebar = null;
+let watchStatus = { connected: false, ok: false, ts: 0, msg: '离线' };
+
+function watchShouldRun() { return watchForce === null ? (APP_INSTANCE === 'watch') : watchForce; }
+function watchSetEnabled(v) { watchForce = (v === null || v === undefined) ? null : !!v; }
+function watchSetFetch(f) { watchFetchImpl = f; }
+function watchSetWS(c) { watchWCtor = c; }
+function watchList() { return WATCH_SYMBOLS.map(x => x.sym); }
+function watchInstOf(sym) {
+  for (const x of WATCH_SYMBOLS) if (x.sym === sym) return x.inst;
+  return null;
+}
+function watchFallbackMs() { return WATCH_POLL_MS; }
+function watchPolling() { return !!watchPollTimer; }
+
+function watchRestUrl(period, inst) {
+  const id = inst || watchInstOf(curSym) || WATCH_SYMBOLS[0].inst;
+  return 'https://www.okx.com/api/v5/market/candles?instId=' + id +
+         '&bar=' + WATCH_BAR[period] + '&limit=' + WATCH_REST_LIMIT;
+}
+
+// WS 订阅参数：一条连接订阅 N 个币 × 3 个周期。
+// 「请求数不随币种增长」正是选 WebSocket 而不是轮询的核心原因。
+function watchWsArgs() {
+  const out = [];
+  for (const p of WATCH_PERIODS) for (const s of WATCH_SYMBOLS) out.push({ channel: WATCH_NS_MAP[p], instId: s.inst });
+  return out;
+}
+
+// ---------- 数据装载 / 合并 ----------
+
+function watchEnsureSymbol(sym) {
+  if (!SYMBOLS[sym]) SYMBOLS[sym] = { data: {}, map: { '1d': '1d', '4h': '4h', '1h': '1h', '15m': '15m' } };
+  const s = SYMBOLS[sym];
+  ['15m', '1h', '4h', '1d'].forEach(p => { if (!Array.isArray(s.data[p])) s.data[p] = []; });
+  return s;
+}
+
+// 整段替换某标的某周期（bars 已是内部格式 [tsMin, o, h, l, c, volCcy]）
+function watchPutSymbol(sym, period, bars) {
+  const s = watchEnsureSymbol(sym);
+  const arr = (Array.isArray(bars) ? bars : [])
+    .filter(b => Array.isArray(b) && b.length >= 6 && isFinite(b[0]))
+    .map(b => b.slice(0, 6))
+    .sort((a, b) => a[0] - b[0]);
+  s.data[period] = arr;
+  return { added: arr.length, replaced: 0, minIdx: 0, total: arr.length };
+}
+
+// 就地合并（同 ts 覆盖、新 ts 插入），即 §31 liveMerge 的「按标的多实例」版本
+function watchMergeArr(arr, bars) {
+  const res = { added: 0, replaced: 0, minIdx: -1, total: arr ? arr.length : 0 };
+  if (!Array.isArray(arr) || !Array.isArray(bars) || !bars.length) return res;
+  let minIdx = Infinity;
+  for (const raw of bars) {
+    if (!Array.isArray(raw) || raw.length < 6 || !isFinite(raw[0])) continue;
+    const b = raw.slice(0, 6);
+    const at = liveLowerBound(arr, b[0]);
+    if (at < arr.length && arr[at][0] === b[0]) { arr[at] = b; res.replaced++; }
+    else { arr.splice(at, 0, b); res.added++; }
+    if (at < minIdx) minIdx = at;
+  }
+  if (res.added) arr.sort((a, b) => a[0] - b[0]);
+  res.minIdx = minIdx === Infinity ? -1 : minIdx;
+  res.total = arr.length;
+  return res;
+}
+
+function watchMergeInto(sym, period, bars) {
+  const s = watchEnsureSymbol(sym);
+  if (!Array.isArray(s.data[period])) s.data[period] = [];
+  const r = watchMergeArr(s.data[period], bars);
+  if (r.added || r.replaced) watchAfterMerge(sym, period, r);
+  return r;
+}
+
+// 1d 由 4h 重聚合，锚定 UTC 00:00（沿用 §31 liveDeriveDaily 的口径），按标的独立
+function watchDeriveDaily(sym) {
+  const s = SYMBOLS[sym];
+  if (!s || !s.data) return 0;
+  const h4 = s.data['4h'], d1 = s.data['1d'];
+  if (!Array.isArray(h4) || !Array.isArray(d1) || !h4.length) return 0;
+  const fromDay = Math.floor(h4[h4.length - 1][0] / 1440) * 1440 - (WATCH_DAILY_RECOMPUTE - 1) * 1440;
+  const byDay = new Map();
+  for (const b of h4) {
+    const day = Math.floor(b[0] / 1440) * 1440;
+    if (day < fromDay) continue;
+    if (!byDay.has(day)) byDay.set(day, []);
+    byDay.get(day).push(b);
+  }
+  const at = new Map();
+  for (let i = 0; i < d1.length; i++) at.set(d1[i][0], i);
+  let changed = 0;
+  for (const day of [...byDay.keys()].sort((a, b) => a - b)) {
+    const bs = byDay.get(day).slice().sort((a, b) => a[0] - b[0]);
+    const bar = [day, bs[0][1],
+      bs.reduce((m, x) => Math.max(m, x[2]), -Infinity),
+      bs.reduce((m, x) => Math.min(m, x[3]), Infinity),
+      bs[bs.length - 1][4],
+      bs.reduce((sum, x) => sum + x[5], 0)];
+    const i = at.get(day);
+    if (i === undefined) { d1.push(bar); at.set(day, d1.length - 1); changed++; }
+    else if (d1[i][1] !== bar[1] || d1[i][2] !== bar[2] || d1[i][3] !== bar[3] || d1[i][4] !== bar[4] || d1[i][5] !== bar[5]) {
+      d1[i] = bar; changed++;
+    }
+  }
+  if (changed) d1.sort((a, b) => a[0] - b[0]);
+  return changed;
+}
+
+// 合并后若动的正是当前显示的那份，必须重建 DS —— makeInlineDS 的 len 是**创建时快照**，
+// 直接 push 进原数组不生效；同时让 EMA 从改动点重算，否则 EMA20/120 会停在旧值。
+function watchAfterMerge(sym, period, r) {
+  if (sym !== curSym) return;
+  const isCur = (period === cur) || (cur === '1d' && period === '4h');
+  if (!isCur) return;
+  const s = SYMBOLS[sym];
+  if (!s || !s.data) return;
+  const arr = s.data[s.map[cur] || cur];
+  if (!Array.isArray(arr)) return;
+  const oldLen = DS ? DS.len : 0;
+  const atRight = !oldLen || (viewStart + viewCount) >= oldLen - 1;
+  DS = makeInlineDS(arr);
+  const len = DS.len;
+  if (viewCount > len) viewCount = Math.min(260, len);
+  if (atRight) viewStart = Math.max(vsLo(), len - viewCount);
+  const from = (r && r.minIdx >= 0) ? r.minIdx : 0;
+  [20, 120].forEach(n => { if (typeof emaFullLen[n] === 'number' && emaFullLen[n] > from) emaFullLen[n] = from; });
+  redrawSoon();
+  watchRenderList();
+}
+
+// ---------- 状态位 ----------
+
+function watchDataTs(sym) {
+  const s = SYMBOLS[sym];
+  if (!s || !s.data) return 0;
+  const a = (Array.isArray(s.data['15m']) && s.data['15m'].length) ? s.data['15m'] : s.data['1h'];
+  return (Array.isArray(a) && a.length) ? a[a.length - 1][0] : 0;
+}
+function watchStamp(ts) {
+  if (!ts) return '--';
+  const d = new Date(ts * 60000), p2 = x => (x < 10 ? '0' : '') + x;
+  return p2(d.getMonth() + 1) + '-' + p2(d.getDate()) + ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes());
+}
+function watchGetStatus() {
+  return {
+    connected: watchStatus.connected, ok: watchStatus.ok, ts: watchStatus.ts,
+    msg: watchStatus.msg, lastBarTs: watchDataTs(curSym)
+  };
+}
+// 状态位与数据源同源：没连上就必须显式写「离线」，这条是 fail-safe 硬约束，不许退让。
+function watchRenderStatus() {
+  if (!watchShouldRun()) return;
+  let el = null;
+  try { el = document.getElementById('watchStatus'); } catch (e) { return; }
+  if (!el) return;
+  const tail = '数据至 ' + watchStamp(watchDataTs(curSym));
+  if (watchStatus.connected) {
+    el.textContent = 'WS 已连接 · ' + liveAgo(watchStatus.ts) + ' · ' + tail;
+    el.style.color = '#4ade80';
+  } else {
+    el.textContent = '离线 · ' + tail + (watchPolling() ? ' · 轮询兜底' : '');
+    el.style.color = '#ffd166';
+  }
+}
+
+// ---------- WebSocket 实时 + REST 兜底 ----------
+
+function watchStartPoll() {
+  if (watchPollTimer) return;
+  watchPollTimer = setInterval(watchFallbackTick, WATCH_POLL_MS);
+}
+function watchStopPoll() { if (watchPollTimer) { clearInterval(watchPollTimer); watchPollTimer = null; } }
+
+// 兜底 tick：先试重连 WS；连不上就用 REST 兜一次。断线期间状态位始终显式「离线」。
+async function watchFallbackTick() {
+  if (!watchShouldRun()) { watchStopPoll(); return; }
+  if (document.hidden) return;
+  if (watchStatus.connected) { watchStopPoll(); return; }
+  watchConnect();
+  if (watchSocket) return;
+  await watchRestFallback();
+}
+
+function watchOnOpen() {
+  watchStatus = { connected: true, ok: true, ts: Date.now(), msg: 'WS 已连接' };
+  watchStopPoll();
+  if (watchSocket && typeof watchSocket.send === 'function') {
+    try { watchSocket.send(JSON.stringify({ op: 'subscribe', args: watchWsArgs() })); } catch (e) {}
+  }
+  watchRenderStatus();
+}
+function watchOnClose() {
+  const ws = watchSocket;
+  watchSocket = null;
+  try { if (ws && typeof ws.close === 'function') ws.close(); } catch (e) {}
+  watchStatus = { connected: false, ok: false, ts: Date.now(), msg: '离线 · 等待重连' };
+  // 先起轮询再渲染 —— 否则状态位拿到的还是「未兜底」的快照，文案会漏掉「· 轮询兜底」
+  if (watchShouldRun()) watchStartPoll();
+  watchRenderStatus();
+}
+function watchConnect() {
+  if (!watchShouldRun() || watchSocket || !watchWCtor) return null;
+  let ws = null;
+  try { ws = new watchWCtor(WATCH_WS_URL); } catch (e) { watchOnClose(); return null; }
+  watchSocket = ws;
+  // 事件处理器绑定到具体这条连接：disconnect 时先摘引用，迟到的回调不会再触发降级逻辑
+  ws.onopen = () => { if (watchSocket === ws) watchOnOpen(); };
+  ws.onmessage = ev => {
+    if (watchSocket !== ws) return;
+    const payload = (ev && ev.data !== undefined) ? ev.data : ev;
+    try { watchOnWsMessage(payload); } catch (e) {}
+  };
+  ws.onerror = () => { if (watchSocket === ws) watchOnClose(); };
+  ws.onclose = () => { if (watchSocket === ws) watchOnClose(); };
+  return ws;
+}
+function watchDisconnect() {
+  const ws = watchSocket;
+  watchSocket = null;          // 先摘引用，后续 onclose 回调看到 null 就不会重启轮询
+  watchStopPoll();
+  try { if (ws && typeof ws.close === 'function') ws.close(); } catch (e) {}
+  watchStatus = { connected: false, ok: false, ts: 0, msg: '离线' };
+  watchRenderStatus();
+}
+
+async function watchRestFetch(sym, period) {
+  if (!watchFetchImpl) return 0;
+  const inst = watchInstOf(sym);
+  if (!inst) return 0;
+  const resp = await watchFetchImpl(watchRestUrl(period, inst), { cache: 'no-store' });
+  const j = await resp.json();
+  if (!j || j.code !== '0' || !Array.isArray(j.data) || !j.data.length) return 0;
+  const bars = liveParse(j.data);            // 复用 §31 解析：量能取第 7 列 volCcy
+  if (!bars.length) return 0;
+  watchEnsureSymbol(sym);
+  const r = watchMergeInto(sym, period, bars);
+  return (r.added || r.replaced) ? bars.length : 0;
+}
+async function watchRestFallback() {
+  if (!watchShouldRun() || !watchFetchImpl) return;
+  for (const s of WATCH_SYMBOLS) {
+    let changed = 0;
+    for (const p of WATCH_PERIODS) {
+      try { changed += await watchRestFetch(s.sym, p); } catch (e) { /* 单周期失败不影响其它周期 */ }
+    }
+    if (changed) { try { watchDeriveDaily(s.sym); } catch (e) {} }
+  }
+  watchRenderList();
+  watchRenderStatus();
+}
+
+// 收到推送：arg.channel 定周期、arg.instId 定标的；订阅确认 / 未知标的 / 脏消息一律静默丢弃
+function watchOnWsMessage(raw) {
+  let msg = raw;
+  if (typeof msg === 'string') { try { msg = JSON.parse(msg); } catch (e) { return; } }
+  if (!msg || typeof msg !== 'object') return;
+  if (msg.event) return;                                     // 订阅确认 / 错误事件，不是行情
+  const arg = msg.arg || {};
+  const period = WATCH_CH_OF[arg.channel];
+  if (!period) return;
+  if (!Array.isArray(msg.data) || !msg.data.length) return;
+  const hit = WATCH_SYMBOLS.filter(x => x.inst === arg.instId)[0];
+  if (!hit) return;
+  const bars = liveParse(msg.data);
+  if (!bars.length) return;
+  watchMergeInto(hit.sym, period, bars);
+}
+
+// ---------- 自选列表 UI（运行时建 DOM，不改 index.html 壳）----------
+
+function watchSparkSvg(pts, col) {
+  if (!pts || pts.length < 2) return '<svg width="52" height="18" style="flex:none;"></svg>';
+  let mn = Infinity, mx = -Infinity;
+  for (const v of pts) { if (v < mn) mn = v; if (v > mx) mx = v; }
+  const rng = (mx - mn) || 1, stepX = 52 / (pts.length - 1);
+  let d = '';
+  for (let i = 0; i < pts.length; i++) {
+    d += (i ? 'L' : 'M') + (i * stepX).toFixed(1) + ',' + (15 - (pts[i] - mn) / rng * 13).toFixed(1);
+  }
+  return '<svg width="52" height="18" viewBox="0 0 52 18" style="flex:none;"><path d="' + d +
+         '" fill="none" stroke="' + col + '" stroke-width="1.3"/></svg>';
+}
+
+// 纯函数：给标的算「最新价 / 24h 涨跌幅 / 迷你走势点串」，不碰 DOM（便于测试）
+function watchStats(sym) {
+  const s = SYMBOLS[sym];
+  if (!s || !s.data) return null;
+  const a1h = s.data['1h'], a15 = s.data['15m'];
+  const arr = (Array.isArray(a1h) && a1h.length >= 2) ? a1h : a15;
+  if (!Array.isArray(arr) || !arr.length) return { sym: sym, price: null, chg: null, spark: [] };
+  const price = arr[arr.length - 1][4];
+  const N = (arr === a1h) ? 24 : 96;
+  const base = arr.length > N ? arr[arr.length - 1 - N][4] : arr[0][4];
+  const chg = base ? (price - base) / base * 100 : 0;
+  const want = Math.min(48, arr.length);
+  const step = Math.max(1, Math.floor(arr.length / want));
+  const spark = [];
+  for (let i = arr.length - want * step; i < arr.length; i += step) if (i >= 0 && arr[i]) spark.push(arr[i][4]);
+  return { sym: sym, price: price, chg: chg, spark: spark };
+}
+
+// 行视图（HTML 字符串，纯函数）。配色沿用仓内既有约定：涨红 #ef4d4d / 跌绿 #2fbf71
+function watchRowHtml(st) {
+  const up = (st.chg || 0) >= 0;
+  const col = up ? '#ef4d4d' : '#2fbf71';
+  const price = (st.price == null) ? '--' : fmtPrice(st.price);
+  const chg = (st.chg == null) ? '--' : (up ? '+' : '') + st.chg.toFixed(2) + '%';
+  return '<span style="font-size:12px;font-weight:600;color:#dde3ef;flex:0 0 40px;">' + st.sym + '</span>' +
+         '<span style="font-size:11px;color:#8f9bb3;flex:0 0 62px;font-variant-numeric:tabular-nums;">' + price + '</span>' +
+         watchSparkSvg(st.spark, col) +
+         '<span style="margin-left:auto;font-size:11px;color:' + col + ';font-variant-numeric:tabular-nums;">' + chg + '</span>';
+}
+
+function watchBuildSidebar() {
+  if (!watchShouldRun()) return null;
+  if (watchSidebar) return watchSidebar;
+  let host = null;
+  try { host = document.getElementById('toolbar') || document.body; } catch (e) { return null; }
+  if (!host || !host.appendChild) return null;
+  const box = document.createElement('div');
+  box.className = 'group watch-group';
+  box.dataset.key = 'watch';                 // §27：新模块必须给 data-key，否则不参与排序且被静态检查拦下
+  box.style.cssText = 'padding:6px 0 2px;';
+  const label = document.createElement('div');
+  label.className = 'group-label';
+  label.textContent = '自选';
+  label.style.cssText = 'font-size:11px;color:#5e6b82;padding:0 8px 4px;';
+  const list = document.createElement('div');
+  list.id = 'watchList';
+  for (const s of WATCH_SYMBOLS) {
+    const row = document.createElement('div');
+    row.className = 'watch-row';
+    row.dataset.sym = s.sym;
+    row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:5px 8px;border-radius:6px;cursor:pointer;';
+    row.addEventListener('click', () => watchSelect(s.sym));
+    list.appendChild(row);
+  }
+  const st = document.createElement('div');
+  st.id = 'watchStatus';
+  st.style.cssText = 'font-size:10.5px;color:#7f8ea8;padding:4px 8px 0;white-space:nowrap;';
+  box.appendChild(label); box.appendChild(list); box.appendChild(st);
+  if (host.firstChild) host.insertBefore(box, host.firstChild); else host.appendChild(box);
+  watchSidebar = box;
+  watchRenderList();
+  return box;
+}
+
+function watchRenderList() {
+  if (!watchShouldRun() || !watchSidebar) return;
+  let list = null;
+  try { list = document.getElementById('watchList'); } catch (e) { return; }
+  if (!list || !list.children) return;
+  for (let i = 0; i < list.children.length; i++) {
+    const row = list.children[i];
+    const sym = (row.dataset && row.dataset.sym) || null;
+    const st = sym ? watchStats(sym) : null;
+    if (!st) continue;
+    row.innerHTML = watchRowHtml(st);
+    row.style.background = (sym === curSym) ? 'rgba(77,210,255,0.10)' : 'transparent';
+  }
+}
+
+function watchSelect(sym) {
+  if (!SYMBOLS[sym]) return;
+  setView(sym, null);
+  watchRenderList();
+  watchRenderStatus();
+}
+
+// 首屏：只给「还不在 SYMBOLS 里」的标的拉 REST（BTC 已有内联全量，不去动它）
+async function watchBootstrap() {
+  if (!watchShouldRun()) return;
+  for (const s of WATCH_SYMBOLS) {
+    if (SYMBOLS[s.sym]) continue;
+    let changed = 0;
+    for (const p of WATCH_PERIODS) {
+      try { changed += await watchRestFetch(s.sym, p); } catch (e) {}
+    }
+    if (changed) { try { watchDeriveDaily(s.sym); } catch (e) {} }
+  }
+  watchRenderList();
+  watchConnect();
+  watchRenderStatus();
+}
+
+function watchInit() {
+  if (!watchShouldRun()) return;
+  watchBuildSidebar();
+  watchRenderStatus();
+  watchBootstrap();
+}
+
+// §32 自选实例：建列表 + REST 首屏 + WS 实时（复盘 / 看盘实例不启用）
+if (watchShouldRun()) watchInit();

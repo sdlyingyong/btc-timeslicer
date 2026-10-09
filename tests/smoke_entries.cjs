@@ -45,7 +45,7 @@ const check = (name, cond, extra) => {
 
 function boot(entryRel, label) {
   const html = fs.readFileSync(path.join(REPO, entryRel), 'utf8');
-  const base = entryRel === 'index.html' ? '/btc-timeslicer/' : '/btc-timeslicer/live/';
+  const base = '/btc-timeslicer/' + (entryRel === 'index.html' ? '' : entryRel.replace(/\/index\.html$/, '/') + '/');
   const dom = new JSDOM(html, { url: 'https://sdlyingyong.github.io' + base, pretendToBeVisual: true, runScripts: 'dangerously' });
   const w = dom.window;
   w.HTMLCanvasElement.prototype.getContext = () => fakeCtx();
@@ -54,6 +54,10 @@ function boot(entryRel, label) {
   // 注意：这里**不**手动设实例标记 —— 壳里的内联 <script>window.__APP_INSTANCE__=…</script>
   // 在 runScripts:'dangerously' 下已经真执行过了，正好用来验证壳本身写对了。
   const marker = w.__APP_INSTANCE__;
+  // §32：jsdom 自带 WebSocket，但它会真的去连 wss://ws.okx.com（本机被墙）→ 异步 error 事件
+  // 会污染 errs 断言。冒烟测试只关心「壳 + DOM + 存储键」，所以这里显式摘掉 WS 构造器，
+  // 让 §32 的门控自然退化（连不上 → 离线），真实连通用回归测试的注入式假 WS 覆盖。
+  w.WebSocket = undefined;
   // 按浏览器顺序执行两个外链脚本
   try { w.eval(dataSrc); } catch (e) { errs.push('data.js: ' + e.message); }
   try { w.eval(appSrc); } catch (e) { errs.push('app.js: ' + e.message); }
@@ -84,12 +88,28 @@ check('§31 看盘入口已挂上实时补数状态位 #liveStatus',
 check('§31 复盘入口不挂实时补数（复盘不碰活数据）',
   !A.w.document.getElementById('liveStatus'));
 
+console.log('\n=== 自选入口 watch/index.html ===');
+const C = boot('watch/index.html', '自选');
+check('§32 自选入口无脚本错误', C.errs.length === 0, C.errs.join(' | ') || '干净');
+check('§32 自选入口实例标记 = watch', C.marker === 'watch', String(C.marker));
+check('§32 自选入口数据已挂上 window.BTCFUT_DATA', !!C.w.BTCFUT_DATA && C.w.BTCFUT_DATA['15m'].length > 100000,
+  C.w.BTCFUT_DATA ? C.w.BTCFUT_DATA['15m'].length + ' 根 15m' : 'null');
+check('§32 自选入口挂了自选列表 DOM #watchList', !!C.w.document.getElementById('watchList'));
+check('§32 复盘入口不挂自选列表（实例隔离）', !A.w.document.getElementById('watchList'));
+check('§32 看盘入口不挂自选列表（实例隔离）', !B.w.document.getElementById('watchList'));
+check('§32 自选列表已渲染出两行（BTC / ETH）', (() => {
+  const el = C.w.document.getElementById('watchList');
+  return !!el && el.children.length === 2;
+})(), (() => { const el = C.w.document.getElementById('watchList'); return el ? el.children.length + ' 行' : 'null'; })());
+
 // 关键：让两个入口各写一次同名的进度，确认落到不同的键上
 A.w.localStorage.setItem('kline_session_v1', 'REVIEW');
 A.w.localStorage.setItem('live__kline_session_v1', 'LIVE');
+A.w.localStorage.setItem('watch__kline_session_v1', 'WATCH');
 check('同一浏览器里两个入口的进度互不覆盖',
   A.w.localStorage.getItem('kline_session_v1') === 'REVIEW' &&
-  A.w.localStorage.getItem('live__kline_session_v1') === 'LIVE');
+  A.w.localStorage.getItem('live__kline_session_v1') === 'LIVE' &&
+  A.w.localStorage.getItem('watch__kline_session_v1') === 'WATCH');
 
-console.log('\n======== 双入口冒烟: ' + pass + ' PASS / ' + fail + ' FAIL ========');
+console.log('\n======== 三入口冒烟: ' + pass + ' PASS / ' + fail + ' FAIL ========');
 process.exit(fail ? 1 : 0);

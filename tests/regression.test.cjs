@@ -150,6 +150,12 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     // §31 看盘实例：直连 OKX 自动补数
     liveShouldRun, liveSetEnabled, liveSetFetch, liveUrl, liveParse, liveMerge, liveDeriveDaily,
     liveRefreshTick, liveRefreshStart, liveRefreshStop, liveGetStatus, liveIntervalMs, livePeriods,
+    // §32 自选看盘 MVP：多币种 + WebSocket 实时
+    watchShouldRun, watchSetEnabled, watchSetFetch, watchSetWS, watchInit,
+    watchList, watchInstOf, watchRestUrl, watchWsArgs, watchOnWsMessage,
+    watchPutSymbol, watchMergeInto, watchDeriveDaily,
+    watchGetStatus, watchPolling, watchFallbackMs, watchConnect, watchDisconnect, watchOnOpen, watchOnClose,
+    getSymbols: () => SYMBOLS, getWatchKey: () => WATCH_KEY,
     // §19.5 UI 控制器 + 渲染数据
     simMarks, simOpenAtCursor, simAddAtCursor, simExitAtCursor, simCursorTs, simCursorPrice, simLeverage, simStopVal, simSizeVal, drawSim, renderSim
   };`);
@@ -1837,8 +1843,9 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     }
 
     // ---- 30.8 页面标题与实例挂钩（肉眼能分辨当前在哪个入口）----
-    check('§30 页内标题区分复盘/看盘',
-      APP_SRC.includes("(APP_INSTANCE === 'live' ? '（看盘）' : '（复盘）')"));
+    // §32 起多一态：watch（自选）—— 断言随实现一起更新
+    check('§30 页内标题区分复盘/看盘/自选',
+      APP_SRC.includes("(APP_INSTANCE === 'live' ? '（看盘）' : APP_INSTANCE === 'watch' ? '（自选）' : '（复盘）')"));
 
     // ---- 30.9 工具链已全部指向 share/data.js（防止改回去又内联）----
     const tool = f => fs.existsSync(path.join(REPO2, f)) ? fs.readFileSync(path.join(REPO2, f), 'utf8') : '';
@@ -1997,6 +2004,163 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
       /volCcy/.test(APP31) && /第\s*7\s*列|索引\s*6|\[6\]/.test(APP31));
 
     restore(S15); restore(S1H); restore(S4H); restore(S1D);
+  }
+
+  // ============ §32 自选看盘 MVP（多币种 + WebSocket 实时）============
+  {
+    const APP32 = fs.readFileSync(APP_JS, 'utf8');
+    const ENTRY32 = path.join(__dirname, '..', 'watch', 'index.html');
+    const WATCH_HTML = fs.existsSync(ENTRY32) ? fs.readFileSync(ENTRY32, 'utf8') : '';
+
+    // ---- 32.1 自选配置与取数参数 ----
+    check('§32 自选列表默认 BTC + ETH',
+      Array.isArray(API.watchList()) && API.watchList().join(',') === 'BTC,ETH',
+      (API.watchList() || []).join(','));
+    check('§32 标的 → OKX instId 映射',
+      API.watchInstOf('BTC') === 'BTC-USDT-SWAP' && API.watchInstOf('ETH') === 'ETH-USDT-SWAP');
+    check('§32 REST 兜底 URL 走 www.okx.com 且带 instId + limit', (() => {
+      const u = API.watchRestUrl('15m', 'ETH-USDT-SWAP');
+      return /^https:\/\/www\.okx\.com\//.test(u) && /instId=ETH-USDT-SWAP/.test(u) && /limit=\d+/.test(u);
+    })(), API.watchRestUrl('15m', 'ETH-USDT-SWAP'));
+    check('§32 REST 兜底 bar 大小写铁律（1H/4H 大写、15m 小写）',
+      /bar=1H/.test(API.watchRestUrl('1h', 'ETH-USDT-SWAP')) &&
+      /bar=4H/.test(API.watchRestUrl('4h', 'ETH-USDT-SWAP')) &&
+      /bar=15m/.test(API.watchRestUrl('15m', 'ETH-USDT-SWAP')));
+
+    // ---- 32.2 数据装载：ETH 从无到有 ----
+    check('§32 装载前 ETH 不在 SYMBOLS 里', !API.getSymbols().ETH);
+    const put = API.watchPutSymbol('ETH', '15m', [[1000, 10, 12, 9, 11, 5], [1015, 11, 13, 10, 12, 6]]);
+    check('§32 watchPutSymbol 建出 SYMBOLS.ETH（四周期 map 齐全）',
+      !!API.getSymbols().ETH && put.added === 2 && ['15m', '1h', '4h', '1d'].every(p => !!API.getSymbols().ETH.map[p]),
+      JSON.stringify(put));
+    check('§32 写入的 15m 根数与顺序正确', (() => {
+      const a = API.getSymbols().ETH.data['15m'];
+      return a.length === 2 && a[0][0] < a[1][0];
+    })());
+
+    // ---- 32.3 合并：追加 / 覆盖 / 幂等 / 不串台 ----
+    const m1 = API.watchMergeInto('ETH', '15m', [[1030, 12, 14, 11, 13, 7]]);
+    check('§32 合并追加新根', m1.added === 1 && API.getSymbols().ETH.data['15m'].length === 3, JSON.stringify(m1));
+    const m2 = API.watchMergeInto('ETH', '15m', [[1030, 12, 14, 11, 99, 8]]);
+    check('§32 覆盖已存在末根（不重复追加、值被更新）',
+      m2.added === 0 && m2.replaced === 1 && API.getSymbols().ETH.data['15m'].slice(-1)[0][4] === 99, JSON.stringify(m2));
+    check('§32 合并幂等（同批再合无新增）', API.watchMergeInto('ETH', '15m', [[1030, 12, 14, 11, 99, 8]]).added === 0);
+    check('§32 合并 ETH 不污染 BTC 数据',
+      DATA['15m'].length > 240000 && !API.getSymbols().BTC.data['15m'].includes(99));
+
+    // ---- 32.4 1d 由 4h 重聚合（UTC 00:00 锚定）----
+    {
+      const day = 29857245 - (29857245 % 1440);   // 某个 UTC 零点（分钟）
+      API.watchPutSymbol('ETH', '4h', [
+        [day, 100, 120, 90, 110, 1],
+        [day + 240, 110, 150, 105, 140, 2],
+        [day + 480, 140, 145, 130, 135, 3],
+        [day + 720, 135, 160, 130, 155, 4]
+      ]);
+      API.watchDeriveDaily('ETH');
+      const bar = API.getSymbols().ETH.data['1d'].slice(-1)[0];
+      check('§32 ETH 1d 重聚合：OHLC 与 vol 汇总正确',
+        !!bar && bar[0] === day && bar[1] === 100 && bar[2] === 160 && bar[3] === 90 && bar[4] === 155 && near(bar[5], 10),
+        JSON.stringify(bar));
+      check('§32 ETH 1d 锚定 UTC 00:00（不是 OKX 原生 16:00）', !!bar && bar[0] % 1440 === 0, String(bar && bar[0]));
+    }
+
+    // ---- 32.5 WebSocket：订阅参数与消息路由 ----
+    const args = API.watchWsArgs();
+    check('§32 一条连接订阅 3 周期 × 2 币 = 6 条', Array.isArray(args) && args.length === 6, String(args && args.length));
+    check('§32 channel 命名正确（candle15m / candle1H / candle4H）', (() => {
+      const ch = args.map(a => a.channel).filter((v, i, arr) => arr.indexOf(v) === i).sort();
+      return ch.join(',') === 'candle15m,candle1H,candle4H';
+    })(), args.map(a => a.channel).join(','));
+    check('§32 订阅覆盖 BTC 与 ETH 两个 instId',
+      args.filter(a => a.instId === 'BTC-USDT-SWAP').length === 3 &&
+      args.filter(a => a.instId === 'ETH-USDT-SWAP').length === 3);
+    check('§32 订阅参数结构与 OKX 一致（channel + instId）',
+      args.every(a => typeof a.channel === 'string' && typeof a.instId === 'string'));
+
+    const btc15Before = API.getSymbols().BTC.data['15m'].length;
+    const eth15Before = API.getSymbols().ETH.data['15m'].length;
+    API.watchOnWsMessage({
+      arg: { channel: 'candle15m', instId: 'ETH-USDT-SWAP' },
+      data: [['1789000000000', '1', '2', '0.5', '1.5', '700', '7', '10', '0']]
+    });
+    check('§32 WS 推送落到对应标的+周期（ETH 15m +1）',
+      API.getSymbols().ETH.data['15m'].length === eth15Before + 1);
+    check('§32 WS 推送不污染其它标的（BTC 15m 不变）',
+      API.getSymbols().BTC.data['15m'].length === btc15Before);
+    check('§32 WS 推送的量能取第 7 列 volCcy 而非第 6 列 vol',
+      near(API.getSymbols().ETH.data['15m'].slice(-1)[0][5], 7, 1e-9),
+      JSON.stringify(API.getSymbols().ETH.data['15m'].slice(-1)[0]));
+
+    const eth15 = API.getSymbols().ETH.data['15m'].length;
+    let threw = false;
+    try {
+      API.watchOnWsMessage(null);
+      API.watchOnWsMessage(undefined);
+      API.watchOnWsMessage('not json');
+      API.watchOnWsMessage('{"event":"subscribe","arg":{}}');
+      API.watchOnWsMessage({ arg: { channel: 'candle15m', instId: 'DOGE-USDT-SWAP' }, data: [['1789000000000', '1', '1', '1', '1', '1', '1', '1', '0']] });
+      API.watchOnWsMessage({ arg: { channel: 'candle15m', instId: 'ETH-USDT-SWAP' }, data: null });
+    } catch (e) { threw = true; }
+    check('§32 脏消息 / 未知标的 / 订阅确认 → 不抛错', threw === false);
+    check('§32 脏消息不产生任何数据变更', API.getSymbols().ETH.data['15m'].length === eth15, String(eth15));
+
+    // ---- 32.6 断线 fail-safe：显式离线 + REST 轮询兜底 ----
+    API.watchSetEnabled(true);
+    let wsMade1 = 0;
+    API.watchSetWS(function () { wsMade1++; this.send = function () {}; this.close = function () {}; });
+    const st0 = API.watchGetStatus();
+    check('§32 初始未连接 → 状态显式为离线（绝不假装有数据）',
+      st0.connected === false && /离线/.test(st0.msg || ''), JSON.stringify(st0));
+    API.watchOnOpen();
+    check('§32 WS 连上 → connected=true 且状态不再含离线',
+      API.watchGetStatus().connected === true && !/离线/.test(API.watchGetStatus().msg || ''));
+    check('§32 连上后停掉 REST 轮询兜底', API.watchPolling() === false);
+    API.watchOnClose();
+    const st1 = API.watchGetStatus();
+    check('§32 断线 → connected=false 且立刻转为离线',
+      st1.connected === false && /离线/.test(st1.msg || ''), JSON.stringify(st1));
+    check('§32 断线后启动 REST 轮询兜底', API.watchPolling() === true);
+    check('§32 轮询兜底间隔有下限（不暴力刷 OKX）', API.watchFallbackMs() >= 30000, String(API.watchFallbackMs()));
+    API.watchDisconnect();
+    check('§32 disconnect 后不再轮询', API.watchPolling() === false);
+
+    // ---- 32.7 实例隔离：只有 watch 实例才启用 ----
+    API.watchSetEnabled(null);
+    check('§32 复盘实例（review）不启用自选看盘', API.watchShouldRun() === false, String(API.watchShouldRun()));
+    let hit32 = 0, wsMade = 0;
+    API.watchSetFetch(async () => { hit32++; return { json: async () => ({ code: '0', data: [] }) }; });
+    API.watchSetWS(function () { wsMade++; this.send = function () {}; this.close = function () {}; });
+    await API.watchInit();
+    check('§32 复盘实例下 watchInit 一个 REST 请求都不发', hit32 === 0, hit32 + ' 次');
+    check('§32 复盘实例下不建立 WebSocket 连接', wsMade === 0, wsMade + ' 个');
+    check('§32 App 静态检查：自选启动被 watchShouldRun() 包住',
+      /if \(watchShouldRun\(\)\) watchInit\(\);/.test(APP32));
+    check('§32 App 静态检查：自选列表 DOM 只在 watch 实例创建',
+      APP32.indexOf('function watchBuildSidebar') > 0 && APP32.includes('if (!watchShouldRun()) return;'));
+
+    // ---- 32.8 存储命名空间 ----
+    check('§32 自选列表键走 STORAGE_NS 前缀（watch 实例 → watch__）',
+      APP32.includes("STORAGE_NS + 'kline_watchlist_v1'"));
+    check('§32 没有遗留的裸键名引用',
+      new RegExp("(?<!STORAGE_NS \\+ )[\"']kline_watchlist_v1[\"']").test(APP32) === false);
+
+    // ---- 32.9 构建产物：watch/index.html 由 index.html 派生 ----
+    check('§32 watch/index.html 存在', WATCH_HTML.length > 0, WATCH_HTML.length + ' 字节');
+    check('§32 watch 入口标记 = watch', /__APP_INSTANCE__\s*=\s*'watch'/.test(WATCH_HTML));
+    check('§32 watch 入口引用 ../share/（多一层目录）',
+      /src="\.\.\/share\/app\.js"/.test(WATCH_HTML) && /src="\.\.\/share\/data\.js"/.test(WATCH_HTML));
+    check('§32 watch 入口不含内联数据', !WATCH_HTML.includes('window.BTCFUT_DATA='));
+    check('§32 watch 标题可区分（自选）', /<title>[^<]*自选[^<]*<\/title>/.test(WATCH_HTML));
+    check('§32 watch 入口与 build_live.cjs 生成结果逐字节一致', (() => {
+      try {
+        const { buildEntry } = require(path.join(__dirname, '..', 'build_live.cjs'));
+        const src = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+        return buildEntry(src, 'watch') === WATCH_HTML;
+      } catch (e) { return false; }
+    })());
+
+    delete API.getSymbols().ETH;   // 复原：本组自造的数据不带出作用域
   }
 
   // ============ 汇总 ============
