@@ -3283,11 +3283,14 @@ function watchRenderStatus() {
   try { el = document.getElementById('watchStatus'); } catch (e) { return; }
   if (!el) return;
   const tail = '数据至 ' + watchStamp(watchDataTs(curSym));
+  // §33：ETH 历史分片的进度直接拼在同一个状态位上，不新增 DOM
+  const ethTail = ethProgressText();
+  const sfx = ethTail ? (' · ' + ethTail) : '';
   if (watchStatus.connected) {
-    el.textContent = 'WS 已连接 · ' + liveAgo(watchStatus.ts) + ' · ' + tail;
+    el.textContent = 'WS 已连接 · ' + liveAgo(watchStatus.ts) + ' · ' + tail + sfx;
     el.style.color = '#4ade80';
   } else {
-    el.textContent = '离线 · ' + tail + (watchPolling() ? ' · 轮询兜底' : '');
+    el.textContent = '离线 · ' + tail + (watchPolling() ? ' · 轮询兜底' : '') + sfx;
     el.style.color = '#ffd166';
   }
 }
@@ -3497,10 +3500,20 @@ function watchSelect(sym) {
 }
 
 // 首屏：只给「还不在 SYMBOLS 里」的标的拉 REST（BTC 已有内联全量，不去动它）
+// §33：该标的的历史是否由分片底座撑着（也要照常跑 REST —— 分片末根是构建时快照，
+//      最新那段永远得由 REST/WS 补，否则图上会在分片末端与当前之间留一段真实的空洞）
+function ethShardBacks(sym) {
+  const mf = ethManifest();
+  return !!(mf && ethShouldRun() && ethLoadedSet.size && (mf.sym || 'ETH') === sym);
+}
+
 async function watchBootstrap() {
   if (!watchShouldRun()) return;
+  // §33 先手：静态注入（若有）的 ETH 分片立即登记 + 装配，不等网络 —— 首屏就有历史
+  ethRegisterExisting();
+  ethMaterialize();
   for (const s of WATCH_SYMBOLS) {
-    if (SYMBOLS[s.sym]) continue;
+    if (SYMBOLS[s.sym] && !ethShardBacks(s.sym)) continue;
     let changed = 0;
     for (const p of WATCH_PERIODS) {
       try { changed += await watchRestFetch(s.sym, p); } catch (e) {}
@@ -3510,6 +3523,8 @@ async function watchBootstrap() {
   watchRenderList();
   watchConnect();
   watchRenderStatus();
+  // §33 其余年份后台渐进补齐（新→旧）。不 await —— 不许拖慢首屏与 WS 连接。
+  ethLoadAll().catch(() => {});
 }
 
 function watchInit() {
@@ -3517,6 +3532,218 @@ function watchInit() {
   watchBuildSidebar();
   watchRenderStatus();
   watchBootstrap();
+}
+
+// ================= §33 ETH 全量历史（按 UTC 自然年分片）=================
+// 目标：自选列表里的 ETH 也拥有和 BTC 同规格的**全量历史**（2019-11-27 起 / 24 万根 15m），
+//       且不拖慢首屏、不影响复盘与看盘入口。
+// 分层（PRD §33.6）：分片全量历史（静态只读） → REST 首屏（补末端） → WS 实时增量
+// 数据源：用户已有仓库 sdlyingyong/kline-timemachine（不是 OKX 直抓，也不是已 404 的 k--data）。
+//
+// 加载策略（PRD §33.5）：新 → 旧渐进。首屏只等最近 ETH_PREFETCH_YEARS 年（≈3.6MB），
+//   其余年份后台串行补齐，**每片落地即 materialize**，历史一年一年往前长出来。
+// 失败策略：显式。某年加载失败就写进状态位（`N 年加载失败`），**绝不**当成「那年没有数据」
+//   糊过去 —— 这是本仓库与 clash-go 同一条 fail-safe 线。
+// 门控：只有 watch 实例 + 存在 ETHFUT_MANIFEST 才启用；复盘 / 看盘入口一行都不碰。
+const ETH_PREFETCH_YEARS = 2;          // 首屏先加载最近 N 年，其余后台补齐
+const ETH_SHARD_TIMEOUT_MS = 30000;    // 单年分片加载超时（超时按失败处理，不无限等）
+
+let ethForce;                          // 测试钩子：undefined = 自动；true/false = 强制
+let ethLoaderImpl = null;              // 测试钩子：(year) => Promise
+let ethBaseOverride = null;            // 测试钩子：分片目录基址覆盖
+let ethAllPromise = null;
+const ethLoadedSet = new Set();
+const ethFailedSet = new Set();
+const ethInflight = new Map();
+
+// 分片目录 = 「app.js 自己所在目录」+ eth/。
+// 三个入口引用 app.js 的深度不同（share/app.js vs ../share/app.js），用脚本自身的绝对 URL
+// 推导一次就能全对，省掉给每个入口塞不同 base 的维护成本。
+const ethBaseSaved = (function () {
+  try {
+    const cs = document.currentScript;
+    if (cs && cs.src && /app\.js/.test(cs.src)) return cs.src.replace(/app\.js(\?.*)?$/, '') + 'eth/';
+  } catch (e) { /* 非浏览器环境 */ }
+  try {
+    const list = document.getElementsByTagName ? document.getElementsByTagName('script') : null;
+    for (let i = 0; list && i < list.length; i++) {
+      const src = list[i].src || '';
+      if (/app\.js(\?|$)/.test(src)) return src.replace(/app\.js(\?.*)?$/, '') + 'eth/';
+    }
+  } catch (e) { /* ignore */ }
+  return 'share/eth/';
+})();
+
+function ethManifest() {
+  try {
+    const m = window.ETHFUT_MANIFEST;
+    return (m && Array.isArray(m.years) && m.years.length) ? m : null;
+  } catch (e) { return null; }
+}
+function ethShardOf(year) {
+  try {
+    const sh = window.ETHFUT_SHARDS;
+    return (sh && sh[year]) ? sh[year] : null;
+  } catch (e) { return null; }
+}
+function ethShouldRun() {
+  if (ethForce !== undefined) return !!ethForce;
+  return watchShouldRun() && !!ethManifest();
+}
+function ethSetEnabled(v) { ethForce = (v === undefined) ? undefined : !!v; }
+function ethSetLoader(fn) { ethLoaderImpl = (typeof fn === 'function') ? fn : null; }
+function ethSetBase(b) { ethBaseOverride = (typeof b === 'string' && b) ? b : null; }
+function ethBaseUrl() { return ethBaseOverride || ethBaseSaved; }
+
+function ethLoadedYears() { return Array.from(ethLoadedSet).sort((a, b) => a - b); }
+function ethFailedYears() { return Array.from(ethFailedSet).sort((a, b) => a - b); }
+function ethPendingYears() {
+  const mf = ethManifest();
+  if (!mf) return [];
+  return mf.years.map(Number)
+    .filter(y => !ethLoadedSet.has(y) && !ethFailedSet.has(y))
+    .sort((a, b) => a - b);
+}
+function ethProgress() {
+  const mf = ethManifest();
+  return {
+    loaded: ethLoadedSet.size, failed: ethFailedSet.size,
+    total: mf ? mf.years.length : 0, pending: ethPendingYears().length
+  };
+}
+// 本函数会被状态位**同步**调用 —— 任何异常都不许把状态位搞崩（TDZ / 缺 manifest 都返回空串）
+function ethProgressText() {
+  try {
+    const p = ethProgress();
+    if (!p.total) return '';
+    if (p.failed) return '历史 ' + p.loaded + '/' + p.total + ' · ' + p.failed + ' 年加载失败';
+    if (p.pending) return '历史加载中 ' + p.loaded + '/' + p.total;
+    return '全量 ' + p.loaded + ' 年';
+  } catch (e) { return ''; }
+}
+function ethReset() {
+  ethLoadedSet.clear(); ethFailedSet.clear(); ethInflight.clear(); ethAllPromise = null;
+}
+// 把「已经静态注入到页面里的年份」登记进已加载集合（不触发任何网络请求）
+function ethRegisterExisting() {
+  const mf = ethManifest();
+  if (!mf) return 0;
+  let n = 0;
+  for (const y of mf.years) {
+    const yy = Number(y);
+    if (ethShardOf(yy)) { ethLoadedSet.add(yy); ethFailedSet.delete(yy); n++; }
+  }
+  return n;
+}
+
+// 加载单个年份分片。幂等：已加载 / 正在加载 / 已失败都直接返回，不重复发请求。
+function ethLoadYear(year) {
+  const y = Number(year);
+  if (ethLoadedSet.has(y)) return Promise.resolve(true);
+  if (ethInflight.has(y)) return ethInflight.get(y);
+
+  let settleFn = null;
+  const p = new Promise(res => { settleFn = res; });
+  const settle = ok => {
+    ethInflight.delete(y);
+    if (ok) { ethLoadedSet.add(y); ethFailedSet.delete(y); }
+    else { ethFailedSet.add(y); }
+    settleFn(!!ok);
+  };
+  ethInflight.set(y, p);
+
+  if (ethShardOf(y)) { settle(true); return p; }            // 已预置 / 静态注入
+  if (ethLoaderImpl) {                                       // 测试钩子
+    let r;
+    try { r = ethLoaderImpl(y); } catch (e) { settle(false); return p; }
+    Promise.resolve(r).then(v => settle(v !== false), () => settle(false));
+    return p;
+  }
+  // 真实路径：注入 <script src>。
+  // 不用 fetch —— 经典 <script> 在 file:// 下也能工作，fetch 不行，这是「双击 HTML 也能用」的底线。
+  let el = null, host = null;
+  try {
+    el = document.createElement('script');
+    host = document.head || document.body || document.documentElement;
+  } catch (e) { /* ignore */ }
+  if (!el || !host || !host.appendChild) { settle(false); return p; }
+  let done = false, to = null;
+  const finish = ok => { if (done) return; done = true; if (to) clearTimeout(to); settle(ok); };
+  to = setTimeout(() => finish(false), ETH_SHARD_TIMEOUT_MS);
+  el.src = ethBaseUrl() + y + '.js';
+  el.async = true;
+  el.onload = () => finish(!!ethShardOf(y));
+  el.onerror = () => finish(false);
+  try { host.appendChild(el); } catch (e) { finish(false); }
+  return p;
+}
+
+// 取出已加载年份在某个周期的全部柱子（按 ts 排序）
+function ethShardPeriod(period) {
+  let sh = {};
+  try { sh = window.ETHFUT_SHARDS || {}; } catch (e) { sh = {}; }
+  const out = [];
+  for (const y of ethLoadedYears()) {
+    const o = sh[y];
+    if (!o || !Array.isArray(o[period])) continue;
+    for (const b of o[period]) {
+      if (Array.isArray(b) && b.length >= 6 && isFinite(b[0])) out.push(b.slice(0, 6));
+    }
+  }
+  out.sort((a, b) => a[0] - b[0]);
+  return out;
+}
+
+// 把已加载分片装进 SYMBOLS —— **底座是分片，但保留比片末端更新的 REST/WS 柱子**。
+// 否则每次 materialize 都会把实时补上来的最新那段冲掉（这是本模块最容易踩的坑）。
+function ethMaterialize() {
+  const mf = ethManifest();
+  if (!mf || !ethLoadedSet.size) return 0;
+  const sym = mf.sym || 'ETH';
+  const s = watchEnsureSymbol(sym);
+  const changed = [];
+  for (const p of ['15m', '1h', '4h', '1d']) {
+    const base = ethShardPeriod(p);
+    if (!base.length) continue;
+    const tailTs = base[base.length - 1][0];
+    const cur = Array.isArray(s.data[p]) ? s.data[p] : [];
+    const extra = cur.filter(b => b[0] > tailTs);
+    const next = extra.length ? base.concat(extra) : base;
+    const same = cur.length === next.length &&
+      (!cur.length || (cur[0][0] === next[0][0] && cur[cur.length - 1][0] === next[next.length - 1][0]));
+    s.data[p] = next;
+    if (!same) changed.push(p);
+  }
+  if (changed.length) {
+    for (const p of changed) watchAfterMerge(sym, p, { minIdx: 0 });   // 重建 DS / 重算 EMA（若正在看该标的）
+    if (ethShouldRun()) watchRenderStatus();
+  }
+  return changed.length;
+}
+
+// 新 → 旧串行补齐（避免与 17MB 的 data.js 抢带宽；任何时刻「已经可用的历史」都是最可能被用到的那段）
+function ethLoadAll() {
+  if (ethAllPromise) return ethAllPromise;
+  if (!ethShouldRun()) return Promise.resolve(ethLoadedSet.size);
+  const mf = ethManifest();
+  if (!mf) return Promise.resolve(0);
+  const years = mf.years.map(Number).sort((a, b) => b - a);
+  const head = years.slice(0, ETH_PREFETCH_YEARS), rest = years.slice(ETH_PREFETCH_YEARS);
+  ethAllPromise = (async () => {
+    for (const y of head) { await ethLoadYear(y); ethMaterialize(); }
+    if (ethShouldRun()) watchRenderStatus();
+    for (const y of rest) { await ethLoadYear(y); ethMaterialize(); if (ethShouldRun()) watchRenderStatus(); }
+    return ethLoadedSet.size;
+  })();
+  return ethAllPromise;
+}
+
+async function ethBootstrap() {
+  if (!ethShouldRun()) return 0;
+  ethRegisterExisting();          // 静态注入的年份立刻可用（不等网络）
+  ethMaterialize();
+  await ethLoadAll();
+  return ethLoadedSet.size;
 }
 
 // §32 自选实例：建列表 + REST 首屏 + WS 实时（复盘 / 看盘实例不启用）

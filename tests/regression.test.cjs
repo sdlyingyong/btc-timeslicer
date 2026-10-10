@@ -156,6 +156,11 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     watchPutSymbol, watchMergeInto, watchDeriveDaily,
     watchGetStatus, watchPolling, watchFallbackMs, watchConnect, watchDisconnect, watchOnOpen, watchOnClose,
     getSymbols: () => SYMBOLS, getWatchKey: () => WATCH_KEY,
+    // §33 ETH 全量历史（按 UTC 自然年分片）
+    ethShouldRun, ethSetEnabled, ethSetLoader, ethSetBase, ethManifest, ethBaseUrl,
+    ethShardOf, ethRegisterExisting, ethLoadYear, ethLoadAll, ethReset, ethBootstrap,
+    ethLoadedYears, ethFailedYears, ethPendingYears, ethProgress, ethProgressText, ethMaterialize,
+    getEthKey: () => (typeof ETH_KEY === 'undefined' ? null : ETH_KEY),
     // §19.5 UI 控制器 + 渲染数据
     simMarks, simOpenAtCursor, simAddAtCursor, simExitAtCursor, simCursorTs, simCursorPrice, simLeverage, simStopVal, simSizeVal, drawSim, renderSim
   };`);
@@ -2161,6 +2166,257 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     })());
 
     delete API.getSymbols().ETH;   // 复原：本组自造的数据不带出作用域
+  }
+
+  // ============ §33 ETH 全量历史（按 UTC 自然年分片）============
+  // 分两层测：
+  //   A. 数据层（纯 node 读盘）—— 分片文件本身对不对（结构 / 有序 / 网格 / 年份归属 / 跨年接缝）
+  //   B. 运行层（走 app.js API）—— 加载器门控 / 幂等 / 失败显式化 / materialize 与 REST 增量的合并
+  {
+    const ETH_DIR = path.join(__dirname, '..', 'share', 'eth');
+    const ETH_MF = path.join(ETH_DIR, 'manifest.js');
+    const ETH_MF_TEST = path.join(__dirname, '..', 'share', 'eth', 'manifest.js');
+    const W_ENTRY = path.join(__dirname, '..', 'watch', 'index.html');
+    const L_ENTRY = path.join(__dirname, '..', 'live', 'index.html');
+    const R_ENTRY = path.join(__dirname, '..', 'index.html');
+    const PERIODS33 = ['15m', '1h', '4h', '1d'];
+    const G33 = { '15m': 15, '1h': 60, '4h': 240, '1d': 1440 };
+    const tMinOf = (y, mo, d, h, mi) => Math.floor(Date.UTC(y, mo - 1, d, h, mi) / 60000);
+    const utcYearOf = t => new Date(t * 60000).getUTCFullYear();
+
+    const built = fs.existsSync(ETH_MF_TEST);
+    check('§33 share/eth/manifest.js 已构建', built,
+      built ? fs.statSync(ETH_MF_TEST).size + ' 字节' : '缺失 —— 先跑 node build_eth_shards.cjs && node update_eth_data.cjs');
+
+    if (built) {
+      const mtxt = fs.readFileSync(ETH_MF_TEST, 'utf8');
+      const mm = /window\.ETHFUT_MANIFEST\s*=\s*(\{[\s\S]*\})\s*;/.exec(mtxt);
+      const emf = mm ? JSON.parse(mm[1]) : null;
+
+      // ---- 33.1 manifest 契约 ----
+      check('§33 manifest 可解析且字段齐全',
+        !!emf && ['sym', 'inst', 'ctVal', 'src', 'first', 'last', 'years', 'counts', 'total', 'builtAt'].every(k => emf[k] !== undefined),
+        emf ? Object.keys(emf).join(',') : 'parse fail');
+      check('§33 manifest.sym / inst 正确', !!emf && emf.sym === 'ETH' && emf.inst === 'ETH-USDT-SWAP',
+        emf ? emf.sym + ' / ' + emf.inst : '-');
+      check('§33 数据源指向 kline-timemachine（不是已 404 的 k--data）',
+        !!emf && /kline-timemachine/.test(emf.src) && !/k--data/.test(emf.src), emf && emf.src);
+      check('§33 years 升序、无重复、≥7 年',
+        !!emf && emf.years.length >= 7 && emf.years.every((y, i) => i === 0 || y > emf.years[i - 1]),
+        emf ? emf.years.join(',') : '-');
+
+      // ---- 33.2 分片逐片体检 ----
+      const readShard = y => {
+        const t = fs.readFileSync(path.join(ETH_DIR, y + '.js'), 'utf8');
+        const m = new RegExp('window\\.ETHFUT_SHARDS\\[' + y + '\\]\\s*=\\s*(\\{[\\s\\S]*\\})\\s*;').exec(t);
+        if (!m) throw new Error(y + '.js 解析失败');
+        return JSON.parse(m[1]);
+      };
+      const cat = { '15m': [], '1h': [], '4h': [], '1d': [] };
+      const miss = [], shapeBad = [], monoBad = [], gapBad = [], misBad = [], yearBad = [];
+      const lastYearShard = {};
+      for (const y of emf.years) {
+        const f = path.join(ETH_DIR, y + '.js');
+        if (!fs.existsSync(f)) { miss.push(y); continue; }
+        let sh;
+        try { sh = readShard(y); } catch (e) { shapeBad.push(y + ':parse'); continue; }
+        lastYearShard[y] = sh;
+        for (const p of PERIODS33) {
+          const a = sh[p];
+          if (!Array.isArray(a) || !a.length) { shapeBad.push(y + '/' + p + ':empty'); continue; }
+          if (emf.counts[y] && emf.counts[y][p] !== a.length) shapeBad.push(y + '/' + p + ':count ' + a.length + '≠' + emf.counts[y][p]);
+          for (let i = 1; i < a.length; i++) if (a[i][0] <= a[i - 1][0]) { monoBad.push(y + '/' + p); break; }
+          for (let i = 1; i < a.length; i++) if (a[i][0] - a[i - 1][0] !== G33[p]) { gapBad.push(y + '/' + p); break; }
+          if (p === '1d' && a.some(b => b[0] % 1440 !== 0)) misBad.push(y);
+          if (a.some(b => utcYearOf(b[0]) !== y)) yearBad.push(y + '/' + p);
+          cat[p] = cat[p].concat(a);
+        }
+      }
+      check('§33 每个年份的分片文件都在', miss.length === 0, miss.join(','));
+      check('§33 每片四周期非空、根数与 manifest.counts 自洽', shapeBad.length === 0, shapeBad.slice(0, 5).join(','));
+      check('§33 每片每周期严格递增', monoBad.length === 0, monoBad.slice(0, 5).join(','));
+      check('§33 每片每周期无网格缺口（相邻间隔恒 = step）', gapBad.length === 0, gapBad.slice(0, 5).join(','));
+      check('§33 1d 全部锚定 UTC 00:00（不是 OKX 原生 16:00）', misBad.length === 0, misBad.join(','));
+      check('§33 年份归属正确（不串年）', yearBad.length === 0, yearBad.slice(0, 5).join(','));
+
+      // ---- 33.3 跨片 / 总量 ----
+      const catTot = {};
+      for (const p of PERIODS33) catTot[p] = cat[p].length;
+      check('§33 拼接后总根数与 manifest.total 一致',
+        PERIODS33.every(p => catTot[p] === emf.total[p]),
+        JSON.stringify(catTot) + ' vs ' + JSON.stringify(emf.total));
+      check('§33 15m 总量级（源 233,730 + OKX 尾部补齐）', catTot['15m'] >= 233730, String(catTot['15m']));
+      check('§33 三周期比例自洽（15m:1h≈4 / :4h≈16 / :1d≈96）',
+        Math.abs(catTot['15m'] / catTot['1h'] - 4) < 0.05 &&
+        Math.abs(catTot['15m'] / catTot['4h'] - 16) < 0.3 &&
+        Math.abs(catTot['15m'] / catTot['1d'] - 96) < 3,
+        (catTot['15m'] / catTot['1h']).toFixed(3) + ' / ' + (catTot['15m'] / catTot['4h']).toFixed(2) + ' / ' + (catTot['15m'] / catTot['1d']).toFixed(2));
+      check('§33 跨年无缝（上年末根 + step == 下年首根）', (() => {
+        for (const p of PERIODS33) {
+          const by = new Map();
+          for (const b of cat[p]) { const y = utcYearOf(b[0]); if (!by.has(y)) by.set(y, []); by.get(y).push(b); }
+          const ys = [...by.keys()].sort((a, b) => a - b);
+          for (let i = 1; i < ys.length; i++) {
+            const a = by.get(ys[i - 1]).slice(-1)[0][0], b = by.get(ys[i])[0][0];
+            if (b - a !== G33[p]) return false;
+          }
+        }
+        return true;
+      })());
+      check('§33 15m 首根 = 2019-11-27 07:45 UTC',
+        cat['15m'][0][0] === tMinOf(2019, 11, 27, 7, 45), new Date(cat['15m'][0][0] * 60000).toISOString());
+      check('§33 manifest.first / last 与数据首末根一致',
+        Date.parse(emf.first) === cat['15m'][0][0] * 60000 &&
+        Date.parse(emf.last) === cat['15m'][cat['15m'].length - 1][0] * 60000,
+        emf.first + ' → ' + emf.last);
+      check('§33 分片末端落后当前不超过 30 天（尾部补齐有效，不留历史空洞）',
+        (Date.now() - new Date(emf.last).getTime()) < 30 * 86400000,
+        Math.round((Date.now() - new Date(emf.last).getTime()) / 86400000) + ' 天');
+
+      // ---- 33.4 重采样自洽（不依赖源文件：直接验 4h/1d 就是 15m 的聚合）----
+      const y2026 = lastYearShard[emf.years[emf.years.length - 1]];
+      const h15 = y2026['15m'];
+      const agg = (bars) => [bars[0][0], bars[0][1],
+        bars.reduce((m, x) => Math.max(m, x[2]), -Infinity),
+        bars.reduce((m, x) => Math.min(m, x[3]), Infinity),
+        bars[bars.length - 1][4], bars.reduce((s, x) => s + x[5], 0)];
+      const same6 = (a, b) => a[0] === b[0] && [1, 2, 3, 4].every(i => Math.abs(a[i] - b[i]) < 1e-9) && Math.abs(a[5] - b[5]) < 1e-3;
+      check('§33 4h 首根 == 前 16 根 15m 的聚合（O/C/极值/量和）', same6(agg(h15.slice(0, 16)), y2026['4h'][0]),
+        JSON.stringify(agg(h15.slice(0, 16))) + ' vs ' + JSON.stringify(y2026['4h'][0]));
+      check('§33 1h 首根 == 前 4 根 15m 的聚合', same6(agg(h15.slice(0, 4)), y2026['1h'][0]));
+      check('§33 1d 首根 == 前 96 根 15m 的聚合', same6(agg(h15.slice(0, 96)), y2026['1d'][0]),
+        JSON.stringify(y2026['1d'][0]));
+
+      // ---- 33.5 量能口径守门（1d 滚动台阶，与 BTC 同一阈值）----
+      const e1d = cat['1d'];
+      let mxStep = 0;
+      const VOL_WIN = 30;
+      if (e1d.length > VOL_WIN * 2) {
+        const P = new Float64Array(e1d.length + 1);
+        for (let i = 0; i < e1d.length; i++) P[i + 1] = P[i] + (+e1d[i][5] || 0);
+        for (let i = VOL_WIN; i < e1d.length - VOL_WIN; i++) {
+          const before = (P[i] - P[i - VOL_WIN]) / VOL_WIN, after = (P[i + VOL_WIN] - P[i]) / VOL_WIN;
+          if (before > 0 && after > 0 && after / before > mxStep) mxStep = after / before;
+        }
+      }
+      check('§33 ETH 量能无 >20 倍台阶（口径事故守门）', mxStep < 20, '×' + mxStep.toFixed(2));
+
+      // ================= B. 运行层（app.js §33）=================
+
+      // ---- 33.6 门控：review / live 不启用 ----
+      API.ethReset();
+      API.watchSetEnabled(false); API.ethSetEnabled(undefined);
+      check('§33 复盘实例下不启用 ETH 分片', API.ethShouldRun() === false);
+      API.watchSetEnabled(true); API.ethSetEnabled(undefined);
+      const keepMf = sandbox.window.ETHFUT_MANIFEST;
+      sandbox.window.ETHFUT_MANIFEST = null;
+      check('§33 watch 实例但无 manifest → 静默退回 §32（不报错）', API.ethShouldRun() === false);
+      sandbox.window.ETHFUT_MANIFEST = emf;
+      check('§33 watch 实例 + manifest → 启用', API.ethShouldRun() === true);
+
+      // ---- 33.7 加载器：幂等 / 命中 / 失败显式化（用合成分片，不依赖真实数据）----
+      const synthYearA = 2021, synthYearB = 2022;
+      const tA = tMinOf(2021, 1, 1, 0, 0), tB = tMinOf(2022, 1, 1, 0, 0);
+      const mkBars = (base, n, step) => { const o = []; for (let i = 0; i < n; i++) o.push([base + i * step, 100, 101, 99, 100.5, 10]); return o; };
+      const mkShard = base => ({ '15m': mkBars(base, 4, 15), '1h': mkBars(base, 4, 60), '4h': mkBars(base, 4, 240), '1d': mkBars(base, 4, 1440) });
+      const synth = { [synthYearA]: mkShard(tA), [synthYearB]: mkShard(tB) };
+      const synthMf = { sym: 'ETH', inst: 'ETH-USDT-SWAP', ctVal: 0.1, src: 'test', first: '', last: '', years: [synthYearA, synthYearB], counts: {}, total: {}, builtAt: 'test' };
+
+      sandbox.window.ETHFUT_MANIFEST = synthMf;
+      sandbox.window.ETHFUT_SHARDS = {};
+      API.ethReset();
+      const calls = [];
+      API.ethSetLoader(y => { calls.push(y); sandbox.window.ETHFUT_SHARDS[y] = synth[y]; return Promise.resolve(true); });
+      check('§33 ethLoadYear 成功 → 记入已加载', (await API.ethLoadYear(synthYearB)) === true &&
+        API.ethLoadedYears().join(',') === String(synthYearB), API.ethLoadedYears().join(','));
+      check('§33 已加载年份不重复请求（幂等）',
+        (await API.ethLoadYear(synthYearB)) === true && calls.length === 1, calls.join(','));
+      check('§33 未加载年份出现在 pending 列表', API.ethPendingYears().join(',') === String(synthYearA), API.ethPendingYears().join(','));
+      check('§33 进度文案显示加载中', /加载中/.test(API.ethProgressText()), API.ethProgressText());
+      check('§33 进度 summary 数值自洽',
+        API.ethProgress().total === 2 && API.ethProgress().loaded === 1 && API.ethProgress().pending === 1,
+        JSON.stringify(API.ethProgress()));
+
+      API.ethSetLoader(() => Promise.resolve(false));
+      API.ethReset();
+      check('§33 加载失败 → 记入失败且不静默当成成功', (await API.ethLoadYear(synthYearA)) === false &&
+        API.ethFailedYears().join(',') === String(synthYearA), API.ethFailedYears().join(','));
+      check('§33 失败年份显式出现在进度文案里（fail-safe：不假装有数据）',
+        /加载失败/.test(API.ethProgressText()), API.ethProgressText());
+      check('§33 失败年份不会一直重试（进 failed 后 pending 移除）',
+        API.ethPendingYears().indexOf(synthYearA) < 0, API.ethPendingYears().join(','));
+
+      API.ethReset();
+      let staticHit = 0;
+      sandbox.window.ETHFUT_SHARDS = { [synthYearA]: synth[synthYearA], [synthYearB]: synth[synthYearB] };
+      API.ethSetLoader(() => { staticHit++; return Promise.resolve(true); });
+      API.ethRegisterExisting();
+      check('§33 已静态注入的分片直接登记，不再发起网络加载',
+        API.ethLoadedYears().length === 2 && staticHit === 0, staticHit + ' 次');
+
+      // ---- 33.8 materialize：装配 / 幂等 / 保留 REST 增量 / 不污染 BTC ----
+      const btc15Before = API.getSymbols().BTC.data['15m'].length;
+      API.ethRegisterExisting();
+      API.ethMaterialize();
+      const e15 = API.getSymbols().ETH.data['15m'];
+      check('§33 materialize 把已加载年份装进 SYMBOLS.ETH',
+        e15.length === 8 && ['1h', '4h', '1d'].every(p => API.getSymbols().ETH.data[p].length === 8), String(e15.length));
+      check('§33 materialize 后 15m 严格递增', e15.every((b, i) => i === 0 || b[0] > e15[i - 1][0]));
+      check('§33 materialize 不污染 BTC 数据', API.getSymbols().BTC.data['15m'].length === btc15Before);
+      check('§33 materialize 幂等（重复调用长度不变）', (() => {
+        API.ethMaterialize();
+        return API.getSymbols().ETH.data['15m'].length === 8;
+      })());
+      const tailTs = e15[e15.length - 1][0] + 15;
+      API.watchMergeInto('ETH', '15m', [[tailTs, 100, 105, 95, 102, 3]]);
+      API.ethMaterialize();
+      const e15b = API.getSymbols().ETH.data['15m'];
+      check('§33 materialize 保留比片末端更新的 REST/WS 柱子（不被分片底座覆盖）',
+        e15b.length === 9 && e15b[e15b.length - 1][0] === tailTs && e15b[e15b.length - 1][5] === 3,
+        String(e15b.length) + ' 末根ts=' + e15b[e15b.length - 1][0]);
+
+      // ---- 33.9 门控：entry 层不启动 ----
+      API.ethReset();
+      sandbox.window.ETHFUT_SHARDS = {};
+      let bootHit = 0;
+      API.ethSetLoader(() => { bootHit++; return Promise.resolve(true); });
+      API.watchSetEnabled(false); API.ethSetEnabled(undefined);
+      check('§33 复盘实例下 ethBootstrap 一个分片都不加载', (await API.ethBootstrap()) === 0 && bootHit === 0, bootHit + ' 次');
+      const APP33 = fs.readFileSync(APP_JS, 'utf8');
+      check('§33 App 静态检查：ETH 加载被 ethShouldRun() 门控在 watch 实例内',
+        /function ethShouldRun\s*\(\)/.test(APP33) && /watchShouldRun\(\)/.test(APP33) && /ethShouldRun\(\)/.test(APP33));
+      API.ethSetBase('OVERRIDE_ETH_BASE/');
+      check('§33 分片基址可由入口自行推导（多入口深度不同也能正确拼 URL）',
+        API.ethBaseUrl() === 'OVERRIDE_ETH_BASE/', API.ethBaseUrl());
+      API.ethSetBase(null);
+
+      // ---- 33.10 构建产物：只有 watch 入口引 ETH 分片 ----
+      const W33 = fs.readFileSync(W_ENTRY, 'utf8');
+      const L33 = fs.readFileSync(L_ENTRY, 'utf8');
+      const R33 = fs.readFileSync(R_ENTRY, 'utf8');
+      check('§33 watch 入口静态引用 ../share/eth/manifest.js',
+        /<script src="\.\.\/share\/eth\/manifest\.js"><\/script>/.test(W33));
+      check('§33 watch 入口只引 manifest（年份分片由 §33 渐进加载，不静态注入）',
+        (W33.match(/share\/eth\//g) || []).length === 1, String((W33.match(/share\/eth\//g) || []).length));
+      check('§33 复盘入口完全不含 share/eth 引用', !/share\/eth/.test(R33));
+      check('§33 看盘入口完全不含 share/eth 引用', !/share\/eth/.test(L33));
+      for (const [name, inst, have] of [['watch', 'watch', W33], ['live', 'live', L33]]) {
+        check('§33 ' + name + '/index.html 与 build_live.cjs 生成结果逐字节一致', (() => {
+          try {
+            const { buildEntry } = require(path.join(__dirname, '..', 'build_live.cjs'));
+            return buildEntry(fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8'), inst) === have;
+          } catch (e) { return false; }
+        })());
+      }
+
+      // 复原现场：本组自造的 ETH 数据与钩子不带出作用域
+      delete API.getSymbols().ETH;
+      sandbox.window.ETHFUT_MANIFEST = keepMf === undefined ? null : keepMf;
+      sandbox.window.ETHFUT_SHARDS = {};
+      API.ethReset(); API.ethSetLoader(null); API.ethSetBase(null);
+      API.ethSetEnabled(undefined); API.watchSetEnabled(null);
+      check('§33 测试钩子已复原（不影响后续用例）', API.ethShouldRun() === false, String(API.ethShouldRun()));
+    }
   }
 
   // ============ 汇总 ============

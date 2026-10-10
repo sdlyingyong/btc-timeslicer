@@ -25,10 +25,20 @@ const SRC_MARK = "window.__APP_INSTANCE__='review'";
 const SRC_TITLE = '<title>BTC 时光机 · 复盘</title>';
 
 // §32：入口由「一个」泛化为「一张表」——加新入口只需在这里加一行
+// §33：`extraScripts` 让某个入口**独有**地多引几个静态脚本（ETH 分片 manifest）。
+//      ⚠️ 只给 watch —— 复盘 / 看盘入口一个字节都不许多，否则会白白多拉 15.5MB 的 ETH 分片。
 const ENTRIES = [
   { dir: 'live', instance: 'live', title: '<title>BTC 时光机 · 看盘</title>' },
-  { dir: 'watch', instance: 'watch', title: '<title>BTC 时光机 · 自选</title>' }
+  {
+    dir: 'watch', instance: 'watch', title: '<title>BTC 时光机 · 自选</title>',
+    // 只引 manifest（≈700B）；年份分片 share/eth/YYYY.js 由 §33 在前端「新→旧渐进加载」，
+    // 这样首屏只吃最近 2 年（≈3.6MB），而不是一上来并发 15.5MB 与 data.js 抢带宽。
+    extraScripts: ['share/eth/manifest.js']
+  }
 ];
+
+// 注入锚点：静态脚本必须排在 app.js **之前**（app.js 执行时就要能读到 ETHFUT_MANIFEST）
+const APP_ANCHOR = '<script src="share/app.js"></script>';
 
 function buildEntry(src, instance) {
   const e = ENTRIES.filter(x => x.instance === instance)[0];
@@ -37,6 +47,12 @@ function buildEntry(src, instance) {
   if (src.indexOf(SRC_TITLE) < 0) throw new Error('build_live: 源文件缺少标题 ' + JSON.stringify(SRC_TITLE));
   let out = src.split(SRC_MARK).join("window.__APP_INSTANCE__='" + e.instance + "'");
   out = out.split(SRC_TITLE).join(e.title);
+  // 入口独有脚本：先按「源形态」注入 share/…，下面统一的路径改写会一并变成 ../share/…
+  if (e.extraScripts && e.extraScripts.length) {
+    if (out.indexOf(APP_ANCHOR) < 0) throw new Error('build_live: 找不到锚点 ' + JSON.stringify(APP_ANCHOR));
+    const tags = e.extraScripts.map(p => '<script src="' + p + '"></script>').join('\n');
+    out = out.split(APP_ANCHOR).join(tags + '\n' + APP_ANCHOR);
+  }
   // 资源路径：share/xxx → ../share/xxx（只动 src=" 后面那一段）
   out = out.replace(/(src=")share\//g, '$1../share/');
   if (!/src="\.\.\/share\/app\.js"/.test(out)) throw new Error('build_live: 资源路径替换失败');

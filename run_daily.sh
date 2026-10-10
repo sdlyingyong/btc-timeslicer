@@ -35,8 +35,19 @@ if [ "$RC" -ne 0 ]; then
   exit $RC
 fi
 
-if git diff --quiet share/data.js; then
-  echo "$(date '+%F %T') share/data.js 无变化，跳过提交"
+# §33：ETH 分片尾部增量（历史段来自用户已有仓库 kline-timemachine，尾部同样来自 OKX）。
+# 为什么必须每天跑：分片末根是构建时的快照，REST 单页 300 根只能覆盖 3.1 天 ——
+# 断更超过这个窗口，图上就会在「分片末端」与「当前」之间留一条真实存在的空洞。
+# 失败同样中止提交：宁可保持旧数据，也不要留下一条空洞。
+caffeinate -i /Users/mac/.local/node/bin/node update_eth_data.cjs
+RC=$?
+if [ "$RC" -ne 0 ]; then
+  echo "$(date '+%F %T') ETH 分片尾部更新失败 (rc=$RC)，中止提交"
+  exit $RC
+fi
+
+if git diff --quiet share/data.js share/eth; then
+  echo "$(date '+%F %T') share/data.js 与 share/eth/ 均无变化，跳过提交"
   echo "===== 结束 ====="
   exit 0
 fi

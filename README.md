@@ -1,6 +1,6 @@
 # BTC 时光机 · K线复盘工具
 
-一个 BTC K 线复盘 / 看盘网页（USDT 本位永续，1d / 4h / 1h / 15m，15m 全量 24.8 万根），部署在 GitHub Pages。
+一个 BTC / ETH K 线复盘·看盘网页（USDT 本位永续，1d / 4h / 1h / 15m；15m 全量 BTC 24.8 万根、ETH 24.1 万根），部署在 GitHub Pages。
 
 ## 三个入口（各自独立保存进度）
 
@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | **复盘** | https://sdlyingyong.github.io/btc-timeslicer/ | 回看历史、画线复盘；记住你上次看到哪 |
 | **看盘** | https://sdlyingyong.github.io/btc-timeslicer/live/ | 看当前盘面；每 5 分钟直连 OKX 自动补数 |
-| **自选** | https://sdlyingyong.github.io/btc-timeslicer/watch/ | 自选多币种（BTC / ETH）+ WebSocket 实时（§32，MVP） |
+| **自选** | https://sdlyingyong.github.io/btc-timeslicer/watch/ | 自选多币种（BTC / ETH）+ WebSocket 实时；ETH 带 **2019 起全量历史**（按年分片渐进加载，§32 / §33） |
 
 三个入口都在 `sdlyingyong.github.io` 下 —— 而 **origin 只看「协议 + 域名」，不看路径**，
 所以它们共享同一份 localStorage / IndexedDB。为了「各存各的进度互不覆盖」，页面里做了
@@ -30,6 +30,10 @@
 - **自选看盘（§32 MVP）**：左侧自选列表（代码 / 最新价 / 24h 涨跌幅 / 迷你走势）+ 右侧保留全部时光机能力；
   一条 WebSocket 订阅 N 个币 × 3 个周期（秒级推送，请求数不随币种增长）；**连不上就显式写「离线」并降级为
   REST 轮询兜底，绝不假装有数据**
+- **ETH 全量历史（§33）**：自选里的 ETH 不再是「只有 300 根」—— 按 UTC 自然年切成 8 个分片
+  （`share/eth/YYYY.js`，合计 **15.5 MB** / 2019-11-27 起 **24.1 万根** 15m），**新→旧渐进加载**
+  （首屏只等最近 2 年 ≈4.1 MB），每片落地即上图，历史一年一年往前长；
+  **某年加载失败会在状态位显式报出来**（`历史 n/8 · N 年加载失败`），绝不假装有数据
 
 ## 目录结构
 
@@ -38,16 +42,20 @@ index.html            # 复盘入口（壳：CSS + 面板 DOM + 3 行 <script>�
 live/index.html       # 看盘入口（由 build_live.cjs 从 index.html 生成，勿手改）
 watch/index.html      # 自选入口（同上，由 build_live.cjs 生成，勿手改）
 share/app.js          # 全部逻辑（唯一一份，三个入口共用）
-share/data.js         # 全部行情数据（唯一一份，~17MB，每日更新）
+share/data.js         # BTC 行情数据（唯一一份，~17MB，每日更新）
+share/eth/YYYY.js     # §33 ETH 年分片（8 片，2019–2026，合计 15.5MB）—— 只有 watch 入口引用
+share/eth/manifest.js # §33 ETH 分片清单（年份 / 根数 / 源仓库 / 构建日期）
 build_live.cjs        # 生成 live/ 与 watch/ 两个入口壳（node build_live.cjs [--check]）
 build_offline.cjs     # 生成「真·单文件离线版」：node build_offline.cjs
-tests/regression.test.cjs   # 主回归（轻量 mock，437 断言）
+build_eth_shards.cjs  # §33 从 kline-timemachine 构建 ETH 历史分片（一次性 / 幂等）
+update_eth_data.cjs   # §33 ETH 分片尾部增量（OKX 15m，接在分片末端之后，可每日重跑）
+tests/regression.test.cjs   # 主回归（轻量 mock，486 断言）
 tests/smoke_entries.cjs     # 三入口端到端冒烟（真 DOM，需 jsdom）
 ```
 
-数据只有 `share/data.js` 一份 —— 三个入口引用同一个文件，所以每天更新只需一次 17MB 提交。
-但数据只覆盖 BTC；**自选入口里的 ETH 走 OKX 直连**（首屏 REST `limit=300` + 运行期 WebSocket
-增量），仓库体积零增长。
+数据分两块：`share/data.js`（BTC，三个入口共用的唯一一份）；`share/eth/*.js`（ETH 全量历史分片，
+**只有 watch 入口引用**，复盘 / 看盘 `grep share/eth` 是零命中）。
+两者都是独立静态文件（`<script src>`），所以体积不压在首屏 DOM 上，也不会互相牵连。
 
 ## 使用方法
 
@@ -78,12 +86,24 @@ node build_offline.cjs        # 产出 btc-timeslicer-offline.html（约 17MB，
 
 ## 数据来源
 
-BTC-USDT 永续合约（`BTC-USDT-SWAP`）15 分钟 K 线，取自 OKX；1h / 4h 直接取 OKX，1d 由 4h 重采样到 UTC 00:00
-（OKX 原生 1D 锚定 16:00 UTC，与历史网格错位，不能用）。量能存 `volCcy`（币），不是 `vol`（张）—— 两者差 100 倍。
+**BTC**：USDT 永续（`BTC-USDT-SWAP`）15 分钟 K 线。历史段来自外部数据仓库，尾部每日取 OKX；
+1h / 4h 由 15m 重采样，1d 锚定 UTC 00:00（OKX 原生 1D 锚定 16:00 UTC，与历史网格错位，不能用）。
 
-```
-HTTPS_PROXY=http://127.0.0.1:10809 node update_data.cjs   # 写 share/data.js
-node validate_data.cjs                                    # 校验（缺口/乱序/量能口径）
+**ETH（§33）**：历史段取自用户已有的 GitHub 仓库
+[`sdlyingyong/kline-timemachine`](https://github.com/sdlyingyong/kline-timemachine)
+（`fut_data/eth_15m_0000..0011.json`，2019-11-27 起 233,730 根），在其上按 UTC 自然年切分片；
+之后每天用 OKX 把分片末端向前推进（`update_eth_data.cjs`），保证「分片末端」与「当前」之间的空隙
+始终不超过 REST 能覆盖的 3.1 天。两个源实测价格差 ≤0.05%、量比 1.0–1.5×（同一被套利锁死的市场）。
+
+⚠️ **量能一律存 `volCcy`（币本位）**，不是 `vol`（张）也不是 USDT 成交额 ——
+BTC-USDT-SWAP 的 ctVal=0.01、ETH-USDT-SWAP 是 0.1，口径混用会造成「半屏柱子看不见、半屏顶满」。
+`validate_data.cjs` 用滚动台阶（阈值 20×）把这条线焊死。
+
+```bash
+HTTPS_PROXY=http://127.0.0.1:10809 node update_data.cjs       # 写 share/data.js（BTC，每日）
+HTTPS_PROXY=http://127.0.0.1:10809 node update_eth_data.cjs   # 推进 share/eth/（ETH，每日）
+node validate_data.cjs                                        # 校验 BTC + ETH（缺口 / 乱序 / 量能口径 / 分片自洽）
+node build_eth_shards.cjs                                     # 只在需要重建 ETH 全量历史时跑（幂等）
 ```
 
 本页仅用于行情回看与复盘，不构成任何投资建议。
