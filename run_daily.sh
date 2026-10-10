@@ -59,8 +59,22 @@ if ! git "${GIT_PX[@]}" pull --ff-only "origin" "$BRANCH"; then
   exit 1
 fi
 
-git add share/data.js
-git commit -m "data: daily update $(date '+%F') (source=$SOURCE)"
+# 必须把 share/eth 一起 add：只加 share/data.js 时，若当天只有 ETH 分片有新根，
+# 暂存区为空 -> git commit 报 "nothing to commit"，而本脚本没有 set -e，
+# 会一路走到 push 并打印"已提交并推送" —— 典型的静默失败，ETH 尾巴永远落不了盘。
+git add share/data.js share/eth
+
+if git diff --cached --quiet; then
+  echo "$(date '+%F %T') 暂存区无变化（BTC 与 ETH 都没有新数据），跳过提交"
+  echo "===== 结束 ====="
+  exit 0
+fi
+
+if ! git commit -m "data: daily update $(date '+%F') (source=$SOURCE)"; then
+  echo "$(date '+%F %T') git commit 失败，中止本次提交/推送"
+  exit 1
+fi
+
 if git "${GIT_PX[@]}" push "origin" "$BRANCH"; then
   echo "$(date '+%F %T') 已提交并推送到 GitHub Pages"
 else
