@@ -2566,7 +2566,7 @@ window.ETHFUT_MANIFEST = {
 
 # §34 看盘页升级为多币种（/live/ 复用自选能力）
 
-日期：2026-10-11 ｜ 状态：实现中 ｜ 关联：§30（实例隔离）、§31（看盘补数）、§32（自选）、§33（ETH 分片）
+日期：2026-10-11 ｜ 状态：**已上线** ｜ 关联：§30（实例隔离）、§31（看盘补数）、§32（自选）、§33（ETH 分片）
 
 ## 34.0 背景与目标
 
@@ -2659,9 +2659,11 @@ if (watchShouldRun()) watchInit();
 
 ## 34.8 完成定义
 
-- [ ] PRD §34 写完（背景 / 归属 / 防线 / 顺序 / 注入 / 非目标 / 验收 / 测试）
-- [ ] 测试**先红后绿**：regression 与 smoke 的新增断言先失败，实现后全绿，既有条目零回归
-- [ ] 实现 + 重生成 `live/index.html` + `build_live.cjs --check` 逐字节一致
-- [ ] 真浏览器 E2E：`/live/` 多币种可用（34.6.6），`/` 与 `/watch/` 不回退
-- [ ] 提交推送 `main` + 线上 sha256 逐文件核验
-- [ ] 更新 `README.md` 与 `btc-timeslicer-ops` skill
+- [x] PRD §34 写完（背景 / 归属 / 防线 / 顺序 / 注入 / 非目标 / 验收 / 测试）
+- [x] 测试**先红后绿**（红：`ReferenceError: liveInstOf is not defined`）；
+      回归 **504 PASS / 0 FAIL**（§33 后 486，+18），冒烟 **37 PASS / 0 FAIL**（§33 后 30，+7），既有条目零回归
+- [x] 实现 + 重生成 `live/index.html` + `build_live.cjs --check` → `[OK]`
+- [x] 真浏览器 E2E：`/live/` 多币种可用（34.6.6 全中），`/` 与 `/watch/` 不回退
+- [x] 提交 `7c0330e` 推送 `main` + 线上 sha256 逐文件核验（`index.html` / `live/index.html` /
+      `watch/index.html` / `share/app.js` / `share/eth/manifest.js` 全部一致；`share/eth` 引用数 0 / 1 / 1）
+- [x] 更新 `README.md` 与 `btc-timeslicer-ops` skill
