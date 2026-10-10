@@ -7,7 +7,7 @@
 | 入口 | 地址 | 用途 |
 | --- | --- | --- |
 | **复盘** | https://sdlyingyong.github.io/btc-timeslicer/ | 回看历史、画线复盘；记住你上次看到哪 |
-| **看盘** | https://sdlyingyong.github.io/btc-timeslicer/live/ | 看当前盘面；每 5 分钟直连 OKX 自动补数 |
+| **看盘** | https://sdlyingyong.github.io/btc-timeslicer/live/ | 看当前盘面；**多币种（BTC / ETH）**，WebSocket 实时 + 断线 REST 轮询兜底；ETH 带 **2019 起全量历史**（§34） |
 | **自选** | https://sdlyingyong.github.io/btc-timeslicer/watch/ | 自选多币种（BTC / ETH）+ WebSocket 实时；ETH 带 **2019 起全量历史**（按年分片渐进加载，§32 / §33） |
 
 三个入口都在 `sdlyingyong.github.io` 下 —— 而 **origin 只看「协议 + 域名」，不看路径**，
@@ -34,6 +34,10 @@
   （`share/eth/YYYY.js`，合计 **15.5 MB** / 2019-11-27 起 **24.1 万根** 15m），**新→旧渐进加载**
   （首屏只等最近 2 年 ≈4.1 MB），每片落地即上图，历史一年一年往前长；
   **某年加载失败会在状态位显式报出来**（`历史 n/8 · N 年加载失败`），绝不假装有数据
+- **看盘页多币种（§34）**：`/live/` 与 `/watch/` 同规格 —— 左侧「自选」分组（BTC / ETH）+ ETH 全量历史；
+  数据引擎由 §32（WS + REST 兜底，按标的取数）接管，原 §31 的「只补 BTC、5 分钟一次」降为兜底，
+  **两套引擎绝不同时跑**。⚠️ 关键防线：§31 的取数标的与落库标的**必须同一个**，
+  否则看盘切到 ETH 时会把 BTC 的 K 线写进 ETH 数组（假数据）
 
 ## 目录结构
 
@@ -43,7 +47,7 @@ live/index.html       # 看盘入口（由 build_live.cjs 从 index.html 生成�
 watch/index.html      # 自选入口（同上，由 build_live.cjs 生成，勿手改）
 share/app.js          # 全部逻辑（唯一一份，三个入口共用）
 share/data.js         # BTC 行情数据（唯一一份，~17MB，每日更新）
-share/eth/YYYY.js     # §33 ETH 年分片（8 片，2019–2026，合计 15.5MB）—— 只有 watch 入口引用
+share/eth/YYYY.js     # §33 ETH 年分片（8 片，2019–2026，合计 15.5MB）—— 看盘 / 自选入口引用，复盘不引
 share/eth/manifest.js # §33 ETH 分片清单（年份 / 根数 / 源仓库 / 构建日期）
 build_live.cjs        # 生成 live/ 与 watch/ 两个入口壳（node build_live.cjs [--check]）
 build_offline.cjs     # 生成「真·单文件离线版」：node build_offline.cjs
@@ -54,7 +58,7 @@ tests/smoke_entries.cjs     # 三入口端到端冒烟（真 DOM，需 jsdom）
 ```
 
 数据分两块：`share/data.js`（BTC，三个入口共用的唯一一份）；`share/eth/*.js`（ETH 全量历史分片，
-**只有 watch 入口引用**，复盘 / 看盘 `grep share/eth` 是零命中）。
+**看盘 / 自选两个入口引用**，复盘入口 `grep share/eth` 是零命中 —— 复盘要可复现，不接活数据）。
 两者都是独立静态文件（`<script src>`），所以体积不压在首屏 DOM 上，也不会互相牵连。
 
 ## 使用方法

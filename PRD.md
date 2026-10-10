@@ -2561,5 +2561,107 @@ window.ETHFUT_MANIFEST = {
         `SYMBOLS.ETH.data['15m']` = 240,849 根（240,847 底座 + WS 补的 2 根，**末根越过分片末端**）
       · 不走代理 → `离线 · … · 轮询兜底 · 全量 8 年`（ETH 历史照常全量，**不假装**已连上）
       · `/`、`/live/` 零变化（无 `#watchList`、无 `ETHFUT_MANIFEST`）
+- [x] 更新 `README.md` 与 `btc-timeslicer-ops` skill
+- [x] 分支提交 + 推送，合并 `main` 上线（2026-10-10，`git merge --ff-only`，线上三入口 200）
+
+# §34 看盘页升级为多币种（/live/ 复用自选能力）
+
+日期：2026-10-11 ｜ 状态：实现中 ｜ 关联：§30（实例隔离）、§31（看盘补数）、§32（自选）、§33（ETH 分片）
+
+## 34.0 背景与目标
+
+用户诉求（原话）：「线上看盘先把 eth 的推送上去吧」。用户在 `/live/`（看盘）上看不到 ETH，也找不到任何可切换/可自选的币种。
+
+根因是**能力被实例门控挡住**，不是数据缺失：
+
+- §31 的看盘页把标的写死成 `LIVE_INST = 'BTC-USDT-SWAP'`；
+- §32 的多币种自选列表、§33 的 ETH 全量分片，都被 `watchShouldRun()`（`APP_INSTANCE === 'watch'`）锁在 watch 实例里；
+- `/live/` 因此既没有自选列表、也不加载 `share/eth/manifest.js`。
+
+**目标**：让 `/live/` 具备与 `/watch/` 等价的多币种能力 —— 自选分组（BTC + ETH）、ETH 全量 8 年历史、WS 实时 + 断线轮询兜底。
+
+**已确认的取舍**：两个入口功能高度重合，用户明确选择接受（备选方案「只加一个 BTC/ETH 切换器」被否）。
+
+## 34.1 数据引擎归属
+
+| 模块 | §34 之前 | §34 之后 |
+|---|---|---|
+| §31 看盘 5 分钟 REST 补数 | live 的**唯一**引擎 | **降为兜底**，仅在 §32 未启用时启动 |
+| §32 自选（WS 实时 + REST 兜底 + 轮询） | 仅 watch | watch **+ live** |
+| §33 ETH 分片渐进加载 | 仅 watch | watch **+ live**（跟随 manifest 注入） |
+
+理由：§32 的能力是 §31 的**超集** —— 它按标的抓 REST 首屏、用 WS 实时推送、断线后 60s 轮询兜底，覆盖 BTC 与 ETH；§31 只覆盖 BTC 且是 5 分钟粒度。两套同时跑没有任何增益，只会**同一份数组被两个写入方交替覆盖**（§31 的 `liveMerge` 会替换同 ts 的柱子并触发 EMA 失效与重绘）。
+
+## 34.2 必须结构性堵死的洞（本次最关键）
+
+§31 的 `liveRefreshTick` **固定抓** `LIVE_INST = 'BTC-USDT-SWAP'`，落库却走 `liveArrOf()` → `SYMBOLS[curSym]`。
+
+在「看盘页只有 BTC」的旧世界里这无害；**一旦看盘页能切到 ETH，它就会把 BTC 的 K 线写进 ETH 的数组** —— 图上出现一段「看着是 ETH 其实是 BTC 价格」的假数据（ETH ≈ 2500 vs BTC ≈ 81000，肉眼极醒目），并顺带毁掉该标的的全部指标（EMA、成交量归一化基准、模拟交易求值）。
+
+这属于「造假数据」，与用户定下的硬约束（*数据没有就说读取错误，不要弄假的浪费我时间*）直接冲突，必须**从结构上**堵死，而不是靠"反正不会同时跑"的约定。
+
+对策三道，缺一不可：
+
+1. **取数跟随当前标的**：URL 用 `SYMBOLS[curSym].inst`，不再用常量 `LIVE_INST`；
+2. **落库前校验标的**：抓回的 `instId` 与 `SYMBOLS[curSym].inst` 不一致 → **整批丢弃、不合并**（永不跨标的写入）；
+3. **两套引擎不同时跑**：启动条件加 `!watchShouldRun()`。
+
+第 2 条是最后一道防线：即使将来有人把 §31 重新开回 live，也不可能有跨标的污染。
+
+## 34.3 启动顺序（TDZ 陷阱）
+
+原 §31 的启动句子 `if (liveShouldRun()) liveRefreshStart();` 写在 §32 代码块**之前**（源码约第 3094 行，`setView()` 之后）。
+
+而 `watchShouldRun()` 读的是模块级 `let watchForce`（第 3123 行）。在 3094 处调用 `watchShouldRun()` 会命中**暂时性死区**，直接抛 `ReferenceError: Cannot access 'watchForce' before initialization`。
+
+对策：把 §31 的启动整句**搬到文件末尾的引导块**，与 §32 的启动相邻，顺序显式、可读：
+
+```js
+// §34：看盘页的数据引擎交给 §32（WS + REST 兜底，覆盖全部标的）；
+//       §31 只在 §32 未启用时兜底（例如 manifest 缺失、或将来把 §32 关掉）。
+if (liveShouldRun() && !watchShouldRun()) liveRefreshStart();
+if (watchShouldRun()) watchInit();
+```
+
+## 34.4 入口注入
+
+`build_live.cjs` 的入口表：给 `live` 条目补上 `extraScripts: ['share/eth/manifest.js']`。
+
+结果：`/live/` 的脚本顺序变为 `share/data.js` → `share/eth/manifest.js` → `share/app.js`（与 `/watch/` 一致）。`/`（复盘）**零变化**，仍不引用 `share/eth/` 任何文件。
+
+## 34.5 非目标（明确不做）
+
+- **不做自选币种的增删 UI** —— 用户明确「先把 ETH 这块推上去」；`WATCH_SYMBOLS` 本轮仍是写死的 `[BTC, ETH]`（`WATCH_KEY` 继续不启用）。
+- **不删 §31** —— 保留为「无 manifest 时」的兜底路径，只是优先级降到 §32 之后。
+- **不给 ETH 单独抓 1d** —— 仍由 4h 重聚合（OKX 原生 1D 锚定 16:00 UTC，与历史 00:00 UTC 网格错位）。
+- **不改 §31 的 5 分钟节奏**，不动复盘实例的任何行为。
+
+## 34.6 验收标准
+
+| # | 标准 |
+|---|---|
+| 34.6.1 | `buildEntry(index.html, 'live')` 生成的页含 `share/eth/manifest.js`，且**排在 `app.js` 之前** |
+| 34.6.2 | `APP_INSTANCE = 'live'` 时 `watchShouldRun() === true`；`'review'` 时仍为 `false` |
+| 34.6.3 | §31 的启动条件含 `!watchShouldRun()`（两引擎不同时跑） |
+| 34.6.4 | 取数按当前标的：`curSym = 'ETH'` 时请求 URL 的 `instId=ETH-USDT-SWAP` |
+| 34.6.5 | **标的校验**：抓回的 `instId` 与当前标的不符 → 不合并，该标的数组**长度与内容逐根不变** |
+| 34.6.6 | 真浏览器：`/live/` 左侧出现「自选」分组（BTC + ETH 两行）、8 个分片全载、点 ETH 能切、ETH 历史可拖到 `2019-11-27` |
+| 34.6.7 | `/`（复盘）与 `/watch/`（自选）行为**零回退**；`build_live --check` 逐字节一致 |
+
+## 34.7 测试策略
+
+- **regression**：新增 §34 块（门控真值 / 入口注入 / 静态检查 / 数据安全不变量）。
+- **必须同步改的既有断言**（本次改动会打破它们，不是回归）：
+  - `§31 App 静态检查：自动启动被 liveShouldRun() 包住` —— 原断言的是 `if (liveShouldRun()) liveRefreshStart();`，现在这行带了 `!watchShouldRun()`，且**位置搬到文件末尾**；
+  - `§33 watch 入口静态引用 ../share/eth/manifest.js` —— 原只认 watch，现在 live 也应有。
+- **smoke**：`§33 看盘入口没有 ETHFUT_MANIFEST` 反转为**应有**；加载顺序断言从只测 watch 扩展到 live。
+- **关键一条**：34.6.5 用**对抗式**测试 —— 伪造 `fetch` 返回 BTC 的蜡烛 + 把 `curSym` 设成 `ETH` + 强制打开 §31，断言 ETH 数组一字未动。这条必须先红后绿。
+
+## 34.8 完成定义
+
+- [ ] PRD §34 写完（背景 / 归属 / 防线 / 顺序 / 注入 / 非目标 / 验收 / 测试）
+- [ ] 测试**先红后绿**：regression 与 smoke 的新增断言先失败，实现后全绿，既有条目零回归
+- [ ] 实现 + 重生成 `live/index.html` + `build_live.cjs --check` 逐字节一致
+- [ ] 真浏览器 E2E：`/live/` 多币种可用（34.6.6），`/` 与 `/watch/` 不回退
+- [ ] 提交推送 `main` + 线上 sha256 逐文件核验
 - [ ] 更新 `README.md` 与 `btc-timeslicer-ops` skill
-- [ ] 分支提交 + 推送，或合并 `main` 上线（**待用户拍板**）

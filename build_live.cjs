@@ -25,10 +25,15 @@ const SRC_MARK = "window.__APP_INSTANCE__='review'";
 const SRC_TITLE = '<title>BTC 时光机 · 复盘</title>';
 
 // §32：入口由「一个」泛化为「一张表」——加新入口只需在这里加一行
-// §33：`extraScripts` 让某个入口**独有**地多引几个静态脚本（ETH 分片 manifest）。
-//      ⚠️ 只给 watch —— 复盘 / 看盘入口一个字节都不许多，否则会白白多拉 15.5MB 的 ETH 分片。
+// §33：`extraScripts` 让某个入口多引几个静态脚本（ETH 分片 manifest）。
+// §34：看盘入口也带上 —— 看盘页升级为多币种后与自选同规格；**只有复盘入口**一个字节都不许多，
+//      否则复盘的「可复现」前提就被活数据破坏了。
 const ENTRIES = [
-  { dir: 'live', instance: 'live', title: '<title>BTC 时光机 · 看盘</title>' },
+  {
+    dir: 'live', instance: 'live', title: '<title>BTC 时光机 · 看盘</title>',
+    // 与 watch 同规格：只引 manifest（≈700B），年份分片由 §33 在前端「新→旧渐进加载」。
+    extraScripts: ['share/eth/manifest.js']
+  },
   {
     dir: 'watch', instance: 'watch', title: '<title>BTC 时光机 · 自选</title>',
     // 只引 manifest（≈700B）；年份分片 share/eth/YYYY.js 由 §33 在前端「新→旧渐进加载」，

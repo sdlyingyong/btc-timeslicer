@@ -148,7 +148,8 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     // §29 重叠对象命中：全部候选 + 同点轮换状态
     hitTestAll, getLastPick: () => lastPick, setLastPick: v => { lastPick = v; },
     // §31 看盘实例：直连 OKX 自动补数
-    liveShouldRun, liveSetEnabled, liveSetFetch, liveUrl, liveParse, liveMerge, liveDeriveDaily,
+    liveShouldRun, liveSetEnabled, liveSetFetch, liveUrl, liveInstOf, liveArrOf, liveParse, liveMerge, liveDeriveDaily,
+    getCurSym: () => curSym,
     liveRefreshTick, liveRefreshStart, liveRefreshStop, liveGetStatus, liveIntervalMs, livePeriods,
     // §32 自选看盘 MVP：多币种 + WebSocket 实时
     watchShouldRun, watchSetEnabled, watchSetFetch, watchSetWS, watchInit,
@@ -1898,10 +1899,11 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     const P = API.livePeriods ? API.livePeriods() : null;
     check('§31 只补 15m/1h/4h（1d 由 4h 派生，不直接抓）',
       Array.isArray(P) && P.join(',') === '15m,1h,4h', P && P.join(','));
+    // §34：liveUrl 现在带可选的标的参数 —— 这里显式传 BTC，断言与「当前标的是谁」解耦。
     check('§31 OKX bar 参数大写 1H/4H（写小写会 51000 Parameter bar error）',
-      API.liveUrl('1h').indexOf('bar=1H') >= 0 && API.liveUrl('4h').indexOf('bar=4H') >= 0 && API.liveUrl('15m').indexOf('bar=15m') >= 0,
-      API.liveUrl('1h'));
-    check('§31 URL 带 instId 与 limit', /instId=BTC-USDT-SWAP/.test(API.liveUrl('15m')) && /limit=\d+/.test(API.liveUrl('15m')));
+      API.liveUrl('1h', 'BTC').indexOf('bar=1H') >= 0 && API.liveUrl('4h', 'BTC').indexOf('bar=4H') >= 0 && API.liveUrl('15m', 'BTC').indexOf('bar=15m') >= 0,
+      API.liveUrl('1h', 'BTC'));
+    check('§31 URL 带 instId 与 limit', /instId=BTC-USDT-SWAP/.test(API.liveUrl('15m', 'BTC')) && /limit=\d+/.test(API.liveUrl('15m', 'BTC')));
     check('§31 刷新间隔 = 5 分钟', API.liveIntervalMs() === 300000, String(API.liveIntervalMs()));
 
     // ---- 31.2 解析：量能必须取 volCcy（第 7 列），不是 vol（第 6 列）----
@@ -2001,8 +2003,8 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     API.liveSetFetch(async () => { hit++; return { json: async () => ({ code: '0', data: [] }) }; });
     await API.liveRefreshTick();
     check('§31 复盘实例下 tick 一个请求都不发', hit === 0, hit + ' 次');
-    check('§31 App 静态检查：自动启动被 liveShouldRun() 包住',
-      APP31.indexOf('if (liveShouldRun()) liveRefreshStart();') >= 0);
+    check('§31 App 静态检查：自动启动被 liveShouldRun() 包住，且被 §34 降为兜底（不与 §32 同时跑）',
+      APP31.indexOf('if (liveShouldRun() && !watchShouldRun()) liveRefreshStart();') >= 0);
     check('§31 App 静态检查：切回前台立刻补一次（visibilitychange）',
       APP31.indexOf("document.addEventListener('visibilitychange'") >= 0);
     check('§31 App 静态检查：量能列注明取 volCcy 而不是 vol',
@@ -2399,7 +2401,16 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
       check('§33 watch 入口只引 manifest（年份分片由 §33 渐进加载，不静态注入）',
         (W33.match(/share\/eth\//g) || []).length === 1, String((W33.match(/share\/eth\//g) || []).length));
       check('§33 复盘入口完全不含 share/eth 引用', !/share\/eth/.test(R33));
-      check('§33 看盘入口完全不含 share/eth 引用', !/share\/eth/.test(L33));
+      // §34：看盘入口升级为多币种，改为**必须**引 manifest，规格与 watch 对齐
+      check('§34 看盘入口静态引用 ../share/eth/manifest.js',
+        /<script src="\.\.\/share\/eth\/manifest\.js"><\/script>/.test(L33));
+      check('§34 看盘入口只引 manifest（年份分片仍由 §33 渐进加载）',
+        (L33.match(/share\/eth\//g) || []).length === 1, String((L33.match(/share\/eth\//g) || []).length));
+      check('§34 live 与 watch 的脚本声明顺序一致（data → manifest → app）', (() => {
+        const srcsOf = h => (h.match(/<script[^>]*src="([^"]*)"/g) || [])
+          .map(t => (t.match(/src="([^"]*)"/) || [])[1]);
+        return srcsOf(W33).join('|') === srcsOf(L33).join('|');
+      })());
       for (const [name, inst, have] of [['watch', 'watch', W33], ['live', 'live', L33]]) {
         check('§33 ' + name + '/index.html 与 build_live.cjs 生成结果逐字节一致', (() => {
           try {
@@ -2417,6 +2428,119 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
       API.ethSetEnabled(undefined); API.watchSetEnabled(null);
       check('§33 测试钩子已复原（不影响后续用例）', API.ethShouldRun() === false, String(API.ethShouldRun()));
     }
+  }
+
+  // ============ §34 看盘页升级为多币种（/live/ 复用自选能力）============
+  // 背景：用户在 /live/ 看不到 ETH、也找不到可切换的币种 —— 能力被 watchShouldRun() 锁在 watch 实例里。
+  // 本次把 §32/§33 开到 live，并把 §31 降为兜底。**最关键的一条**：
+  // §31 原来固定抓 BTC、却按 curSym 落库 —— 看盘页能切 ETH 之后，这会把 BTC 的 K 线写进 ETH 数组。
+  {
+    const APP34 = fs.readFileSync(APP_JS, 'utf8');
+    const row34 = (tsMin, close, vol) => [
+      String(tsMin * 60000), String(close), String(close + 1), String(close - 1), String(close),
+      String(vol * 100), String(vol), '150', '0'
+    ];
+
+    // ---- 34.1 门控与启动顺序（静态）----
+    check('§34 watchShouldRun 同时覆盖 watch 与 live（review 仍不启用，见 §32 断言）',
+      /APP_INSTANCE === 'watch' \|\| APP_INSTANCE === 'live'/.test(APP34));
+    check('§34 §31 自动补数降为兜底：启动条件含 !watchShouldRun()（两套引擎不同时跑）',
+      APP34.indexOf('if (liveShouldRun() && !watchShouldRun()) liveRefreshStart();') >= 0);
+    check('§34 §31 与 §32 的启动相邻且都在文件末尾（避开 watchForce 的 TDZ 陷阱）', (() => {
+      const a = APP34.indexOf('if (liveShouldRun() && !watchShouldRun()) liveRefreshStart();');
+      const b = APP34.indexOf('if (watchShouldRun()) watchInit();');
+      return a > 0 && b > a && (b - a) < 240;
+    })());
+    check('§34 §31 落库函数支持显式标的（liveArrOf(period, sym)）',
+      /function liveArrOf\(period, sym\)/.test(APP34));
+    check('§34 §31 取数不再写死常量 instId（由 liveInstOf 决定）',
+      /function liveInstOf\(/.test(APP34) && !/instId=' \+ LIVE_INST/.test(APP34));
+
+    // ---- 34.2 入口注入 ----
+    check('§34 build_live.cjs 的 live 入口注入 share/eth/manifest.js', (() => {
+      try {
+        const { ENTRIES } = require(path.join(__dirname, '..', 'build_live.cjs'));
+        const e = ENTRIES.filter(x => x.instance === 'live')[0];
+        return !!e && Array.isArray(e.extraScripts) && e.extraScripts.indexOf('share/eth/manifest.js') >= 0;
+      } catch (err) { return false; }
+    })());
+
+    // ---- 34.3 取数跟随当前标的（运行期）----
+    check('§34 liveInstOf 按标的返回合约，未知标的返回 null',
+      API.liveInstOf('BTC') === 'BTC-USDT-SWAP' && API.liveInstOf('ETH') === 'ETH-USDT-SWAP' && API.liveInstOf('NOPE') === null,
+      [API.liveInstOf('BTC'), API.liveInstOf('ETH'), API.liveInstOf('NOPE')].join(' / '));
+
+    const G34 = API.getSymbols();
+    const keepEth34 = G34.ETH;
+    const D15 = DATA['15m'].slice(), D1H = DATA['1h'].slice(), D4H = DATA['4h'].slice(), D1D = DATA['1d'].slice();
+    const T0 = DATA['15m'][DATA['15m'].length - 1][0];
+    G34.ETH = { data: {}, map: { '1d': '1d', '4h': '4h', '1h': '1h', '15m': '15m' } };
+    G34.ETH.data['15m'] = [[T0, 2500, 2510, 2490, 2505, 100]];
+    G34.ETH.data['1h'] = [[Math.floor(T0 / 60) * 60, 2500, 2510, 2490, 2505, 100]];
+    G34.ETH.data['4h'] = [[Math.floor(T0 / 240) * 240, 2500, 2510, 2490, 2505, 100]];
+    G34.ETH.data['1d'] = [[Math.floor(T0 / 1440) * 1440, 2500, 2510, 2490, 2505, 100]];
+
+    API.watchSetEnabled(false);      // §32 不插手，本组只测 §31
+    API.liveSetEnabled(true);        // 强制打开 §31
+
+    await API.setView('ETH', '15m');
+    check('§34 liveUrl 默认取当前标的的 instId（切到 ETH 后就是 ETH）',
+      /instId=ETH-USDT-SWAP/.test(API.liveUrl('15m')), API.liveUrl('15m'));
+    check('§34 liveArrOf(period, sym) 能显式取到指定标的的数组',
+      API.liveArrOf('15m', 'ETH') === G34.ETH.data['15m'] && API.liveArrOf('15m', 'BTC') === DATA['15m']);
+
+    const urls34 = [];
+    const btcLen34a = DATA['15m'].length;
+    const ethLen34a = G34.ETH.data['15m'].length;
+    API.liveSetFetch(async url => {
+      urls34.push(url);
+      let rows;
+      if (/bar=15m/.test(url)) rows = [row34(T0 + 15, 2600, 1.5)];
+      else if (/bar=1H/.test(url)) rows = [row34(Math.floor(T0 / 60) * 60, 2600, 1.5)];
+      else rows = [row34(Math.floor(T0 / 240) * 240, 2600, 1.5)];
+      return { ok: true, json: async () => ({ code: '0', msg: '', data: rows }) };
+    });
+    await API.liveRefreshTick();
+    check('§34 切到 ETH 后三个周期抓的都是 ETH（不再写死 BTC）',
+      urls34.length === 3 && urls34.every(u => /instId=ETH-USDT-SWAP/.test(u)), urls34[0] || '(无请求)');
+    check('§34 新柱落进 ETH 自己的数组',
+      G34.ETH.data['15m'].length === ethLen34a + 1, G34.ETH.data['15m'].length + ' vs ' + ethLen34a);
+    check('§34 跑 ETH 的 tick 时 BTC 数组一根都没动',
+      DATA['15m'].length === btcLen34a, DATA['15m'].length + ' vs ' + btcLen34a);
+
+    // ---- 34.4 对抗式：请求发起时是 BTC，返回前把当前标的切成 ETH ----
+    // 这条就是「看盘页能切币」之后 §31 会踩的坑：落库时若按当时的 curSym 取数组，BTC 的柱子就进了 ETH。
+    await API.setView('BTC', '15m');
+    const ethSnap34 = JSON.stringify(G34.ETH.data);
+    const btcLen34b = DATA['15m'].length;
+    let capturedUrl34 = '';
+    API.liveSetFetch(async url => {
+      capturedUrl34 = url;
+      API.setView('ETH', '15m');       // setView 的首个赋值段是同步的 → curSym 立刻变成 ETH
+      let rows;
+      if (/bar=15m/.test(url)) rows = [row34(T0 + 30, 81000, 1.5)];
+      else if (/bar=1H/.test(url)) rows = [row34(Math.floor(T0 / 60) * 60, 81000, 1.5)];
+      else rows = [row34(Math.floor(T0 / 240) * 240, 81000, 1.5)];
+      return { ok: true, json: async () => ({ code: '0', msg: '', data: rows }) };
+    });
+    await API.liveRefreshTick();
+    check('§34 请求 URL 用的是发起时的标的（BTC，而不是返回时的 ETH）',
+      /instId=BTC-USDT-SWAP/.test(capturedUrl34), capturedUrl34);
+    check('§34 跨标的写入被堵死：BTC 的抓取结果一格都没落进 ETH',
+      JSON.stringify(G34.ETH.data) === ethSnap34);
+    check('§34 该结果落回它自己发起的标的（BTC 15m 多了 1 根）',
+      DATA['15m'].length === btcLen34b + 1, DATA['15m'].length + ' vs ' + btcLen34b);
+
+    // 复原现场
+    await API.setView('BTC', '15m');
+    DATA['15m'] = D15; DATA['1h'] = D1H; DATA['4h'] = D4H; DATA['1d'] = D1D;
+    if (keepEth34 === undefined) delete G34.ETH; else G34.ETH = keepEth34;
+    API.liveSetEnabled(null);
+    API.watchSetEnabled(null);
+    API.liveSetFetch(async () => ({ ok: true, json: async () => ({ code: '0', msg: '', data: [] }) }));
+    check('§34 测试钩子已复原（复盘实例下两套引擎都不启用）',
+      API.liveShouldRun() === false && API.watchShouldRun() === false,
+      API.liveShouldRun() + ' / ' + API.watchShouldRun());
   }
 
   // ============ 汇总 ============

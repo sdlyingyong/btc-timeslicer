@@ -49,17 +49,24 @@ const htmlOf = f => fs.readFileSync(path.join(REPO, f), 'utf8');
 const REV_HTML = htmlOf('index.html'), LIV_HTML = htmlOf('live/index.html'), WAT_HTML = htmlOf('watch/index.html');
 const srcsOf = h => (h.match(/<script src="[^"]+"><\/script>/g) || []).map(s => /src="([^"]+)"/.exec(s)[1]);
 check('§33 复盘入口不引 ETH 分片', !/share\/eth\//.test(REV_HTML), srcsOf(REV_HTML).join(' '));
-check('§33 看盘入口不引 ETH 分片', !/share\/eth\//.test(LIV_HTML), srcsOf(LIV_HTML).join(' '));
+// §34：看盘入口升级为多币种，从「不许引」反转为「必须引」，且规格与自选完全对齐。
+check('§34 看盘入口引 ETH 分片 manifest（年份分片仍走渐进加载）',
+  (LIV_HTML.match(/share\/eth\//g) || []).length === 1 && /share\/eth\/manifest\.js/.test(LIV_HTML),
+  srcsOf(LIV_HTML).join(' '));
 check('§33 自选入口且只引 manifest（年份分片走渐进加载）',
   (WAT_HTML.match(/share\/eth\//g) || []).length === 1 && /share\/eth\/manifest\.js/.test(WAT_HTML),
   srcsOf(WAT_HTML).join(' '));
 // 注意：不能用 indexOf 判序 —— 入口壳顶部的注释里也写了「逻辑在 share/app.js」，会先被撞上。
 // 必须用解析出来的 <script src> 列表判序。
-check('§33 自选入口的分片脚本排在 app.js 之前（app.js 执行时要能读到 manifest）', (() => {
-  const s = srcsOf(WAT_HTML);
-  return s.indexOf('../share/eth/manifest.js') >= 0 &&
-         s.indexOf('../share/eth/manifest.js') < s.indexOf('../share/app.js');
-})(), srcsOf(WAT_HTML).join(' '));
+for (const [name, html] of [['自选', WAT_HTML], ['看盘', LIV_HTML]]) {
+  check('§33 ' + name + '入口的分片脚本排在 app.js 之前（app.js 执行时要能读到 manifest）', (() => {
+    const s = srcsOf(html);
+    return s.indexOf('../share/eth/manifest.js') >= 0 &&
+           s.indexOf('../share/eth/manifest.js') < s.indexOf('../share/app.js');
+  })(), srcsOf(html).join(' '));
+}
+check('§34 看盘与自选的脚本声明顺序完全一致', srcsOf(LIV_HTML).join('|') === srcsOf(WAT_HTML).join('|'),
+  srcsOf(LIV_HTML).join(' '));
 
 function boot(entryRel) {
   const html = htmlOf(entryRel);
@@ -112,13 +119,26 @@ check('看盘入口无脚本错误', B.errs.length === 0, B.errs.join(' | ') || 
 check('看盘入口实例标记 = live', B.marker === 'live', String(B.marker));
 check('看盘入口数据已挂上 window.BTCFUT_DATA', !!B.w.BTCFUT_DATA && B.w.BTCFUT_DATA['15m'].length > 100000,
   B.w.BTCFUT_DATA ? B.w.BTCFUT_DATA['15m'].length + ' 根 15m' : 'null');
-// §31：只有看盘入口会挂「实时补数」的状态位（复盘实例必须一动不动）
-check('§31 看盘入口已挂上实时补数状态位 #liveStatus',
-  !!B.w.document.getElementById('liveStatus'),
-  B.w.document.getElementById('liveStatus') ? String(B.w.document.getElementById('liveStatus').textContent).slice(0, 40) : 'null');
+// §31：原先看盘入口靠顶栏的 #liveStatus 报告「补到几点了」。
+// §34 之后看盘页的数据引擎换成 §32（WS 实时 + 断线 REST 轮询，覆盖全部标的），
+// 状态位随之迁到侧栏的 #watchStatus（信息更全：连接态 + 数据至 + 分片进度），#liveStatus 不再创建。
+check('§34 看盘入口挂了实时状态位 #watchStatus（§34 起由 §32 引擎驱动）',
+  !!B.w.document.getElementById('watchStatus'),
+  B.w.document.getElementById('watchStatus') ? String(B.w.document.getElementById('watchStatus').textContent).slice(0, 60) : 'null');
+check('§31 看盘入口不再创建顶栏 #liveStatus（§31 已降为兜底、不启动）',
+  !B.w.document.getElementById('liveStatus'));
 check('§31 复盘入口不挂实时补数（复盘不碰活数据）',
   !A.w.document.getElementById('liveStatus'));
-check('§33 看盘入口没有 ETHFUT_MANIFEST', B.w.ETHFUT_MANIFEST === undefined);
+check('§33 看盘入口读到 window.ETHFUT_MANIFEST（§34 起看盘也是多币种）',
+  !!B.w.ETHFUT_MANIFEST, B.w.ETHFUT_MANIFEST ? B.w.ETHFUT_MANIFEST.src : 'null');
+check('§34 看盘入口挂了自选列表 DOM #watchList（与自选同规格）',
+  !!B.w.document.getElementById('watchList'));
+check('§34 看盘入口的自选列表同样渲染出两行（BTC / ETH）', (() => {
+  const el = B.w.document.getElementById('watchList');
+  return !!el && el.children.length === 2;
+})(), (() => { const el = B.w.document.getElementById('watchList'); return el ? el.children.length + ' 行' : 'null'; })());
+check('§34 看盘入口的分片脚本按声明顺序真实加载（data → manifest → app）',
+  B.loaded.join(' ') === 'share/data.js share/eth/manifest.js share/app.js', B.loaded.join(' '));
 
 console.log('\n=== 自选入口 watch/index.html ===');
 const C = boot('watch/index.html');
@@ -128,13 +148,20 @@ check('§32 自选入口数据已挂上 window.BTCFUT_DATA', !!C.w.BTCFUT_DATA &
   C.w.BTCFUT_DATA ? C.w.BTCFUT_DATA['15m'].length + ' 根 15m' : 'null');
 check('§32 自选入口挂了自选列表 DOM #watchList', !!C.w.document.getElementById('watchList'));
 check('§32 复盘入口不挂自选列表（实例隔离）', !A.w.document.getElementById('watchList'));
-check('§32 看盘入口不挂自选列表（实例隔离）', !B.w.document.getElementById('watchList'));
+// §34：看盘入口现在**也有**自选列表（上一条已断言），这里只确认它挂的是自己实例的那一份
+check('§34 看盘与自选各自持有独立的自选列表 DOM（不是同一个节点）',
+  B.w.document.getElementById('watchList') !== C.w.document.getElementById('watchList'));
 check('§32 自选列表已渲染出两行（BTC / ETH）', (() => {
   const el = C.w.document.getElementById('watchList');
   return !!el && el.children.length === 2;
 })(), (() => { const el = C.w.document.getElementById('watchList'); return el ? el.children.length + ' 行' : 'null'; })());
-check('§33 自选入口的分片脚本按声明顺序真实加载（data → manifest → app）',
+check('§34 自选入口的分片脚本按声明顺序真实加载（data → manifest → app）',
   C.loaded.join(' ') === 'share/data.js share/eth/manifest.js share/app.js', C.loaded.join(' '));
+check('§33 复盘入口不出现历史进度文案（复盘不碰活数据）',
+  !/历史加载中/.test(String((A.w.document.getElementById('watchStatus') || {}).textContent || '')));
+check('§34 看盘入口的状态位也报告历史加载进度（与自选同规格）',
+  /历史加载中 \d+\/\d+/.test(String((B.w.document.getElementById('watchStatus') || {}).textContent || '')),
+  String((B.w.document.getElementById('watchStatus') || {}).textContent || 'null'));
 
 // ---- §33 ETH 全量历史 ----
 const EM = C.w.ETHFUT_MANIFEST;
@@ -152,13 +179,8 @@ const wstat = C.w.document.getElementById('watchStatus');
 const wtext = wstat ? String(wstat.textContent) : '';
 check('§33 自选入口状态位显式报告历史加载进度（fail-safe：不假装已有数据）',
   /历史加载中 \d+\/\d+/.test(wtext), wtext || 'null');
-check('§33 复盘/看盘入口不出现历史进度文案', (() => {
-  const txt = ['liveStatus'].map(id => {
-    const e = A.w.document.getElementById(id) || B.w.document.getElementById(id);
-    return e ? String(e.textContent) : '';
-  }).join(' ');
-  return !/历史加载中/.test(txt);
-})());
+// 注：原先这里断言「复盘/看盘入口不出现历史进度文案」。§34 之后看盘入口也加载 ETH 分片，
+// 该断言的前提不成立，已拆成上面两条（复盘：不出现；看盘：必须出现）。
 
 // 关键：让三个入口各写一次同名的进度，确认落到不同的键上
 A.w.localStorage.setItem('kline_session_v1', 'REVIEW');

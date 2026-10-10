@@ -2836,7 +2836,9 @@ document.getElementById('hintClose').addEventListener('click', () => { document.
 // 兜底：任何一步失败都静默退回内置数据 —— 最差等于「每天更新一次」的现状，不会更差。
 const LIVE_INTERVAL_MS = 5 * 60 * 1000;      // 5 分钟
 const LIVE_LIMIT = 300;                      // 实测 market/candles 单页上限可到 300（15m 覆盖约 75 小时）
-const LIVE_INST = 'BTC-USDT-SWAP';
+// §34：抓取标的**不再写死 BTC**。看盘页现在能切标的，写死会造成「抓 BTC、写 ETH」的跨标的污染
+//（ETH ≈ 2500、BTC ≈ 81000，这种假数据肉眼极醒目，还会毁掉该标的的全部指标）。
+const LIVE_INST_FALLBACK = 'BTC-USDT-SWAP';
 const LIVE_PERIODS = ['15m', '1h', '4h'];    // 1d 不直接抓：OKX 原生 1D 锚定 16:00 UTC，与历史 00:00 UTC 网格错位
 const LIVE_BAR = { '15m': '15m', '1h': '1H', '4h': '4H' };   // ⚠️ 大小写铁律：小写 1h/4h 会返回 51000 Parameter bar error
 const LIVE_DAILY_RECOMPUTE = 5;              // 1d 每次重算最近 N 个 UTC 日（当日那根是未收盘的，必须跟着更新）
@@ -2854,8 +2856,15 @@ function liveSetFetch(f) { liveFetchImpl = f; }
 function liveIntervalMs() { return LIVE_INTERVAL_MS; }
 function livePeriods() { return LIVE_PERIODS.slice(); }
 function liveGetStatus() { return { ok: liveStatus.ok, ts: liveStatus.ts, msg: liveStatus.msg, lastBarTs: liveDataTs() }; }
-function liveUrl(period) {
-  return 'https://www.okx.com/api/v5/market/candles?instId=' + LIVE_INST +
+// §34：标的 → OKX instId。合约映射只有一处定义（§32 的 WATCH_SYMBOLS），这里复用，避免两处漂移。
+// 未知标的返回 null —— 调用方必须据此拒发请求，而不是硬凑一个默认值。
+function liveInstOf(sym) {
+  const s = sym || curSym;
+  try { const id = watchInstOf(s); if (id) return id; } catch (e) {}
+  return (s === 'BTC') ? LIVE_INST_FALLBACK : null;
+}
+function liveUrl(period, sym) {
+  return 'https://www.okx.com/api/v5/market/candles?instId=' + liveInstOf(sym) +
          '&bar=' + LIVE_BAR[period] + '&limit=' + LIVE_LIMIT;
 }
 
@@ -2881,16 +2890,19 @@ function liveLowerBound(arr, t) {
   while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m][0] < t) lo = m + 1; else hi = m; }
   return lo;
 }
-function liveArrOf(period) {
-  const s = SYMBOLS[curSym] || SYMBOLS.BTC;
+// §34：显式带标的。落库目标必须由**发起请求时**锁定的标决定，绝不能用「合并那一刻的 curSym」——
+// 否则请求在飞行途中用户切了币，A 的 K 线就会写进 B 的数组（假数据）。不传则退回当前标的。
+function liveArrOf(period, sym) {
+  const k = sym || curSym;
+  const s = SYMBOLS[k] || SYMBOLS.BTC;
   if (!s || !s.data) return null;
   return s.data[(s.map && s.map[period]) || period] || null;
 }
 
 // 就地合并（保持升序）：同 ts 覆盖、新 ts 插入。返回改动统计供 EMA 失效与测试使用。
-function liveMerge(period, bars) {
+function liveMerge(period, bars, sym) {
   const res = { added: 0, replaced: 0, minIdx: -1, total: 0 };
-  const arr = liveArrOf(period);
+  const arr = liveArrOf(period, sym);
   if (!Array.isArray(arr) || !Array.isArray(bars) || !bars.length) return res;
   let minIdx = Infinity;
   for (const b of bars) {
@@ -2908,9 +2920,10 @@ function liveMerge(period, bars) {
 // 1d 由 4h 重聚合，锚定 UTC 00:00（沿用 update_data.cjs 的 deriveDailyFrom4h 口径）。
 // 与仓库脚本的差别：这里要**连当日那根一起重算**（当日未收盘，4h 每多一根它就该变），
 // 而脚本只补「比现有末日更晚」的天。
-function liveDeriveDaily(days) {
+function liveDeriveDaily(days, sym) {
   const n = days || LIVE_DAILY_RECOMPUTE;
-  const h4 = liveArrOf('4h'), d1 = liveArrOf('1d');
+  const k = sym || curSym;                     // §34：按标的独立重聚合
+  const h4 = liveArrOf('4h', k), d1 = liveArrOf('1d', k);
   if (!Array.isArray(h4) || !Array.isArray(d1) || !h4.length || !d1.length) return 0;
   const fromDay = Math.floor(h4[h4.length - 1][0] / 1440) * 1440 - (n - 1) * 1440;
   const byDay = new Map();
@@ -2941,8 +2954,8 @@ function liveDeriveDaily(days) {
 }
 
 // 取「当前数据显示到哪」（分钟）—— 状态栏用它，永远与真实数据一致
-function liveDataTs() {
-  const a = liveArrOf('15m');
+function liveDataTs(sym) {
+  const a = liveArrOf('15m', sym);
   return (Array.isArray(a) && a.length) ? a[a.length - 1][0] : 0;
 }
 
@@ -2988,8 +3001,10 @@ function liveRenderStatus(prefix) {
 //   ① 原本停在最右（最新）→ 跟着新数据继续停在最右；
 //   ② 滚在历史里 → 按右边缘时间戳对齐，不跳来跳去。
 //   ⚠️ 必须重建 DS：makeInlineDS 的 len 是**创建时的快照**，直接 push 进原数组不会生效。
-async function liveAfterMerge(touched) {
+async function liveAfterMerge(touched, sym) {
   if (!touched || touched.indexOf(cur) < 0) return;
+  // §34：只摆「当前显示的那一份」视图。若这次动的是别的标的（请求在途中用户切了币），直接不动。
+  if (sym && sym !== curSym) return;
   const oldLen = dataLen();
   if (!oldLen) return;
   const atRight = (viewStart + viewCount) >= oldLen - 1;
@@ -3020,37 +3035,49 @@ async function liveRefreshTick() {
     liveRenderStatus();
     return liveGetStatus();
   }
+  // §34：本次 tick 的标的在**发起时锁定**。后面所有落库/EMA 失效都只看它，不看那时的 curSym ——
+  // 这样即使请求在飞行途中用户切了币，也只会写回它自己发起的那个标的，不可能跨标的污染。
+  const sym = curSym;
+  const inst = liveInstOf(sym);
+  if (!inst) {
+    liveStatus = { ok: false, ts: Date.now(), msg: '离线' };
+    liveRenderStatus();
+    return liveGetStatus();
+  }
   liveBusy = true;
   liveRenderStatus('补数据中…');
   try {
     const got = await Promise.all(LIVE_PERIODS.map(async p => {
-      const resp = await liveFetchImpl(liveUrl(p), { cache: 'no-store' });
+      const resp = await liveFetchImpl(liveUrl(p, sym), { cache: 'no-store' });
       const j = await resp.json();
       if (!j || j.code !== '0' || !Array.isArray(j.data) || !j.data.length) {
         throw new Error('okx ' + ((j && j.code) || 'empty'));
       }
-      return [p, liveParse(j.data)];
+      return [p, liveParse(j.data), sym, inst];
     }));
     const touched = [];
     const minIdxOf = {};
     for (const pair of got) {
-      const r = liveMerge(pair[0], pair[1]);
+      // §34 最后一道防线：抓的标的必须仍等于本次 tick 锁定的标的（＝合约映射在中途没被改过），
+      // 否则整批丢弃。宁可少补一次，也绝不把 A 的 K 线写进 B 的数组。
+      if (pair[2] !== sym || pair[3] !== liveInstOf(sym)) continue;
+      const r = liveMerge(pair[0], pair[1], sym);
       if (r.added || r.replaced) { touched.push(pair[0]); minIdxOf[pair[0]] = r.minIdx; }
     }
-    const dDay = liveDeriveDaily();
+    const dDay = liveDeriveDaily(undefined, sym);
     if (dDay) {
       touched.push('1d');
-      const d1 = liveArrOf('1d');
+      const d1 = liveArrOf('1d', sym);
       minIdxOf['1d'] = Math.max(0, d1.length - dDay - 2);   // 保守：覆盖到变化区之前
     }
     // 当前周期被改了 → EMA 从改动处重算（emaFull/emaFullLen 是按 EMA 长度 20/120 键的，
     // 且切周期时 setView 会整体清空，所以只需管当前这一份）
-    if (minIdxOf[cur] !== undefined && minIdxOf[cur] >= 0) {
+    if (sym === curSym && minIdxOf[cur] !== undefined && minIdxOf[cur] >= 0) {
       const from = minIdxOf[cur];
       [20, 120].forEach(n => { if (typeof emaFullLen[n] === 'number' && emaFullLen[n] > from) emaFullLen[n] = from; });
     }
     liveStatus = { ok: true, ts: Date.now(), msg: touched.length ? ('已更新 ' + touched.length + ' 个周期') : '无新数据' };
-    await liveAfterMerge(touched);
+    await liveAfterMerge(touched, sym);
   } catch (e) {
     liveStatus = { ok: false, ts: Date.now(), msg: '离线' };
   } finally {
@@ -3090,8 +3117,10 @@ document.querySelectorAll('.symbols button').forEach(x => x.classList.remove('ac
  document.querySelector('.symbols button[data-sym="BTC"]')).classList.add('active');
 resize();
 setView(START_SYM, START_PERIOD);
-// §31 看盘实例：每 5 分钟直连 OKX 补一次数据（复盘实例不启用）
-if (liveShouldRun()) liveRefreshStart();
+// §31 看盘实例：每 5 分钟直连 OKX 补一次数据（复盘实例不启用）。
+// §34：这里的启动**挪到了文件末尾的引导块**，与 §32 的启动相邻。两个原因：
+//   ① watchShouldRun() 读的是下面才声明的 let watchForce，在此处调用会命中 TDZ（ReferenceError）；
+//   ② §34 之后 §31 已降为「§32 未启用时的兜底」，启动条件要带上 !watchShouldRun()。
 
 // =====================================================================
 // §32 自选看盘 MVP（watch 实例）：多币种 + WebSocket 实时
@@ -3104,7 +3133,7 @@ if (liveShouldRun()) liveRefreshStart();
 //   · 主标的 BTC 沿用 share/data.js 内联全量（保住深历史与「无限缩放」）
 //   · 新增标的 ETH 走 REST 首屏 + WS 增量
 //   · WS 断开 → 状态位显式「离线」并降级回 REST 轮询，绝不假装有数据（fail-safe 硬约束）
-// 门控：整体被 watchShouldRun() 包住 —— 复盘页 / 看盘页一行都不受影响。
+// 门控：整体被 watchShouldRun() 包住 —— 复盘页一行都不受影响；§34 起看盘页也走这条。
 // =====================================================================
 const WATCH_KEY = STORAGE_NS + 'kline_watchlist_v1';   // 自选列表（MVP 只读，留给后续编辑 UI）
 const WATCH_WS_URL = 'wss://ws.okx.com:8443/ws/v5/public';
@@ -3128,7 +3157,11 @@ let watchPollTimer = null;
 let watchSidebar = null;
 let watchStatus = { connected: false, ok: false, ts: 0, msg: '离线' };
 
-function watchShouldRun() { return watchForce === null ? (APP_INSTANCE === 'watch') : watchForce; }
+function watchShouldRun() {
+  // §34：看盘页（live）也启用 —— 看盘从此是多币种页（自选列表 + ETH 全量历史 + WS 实时）。
+  // 复盘页（review）仍然一行都不跑：复盘要可复现，不能被活数据污染。
+  return watchForce === null ? (APP_INSTANCE === 'watch' || APP_INSTANCE === 'live') : watchForce;
+}
 function watchSetEnabled(v) { watchForce = (v === null || v === undefined) ? null : !!v; }
 function watchSetFetch(f) { watchFetchImpl = f; }
 function watchSetWS(c) { watchWCtor = c; }
@@ -3746,5 +3779,8 @@ async function ethBootstrap() {
   return ethLoadedSet.size;
 }
 
-// §32 自选实例：建列表 + REST 首屏 + WS 实时（复盘 / 看盘实例不启用）
+// §32 自选实例：建列表 + REST 首屏 + WS 实时（复盘实例不启用）
+// §34：看盘页（live）也归 §32 —— 它才是多币种的引擎（WS 实时 + 断线 REST 轮询，覆盖全部标的）。
+//      §31 降为兜底，两者**绝不同时跑**（同一份数组两个写入方会互相覆盖）。
+if (liveShouldRun() && !watchShouldRun()) liveRefreshStart();
 if (watchShouldRun()) watchInit();
