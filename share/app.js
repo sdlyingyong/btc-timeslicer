@@ -3433,46 +3433,30 @@ function watchOnWsMessage(raw) {
 
 // ---------- 自选列表 UI（运行时建 DOM，不改 index.html 壳）----------
 
-function watchSparkSvg(pts, col) {
-  if (!pts || pts.length < 2) return '<svg width="52" height="18" style="flex:none;"></svg>';
-  let mn = Infinity, mx = -Infinity;
-  for (const v of pts) { if (v < mn) mn = v; if (v > mx) mx = v; }
-  const rng = (mx - mn) || 1, stepX = 52 / (pts.length - 1);
-  let d = '';
-  for (let i = 0; i < pts.length; i++) {
-    d += (i ? 'L' : 'M') + (i * stepX).toFixed(1) + ',' + (15 - (pts[i] - mn) / rng * 13).toFixed(1);
-  }
-  return '<svg width="52" height="18" viewBox="0 0 52 18" style="flex:none;"><path d="' + d +
-         '" fill="none" stroke="' + col + '" stroke-width="1.3"/></svg>';
-}
-
-// 纯函数：给标的算「最新价 / 24h 涨跌幅 / 迷你走势点串」，不碰 DOM（便于测试）
+// 纯函数：给标的算「最新价 / 24h 涨跌幅」，不碰 DOM（便于测试）
+// §35：迷你走势图的点串（spark）已随 UI 一起删除 —— 左侧只留「代码 + 涨跌幅」。
+//      这里连带不再算 spark，省掉每次重绘构造 48 点数组的开销。
 function watchStats(sym) {
   const s = SYMBOLS[sym];
   if (!s || !s.data) return null;
   const a1h = s.data['1h'], a15 = s.data['15m'];
   const arr = (Array.isArray(a1h) && a1h.length >= 2) ? a1h : a15;
-  if (!Array.isArray(arr) || !arr.length) return { sym: sym, price: null, chg: null, spark: [] };
+  if (!Array.isArray(arr) || !arr.length) return { sym: sym, price: null, chg: null };
   const price = arr[arr.length - 1][4];
   const N = (arr === a1h) ? 24 : 96;
   const base = arr.length > N ? arr[arr.length - 1 - N][4] : arr[0][4];
   const chg = base ? (price - base) / base * 100 : 0;
-  const want = Math.min(48, arr.length);
-  const step = Math.max(1, Math.floor(arr.length / want));
-  const spark = [];
-  for (let i = arr.length - want * step; i < arr.length; i += step) if (i >= 0 && arr[i]) spark.push(arr[i][4]);
-  return { sym: sym, price: price, chg: chg, spark: spark };
+  return { sym: sym, price: price, chg: chg };
 }
 
 // 行视图（HTML 字符串，纯函数）。配色沿用仓内既有约定：涨红 #ef4d4d / 跌绿 #2fbf71
+// §35：左侧自选不再展示「最新价」与「迷你走势图」—— 用户只要一个干净的切币入口，
+//      价格去看右侧主图就行。价格仍在 watchStats 里算（其他地方可能引用），只是不上屏。
 function watchRowHtml(st) {
   const up = (st.chg || 0) >= 0;
   const col = up ? '#ef4d4d' : '#2fbf71';
-  const price = (st.price == null) ? '--' : fmtPrice(st.price);
   const chg = (st.chg == null) ? '--' : (up ? '+' : '') + st.chg.toFixed(2) + '%';
   return '<span style="font-size:12px;font-weight:600;color:#dde3ef;flex:0 0 40px;">' + st.sym + '</span>' +
-         '<span style="font-size:11px;color:#8f9bb3;flex:0 0 62px;font-variant-numeric:tabular-nums;">' + price + '</span>' +
-         watchSparkSvg(st.spark, col) +
          '<span style="margin-left:auto;font-size:11px;color:' + col + ';font-variant-numeric:tabular-nums;">' + chg + '</span>';
 }
 

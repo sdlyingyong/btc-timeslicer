@@ -157,6 +157,15 @@ check('§32 自选列表已渲染出两行（BTC / ETH）', (() => {
 })(), (() => { const el = C.w.document.getElementById('watchList'); return el ? el.children.length + ' 行' : 'null'; })());
 check('§34 自选入口的分片脚本按声明顺序真实加载（data → manifest → app）',
   C.loaded.join(' ') === 'share/data.js share/eth/manifest.js share/app.js', C.loaded.join(' '));
+// §35：左侧自选行瘦身 —— 去掉最新价与迷你走势图，DOM 里不该再有 <svg>
+check('§35 自选行不再渲染迷你走势图（DOM 里无 <svg>）', (() => {
+  const el = C.w.document.getElementById('watchList');
+  return !!el && String(el.innerHTML).indexOf('<svg') < 0;
+})(), (() => { const el = C.w.document.getElementById('watchList'); return el ? String(el.innerHTML).slice(0, 90) : 'null'; })());
+check('§35 看盘入口的自选行同样不含迷你走势图', (() => {
+  const el = B.w.document.getElementById('watchList');
+  return !!el && String(el.innerHTML).indexOf('<svg') < 0;
+})());
 check('§33 复盘入口不出现历史进度文案（复盘不碰活数据）',
   !/历史加载中/.test(String((A.w.document.getElementById('watchStatus') || {}).textContent || '')));
 check('§34 看盘入口的状态位也报告历史加载进度（与自选同规格）',

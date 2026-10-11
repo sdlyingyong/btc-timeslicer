@@ -154,7 +154,7 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     // §32 自选看盘 MVP：多币种 + WebSocket 实时
     watchShouldRun, watchSetEnabled, watchSetFetch, watchSetWS, watchInit,
     watchList, watchInstOf, watchRestUrl, watchWsArgs, watchOnWsMessage,
-    watchPutSymbol, watchMergeInto, watchDeriveDaily,
+    watchPutSymbol, watchMergeInto, watchDeriveDaily, watchRowHtml, watchStats,
     watchGetStatus, watchPolling, watchFallbackMs, watchConnect, watchDisconnect, watchOnOpen, watchOnClose,
     getSymbols: () => SYMBOLS, getWatchKey: () => WATCH_KEY,
     // §33 ETH 全量历史（按 UTC 自然年分片）
@@ -2541,6 +2541,25 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     check('§34 测试钩子已复原（复盘实例下两套引擎都不启用）',
       API.liveShouldRun() === false && API.watchShouldRun() === false,
       API.liveShouldRun() + ' / ' + API.watchShouldRun());
+  }
+
+  // ============ §35 左侧自选行瘦身（去掉最新价 + 迷你走势图）============
+  // 用户诉求：左侧不需要 BTC/ETH 的最新价和走势图 —— 只要一个干净的切币入口。
+  {
+    const APP35 = fs.readFileSync(APP_JS, 'utf8');
+    const html35 = API.watchRowHtml({ sym: 'ETH', price: 2504.47, chg: 0.69, spark: [1, 2, 3] });
+    check('§35 自选行不再渲染迷你走势图（无 <svg>）', html35.indexOf('<svg') < 0, html35);
+    check('§35 自选行不再渲染最新价', html35.indexOf('2504') < 0 && html35.indexOf('2,504') < 0, html35);
+    check('§35 自选行仍保留代码与涨跌幅', html35.indexOf('ETH') >= 0 && html35.indexOf('+0.69%') >= 0, html35);
+    check('§35 涨红跌绿配色未变（涨 +0.69% → #ef4d4d）', html35.indexOf('#ef4d4d') >= 0);
+    check('§35 跌用绿色（-1.94% → #2fbf71）',
+      API.watchRowHtml({ sym: 'BTC', price: 81781.1, chg: -1.94 }).indexOf('#2fbf71') >= 0);
+    check('§35 无涨跌幅时显示 --', /--/.test(API.watchRowHtml({ sym: 'X', price: null, chg: null })));
+    check('§35 源里已彻底移除 watchSparkSvg（不留死代码）', APP35.indexOf('watchSparkSvg') < 0);
+    check('§35 watchStats 不再计算 spark 点串（其余字段不变）', (() => {
+      const s = API.watchStats('BTC');
+      return !!s && typeof s.price === 'number' && s.price > 0 && typeof s.chg === 'number' && s.spark === undefined;
+    })(), JSON.stringify(API.watchStats('BTC')));
   }
 
   // ============ 汇总 ============
