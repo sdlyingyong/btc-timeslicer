@@ -3136,7 +3136,13 @@ setView(START_SYM, START_PERIOD);
 // 门控：整体被 watchShouldRun() 包住 —— 复盘页一行都不受影响；§34 起看盘页也走这条。
 // =====================================================================
 const WATCH_KEY = STORAGE_NS + 'kline_watchlist_v1';   // 自选列表（MVP 只读，留给后续编辑 UI）
-const WATCH_WS_URL = 'wss://ws.okx.com:8443/ws/v5/public';
+// ⚠️ 铁律（2026-10-12 修）：K 线频道 candle15m / candle1H / candle4H 挂在 **business** 端点。
+//    写成 public 端点时**每一个**订阅都会返回
+//    {"event":"error","code":"60018","msg":"Subscribe failed, wrong URL or channel:…"}，
+//    而这条错误过去被 watchOnWsMessage 的 `if (msg.event) return;` 静默吞掉 ——
+//    于是状态位照样显示「WS 已连接」，而 BTC（唯一没有 REST 首屏、只能靠 WS 的标的）
+//    自上一次每日更新起**一个字节都没再动过**。改端点后 4 个订阅全部确认。
+const WATCH_WS_URL = 'wss://ws.okx.com:8443/ws/v5/business';
 const WATCH_CH_OF = { candle15m: '15m', candle1H: '1h', candle4H: '4h' };
 const WATCH_NS_MAP = { '15m': 'candle15m', '1h': 'candle1H', '4h': 'candle4H' };
 const WATCH_BAR = { '15m': '15m', '1h': '1H', '4h': '4H' };   // OKX bar 大小写铁律（1h 会报 51000）
@@ -3309,23 +3315,101 @@ function watchGetStatus() {
     msg: watchStatus.msg, lastBarTs: watchDataTs(curSym)
   };
 }
+// §36：用户要的不是「WS 已连接 · 刚刚 · 数据至 …」这种又长又看不出差距的一句话，
+// 而是明确回答两件事：**同步到最新了吗？落后多少分钟？** 所以拆成两行短文案。
+const PERIOD_MIN_OF = { '15m': 15, '1h': 60, '4h': 240, '1d': 1440 };
+
+// 落后多少分钟：以**末根 K 线的收盘时间**为基准（正在走的那根 → 0，即已同步到最新）。
+// 返回 null 表示压根没有数据 —— 与 0 严格区分，绝不用 0 假装「已同步」。
+function watchLagMinutes(sym, period) {
+  const s = SYMBOLS[sym];
+  if (!s || !s.data) return null;
+  const p = period || cur;
+  const arr = s.data[(s.map && s.map[p]) || p];
+  if (!Array.isArray(arr) || !arr.length) return null;
+  const last = arr[arr.length - 1];
+  if (!Array.isArray(last) || !isFinite(last[0])) return null;
+  const closeMs = (last[0] + (PERIOD_MIN_OF[p] || 15)) * 60000;
+  return Math.max(0, Math.floor((Date.now() - closeMs) / 60000));
+}
+// 人类可读且尽量短：<60 分 →「N 分钟」；<24 时 →「N 小时 M 分」；否则「N 天 M 小时」
+function watchLagText(min) {
+  if (!isFinite(min) || min <= 0) return '';
+  if (min < 60) return min + ' 分钟';
+  if (min < 1440) {
+    const h = Math.floor(min / 60), m = min % 60;
+    return h + ' 小时' + (m ? ' ' + m + ' 分' : '');
+  }
+  const d = Math.floor(min / 1440), h = Math.floor((min % 1440) / 60);
+  return d + ' 天' + (h ? ' ' + h + ' 小时' : '');
+}
+
+// 尾部缺口：末根与倒数第二根之间漏了多少根。O(1) —— 只看接缝，因为洞就是在这儿产生的。
+// 存在的理由：「末根很新」并不等于「数据是连续的」。WS 只推当前那一根、内联历史停在上次
+// 每日更新，两者接不上就会留洞。洞要被明说（fail-safe：不静默），不能只在图上留一片空白。
+function watchGapBars(sym, period) {
+  const s = SYMBOLS[sym];
+  if (!s || !s.data) return 0;
+  const p = period || cur;
+  const arr = s.data[(s.map && s.map[p]) || p];
+  if (!Array.isArray(arr) || arr.length < 2) return 0;
+  const last = arr[arr.length - 1], prev = arr[arr.length - 2];
+  if (!Array.isArray(last) || !Array.isArray(prev) || !isFinite(last[0]) || !isFinite(prev[0])) return 0;
+  const pm = PERIOD_MIN_OF[p] || 15;
+  return Math.max(0, Math.round((last[0] - prev[0]) / pm) - 1);
+}
+
+// 状态位文案（纯函数，便于测试）：main = 同步态（用户最关心的那一句），sub = 数据时间 + 缺口 + 分片进度。
+// 通道细节（WS 实时 / REST 兜底 / 等待重连）只进 title 悬浮提示 —— 它不配占侧栏的行宽。
+function watchStatusText(sym, period) {
+  const s = sym || curSym, p = period || cur;
+  const lag = watchLagMinutes(s, p);
+  const lagTxt = watchLagText(lag);
+  const gap = watchGapBars(s, p);
+  const subParts = ['数据至 ' + watchStamp(watchDataTs(s))];
+  if (gap > 0) subParts.push('缺口 ' + gap + ' 根');
+  const ethTail = ethProgressText();   // §33 分片进度必须可见：长任务，塞进 tooltip 等于看不见
+  if (ethTail) subParts.push(ethTail);
+  let main, color;
+  if (!watchStatus.connected) {
+    main = '○ 离线' + (lagTxt ? ' · 落后 ' + lagTxt : '');
+    color = '#ffd166';
+  } else if (lag === null) {
+    main = '● 同步中…';
+    color = '#6b7689';
+  } else if (lag <= 0) {
+    // 末根已在最新，但中间有洞 → 不许报「已同步到最新」（那不叫同步好了）
+    main = gap > 0 ? '● 已到最新·有缺口' : '● 已同步到最新';
+    color = gap > 0 ? '#ffd166' : '#4ade80';
+  } else {
+    main = '● 落后 ' + lagTxt;
+    color = '#ffd166';
+  }
+  return { main: main, sub: subParts.join(' · '), color: color, lag: lag, gap: gap };
+}
+
 // 状态位与数据源同源：没连上就必须显式写「离线」，这条是 fail-safe 硬约束，不许退让。
+let watchStatusPainted = '';
 function watchRenderStatus() {
   if (!watchShouldRun()) return;
   let el = null;
   try { el = document.getElementById('watchStatus'); } catch (e) { return; }
   if (!el) return;
-  const tail = '数据至 ' + watchStamp(watchDataTs(curSym));
-  // §33：ETH 历史分片的进度直接拼在同一个状态位上，不新增 DOM
-  const ethTail = ethProgressText();
-  const sfx = ethTail ? (' · ' + ethTail) : '';
-  if (watchStatus.connected) {
-    el.textContent = 'WS 已连接 · ' + liveAgo(watchStatus.ts) + ' · ' + tail + sfx;
-    el.style.color = '#4ade80';
-  } else {
-    el.textContent = '离线 · ' + tail + (watchPolling() ? ' · 轮询兜底' : '') + sfx;
-    el.style.color = '#ffd166';
-  }
+  const t = watchStatusText(curSym, cur);
+  // 两行短文案：主行 = 同步态（醒目），次行 = 数据时间 + 缺口 + 分片进度。
+  // 容器绝不能再 nowrap —— 那正是「文字太长把侧栏挤坏」的元凶；overflow-wrap 兜底换行。
+  const html =
+    '<div style="color:' + t.color + ';font-weight:600;">' + t.main + '</div>' +
+    '<div style="color:#5e6b82;font-size:9.5px;margin-top:1px;font-variant-numeric:tabular-nums;">' + t.sub + '</div>';
+  const ch = watchStatus.connected ? 'WS 实时' : (watchPolling() ? 'REST 轮询兜底' : '离线');
+  const title = '通道：' + ch + ' · ' + t.sub + (t.lag === null ? '' : ' · 落后 ' + t.lag + ' 分钟');
+  // §36：WS 每秒都在推进「当前那一根」，文案没变就别动 DOM。
+  // 但**必须**在数据变化后重新渲染 —— 否则状态位停在连接那一刻的快照，
+  // 会出现「明明已经补到最新，却还写着落后 14 小时」这种最误导的假信息。
+  if (html === watchStatusPainted && el.title === title) return;
+  watchStatusPainted = html;
+  el.innerHTML = html;
+  el.title = title;
 }
 
 // ---------- WebSocket 实时 + REST 兜底 ----------
@@ -3359,7 +3443,23 @@ function watchOnClose() {
   watchSocket = null;
   try { if (ws && typeof ws.close === 'function') ws.close(); } catch (e) {}
   watchStatus = { connected: false, ok: false, ts: Date.now(), msg: '离线 · 等待重连' };
-  // 先起轮询再渲染 —— 否则状态位拿到的还是「未兜底」的快照，文案会漏掉「· 轮询兜底」
+  // 先起轮询再渲染 —— 否则状态位（含 title 里的「通道：」）拿到的是「未兜底」的快照
+  if (watchShouldRun()) watchStartPoll();
+  watchRenderStatus();
+}
+
+// §36：订阅被拒（端点 / 频道 / 参数不对，典型是 60018 "wrong URL or channel"）→ 绝不假装已连上：
+// 断开这条连接、状态显式写「订阅失败」、立刻转 REST 轮询兜底，并让兜底 tick 顺带重连（自愈）。
+// 「TCP 连上了」不等于「能拿到数据」—— 这条边界过去被漏掉了。
+function watchOnSubscribeError(msg) {
+  const code = (msg && (msg.code || msg.msg)) ? String(msg.code || '').trim() : '';
+  watchStatus = {
+    connected: false, ok: false, ts: Date.now(),
+    msg: '订阅失败' + (code ? '（' + code + '）' : '')
+  };
+  const ws = watchSocket;
+  watchSocket = null;                 // 先摘引用：close 回调看到 null 就不会再走一遍降级
+  try { if (ws && typeof ws.close === 'function') ws.close(); } catch (e) {}
   if (watchShouldRun()) watchStartPoll();
   watchRenderStatus();
 }
@@ -3419,7 +3519,13 @@ function watchOnWsMessage(raw) {
   let msg = raw;
   if (typeof msg === 'string') { try { msg = JSON.parse(msg); } catch (e) { return; } }
   if (!msg || typeof msg !== 'object') return;
-  if (msg.event) return;                                     // 订阅确认 / 错误事件，不是行情
+  if (msg.event) {
+    // §36：订阅被拒必须**显式**降级。过去这里一律 return，于是
+    // {"event":"error","code":"60018"} 被静默吞掉，状态位照样显示「WS 已连接」——
+    // 典型的「看起来一切正常，其实一个字节都没在动」，正是本仓库明令禁止的静默失败。
+    if (msg.event === 'error') watchOnSubscribeError(msg);
+    return;
+  }
   const arg = msg.arg || {};
   const period = WATCH_CH_OF[arg.channel];
   if (!period) return;
@@ -3428,7 +3534,10 @@ function watchOnWsMessage(raw) {
   if (!hit) return;
   const bars = liveParse(msg.data);
   if (!bars.length) return;
-  watchMergeInto(hit.sym, period, bars);
+  const r = watchMergeInto(hit.sym, period, bars);
+  // §36：数据动了就必须重算状态位（差多少分钟 / 有没有缺口）。
+  // 少了这一句，状态位会停在「连接那一刻」的快照上 —— 明明已经补到最新，却一直写着落后 14 小时。
+  if (r.added || r.replaced) watchRenderStatus();
 }
 
 // ---------- 自选列表 UI（运行时建 DOM，不改 index.html 壳）----------
@@ -3486,7 +3595,9 @@ function watchBuildSidebar() {
   }
   const st = document.createElement('div');
   st.id = 'watchStatus';
-  st.style.cssText = 'font-size:10.5px;color:#7f8ea8;padding:4px 8px 0;white-space:nowrap;';
+  // §36：不再 nowrap。侧栏只有 178px，文案一长就会横向糊到图表上（用户报的「挤坏页面」）。
+  //       允许换行 + overflow-wrap 兜底，任何长度的文案都撑不破容器。
+  st.style.cssText = 'font-size:10.5px;color:#7f8ea8;padding:4px 8px 0;line-height:1.45;overflow-wrap:anywhere;word-break:break-word;';
   box.appendChild(label); box.appendChild(list); box.appendChild(st);
   if (host.firstChild) host.insertBefore(box, host.firstChild); else host.appendChild(box);
   watchSidebar = box;
@@ -3516,21 +3627,24 @@ function watchSelect(sym) {
   watchRenderStatus();
 }
 
-// 首屏：只给「还不在 SYMBOLS 里」的标的拉 REST（BTC 已有内联全量，不去动它）
-// §33：该标的的历史是否由分片底座撑着（也要照常跑 REST —— 分片末根是构建时快照，
-//      最新那段永远得由 REST/WS 补，否则图上会在分片末端与当前之间留一段真实的空洞）
-function ethShardBacks(sym) {
-  const mf = ethManifest();
-  return !!(mf && ethShouldRun() && ethLoadedSet.size && (mf.sym || 'ETH') === sym);
-}
+// 首屏：所有自选标的都拉一次 REST 尾部。
+// 历史上这里有个「标的已在内联数据里就 continue」的短路分支 —— 本意是
+// 「BTC 已有内联全量，别多花 30KB」，结果是把 BTC 的实时性完全押在 WS 上；
+// WS 一坏（§36 的端点 bug），BTC 就静静冻在上次每日更新那一刻。**省这 30KB 不值。**
+// §33 的老结论同样适用：分片/内联段的末根都是**构建时快照**，最新那段永远得由 REST/WS 补，
+// 否则图上会在「快照末端」与「当前」之间留一段真实的空洞。
 
 async function watchBootstrap() {
   if (!watchShouldRun()) return;
   // §33 先手：静态注入（若有）的 ETH 分片立即登记 + 装配，不等网络 —— 首屏就有历史
   ethRegisterExisting();
   ethMaterialize();
+  // ⚠️ 不要因为「这个标的有内联全量」就跳过 REST 首屏（§36 修）：
+  //    内联段只更到上一次每日更新，而 WS 只会推「当前那一根」—— 不补这一段，
+  //    数据里就会留下一个**几十根宽的洞**（2026-10-12 实测：BTC 末根从 10-11T20:00Z
+  //    直接跳到 10-12T14:45Z，中间缺 74 根，图上是一段空白）。
+  //    首屏每币 3 个请求 / ≈30KB，换来「打开就是连续且最新的」。
   for (const s of WATCH_SYMBOLS) {
-    if (SYMBOLS[s.sym] && !ethShardBacks(s.sym)) continue;
     let changed = 0;
     for (const p of WATCH_PERIODS) {
       try { changed += await watchRestFetch(s.sym, p); } catch (e) {}

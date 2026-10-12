@@ -188,6 +188,14 @@ const wstat = C.w.document.getElementById('watchStatus');
 const wtext = wstat ? String(wstat.textContent) : '';
 check('§33 自选入口状态位显式报告历史加载进度（fail-safe：不假装已有数据）',
   /历史加载中 \d+\/\d+/.test(wtext), wtext || 'null');
+// §36：状态位改成「主行=同步态 / 次行=数据时间+进度」两行短文案，替掉原来那条撑破侧栏的长句
+check('§36 状态位主行给出明确同步判词（已同步到最新 / 落后 / 离线 / 同步中）',
+  /已同步到最新|落后|离线|同步中/.test(wtext), wtext.slice(0, 48) || 'null');
+check('§36 状态位是「主行 + 次行」两段 DOM（不再是一整条长文案）',
+  !!wstat && wstat.children.length === 2, wstat ? wstat.children.length + ' 段' : 'null');
+check('§36 状态位次行仍带「数据至 …」', /数据至/.test(wtext), wtext.slice(0, 48) || 'null');
+check('§36 状态位容器不再 nowrap（允许换行，永不横向溢出）',
+  !!wstat && String(wstat.style.cssText).indexOf('nowrap') < 0, wstat ? wstat.style.cssText : 'null');
 // 注：原先这里断言「复盘/看盘入口不出现历史进度文案」。§34 之后看盘入口也加载 ETH 分片，
 // 该断言的前提不成立，已拆成上面两条（复盘：不出现；看盘：必须出现）。
 

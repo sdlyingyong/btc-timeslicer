@@ -156,6 +156,9 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     watchList, watchInstOf, watchRestUrl, watchWsArgs, watchOnWsMessage,
     watchPutSymbol, watchMergeInto, watchDeriveDaily, watchRowHtml, watchStats,
     watchGetStatus, watchPolling, watchFallbackMs, watchConnect, watchDisconnect, watchOnOpen, watchOnClose,
+    // §36 状态位「同步到最新 / 落后几分钟」+ WS 端点修复
+    watchLagMinutes, watchLagText, watchStatusText, watchOnSubscribeError, watchGapBars,
+    watchWsUrl: () => WATCH_WS_URL, watchSocketOpen: () => !!watchSocket,
     getSymbols: () => SYMBOLS, getWatchKey: () => WATCH_KEY,
     // §33 ETH 全量历史（按 UTC 自然年分片）
     ethShouldRun, ethSetEnabled, ethSetLoader, ethSetBase, ethManifest, ethBaseUrl,
@@ -2560,6 +2563,121 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
       const s = API.watchStats('BTC');
       return !!s && typeof s.price === 'number' && s.price > 0 && typeof s.chg === 'number' && s.spark === undefined;
     })(), JSON.stringify(API.watchStats('BTC')));
+  }
+
+  // ============ §36 状态位「是否同步到最新 / 落后几分钟」+ WS 端点修复 ============
+  {
+    const APP36 = fs.readFileSync(APP_JS, 'utf8');
+
+    // ---- 36.1 WS 端点：OKX 的 K 线频道在 business 端点；public 上订阅必然失败（60018）----
+    check('§36 WS 端点必须是 business（K 线频道所在），不能是 public',
+      /wss:\/\/ws\.okx\.com:8443\/ws\/v5\/business/.test(APP36), String(API.watchWsUrl()));
+    check('§36 源里不再残留 /ws/v5/public', APP36.indexOf('/ws/v5/public') < 0);
+
+    // ---- 36.2 订阅失败必须显式降级（fail-safe：绝不假装已连上）----
+    API.watchSetEnabled(true);
+    API.watchSetWS(function () { this.send = function () {}; this.close = function () {}; });
+    API.watchOnOpen();
+    check('§36 前置：连上后 connected=true', API.watchGetStatus().connected === true);
+    check('§36 前置：连上后不轮询', API.watchPolling() === false);
+    API.watchOnSubscribeError({ event: 'error', code: '60018', msg: "doesn't exist" });
+    const st36 = API.watchGetStatus();
+    check('§36 订阅失败 → 绝不假装已连接', st36.connected === false, JSON.stringify(st36));
+    check('§36 订阅失败 → 状态显式写「订阅失败」', /订阅失败/.test(st36.msg || ''), String(st36.msg));
+    check('§36 订阅失败 → 立刻转 REST 轮询兜底（不空等）', API.watchPolling() === true);
+    check('§36 订阅失败 → 已连的 socket 被摘下并关闭', API.watchSocketOpen() === false);
+    API.watchDisconnect();
+
+    // ---- 36.3 「落后多少分钟」：按当前周期、以末根「收盘时间」为基准 ----
+    const T36 = 'TEST36';
+    const nowMin = Math.floor(Date.now() / 60000);
+    const cur15 = Math.floor(nowMin / 15) * 15;
+    API.watchPutSymbol(T36, '15m', [[cur15, 1, 1, 1, 1, 1]]);
+    check('§36 末根是「正在走」的那根 → 落后 0（即已同步到最新）',
+      API.watchLagMinutes(T36, '15m') === 0, String(API.watchLagMinutes(T36, '15m')));
+    API.watchPutSymbol(T36, '15m', [[cur15 - 30, 1, 1, 1, 1, 1]]);
+    // 该根 15 分钟前就已收盘，再加上「当前这一格已经走过的时间」→ 落在 [15, 30)
+    const exp15 = (nowMin - cur15) + 15;
+    const lag15 = API.watchLagMinutes(T36, '15m');
+    check('§36 落后 2 个 15m 周期 → ≈15~29 分钟',
+      lag15 >= exp15 - 1 && lag15 <= exp15 + 1, '实际 ' + lag15 + '，期望 ≈' + exp15);
+    API.watchPutSymbol(T36, '1h', [[cur15 - 30, 1, 1, 1, 1, 1]]);
+    const lag60 = API.watchLagMinutes(T36, '1h');
+    check('§36 周期感知：同一根换 1h 视角，落后少 45 分钟（不足则钳到 0）',
+      lag60 === Math.max(0, lag15 - 45), lag15 + ' → ' + lag60);
+    API.watchPutSymbol(T36, '1d', [[Math.floor(nowMin / 1440) * 1440 - 4320, 1, 1, 1, 1, 1]]);
+    const lag1d = API.watchLagMinutes(T36, '1d');
+    check('§36 落后超 24 小时仍如实按分钟计算（不封顶、不打折）',
+      lag1d >= 2 * 1440, String(lag1d) + ' 分钟 ≈ ' + Math.round(lag1d / 60) + ' 小时');
+    check('§36 无数据 → 落后为 null（不是 0：不许假装已同步）',
+      API.watchLagMinutes('NO_SUCH_SYM_36', '15m') === null);
+
+    // ---- 36.4 落后时长的人类可读格式 ----
+    check('§36 0 分钟不显示落后', API.watchLagText(0) === '', '"' + API.watchLagText(0) + '"');
+    check('§36 <1 小时按「N 分钟」', API.watchLagText(45) === '45 分钟', API.watchLagText(45));
+    check('§36 <1 天按「N 小时 M 分」', API.watchLagText(125) === '2 小时 5 分', API.watchLagText(125));
+    check('§36 整小时不带零分', API.watchLagText(120) === '2 小时', API.watchLagText(120));
+    check('§36 ≥1 天按「N 天 M 小时」', API.watchLagText(1500) === '1 天 1 小时', API.watchLagText(1500));
+
+    // ---- 36.5 状态位文案：主行=同步态（明显），次行=数据时间 + 分片进度 ----
+    API.watchSetEnabled(true);
+    API.watchOnOpen();                                   // connected = true
+    API.watchPutSymbol(T36, '15m', [[cur15, 1, 1, 1, 1, 1]]);
+    const s36synced = API.watchStatusText(T36, '15m');
+    check('§36 已同步 → 主行明确写「● 已同步到最新」',
+      s36synced.main === '● 已同步到最新', s36synced.main);
+    check('§36 已同步用绿灯', s36synced.color === '#4ade80', s36synced.color);
+    API.watchPutSymbol(T36, '15m', [[cur15 - 45, 1, 1, 1, 1, 1]]);
+    const s36lag = API.watchStatusText(T36, '15m');
+    check('§36 落后 → 主行明确写「落后 N 分钟」', /^● 落后 \d+ 分钟$/.test(s36lag.main), s36lag.main);
+    check('§36 落后用黄灯（与已同步的绿灯区分开）',
+      s36lag.color !== s36synced.color, s36lag.color);
+    API.watchDisconnect();                               // connected = false
+    const s36off = API.watchStatusText(T36, '15m');
+    check('§36 离线 → 主行以「○ 离线」开头且仍报落后多久',
+      /^○ 离线/.test(s36off.main) && /落后/.test(s36off.main), s36off.main);
+    check('§36 次行始终保留「数据至 …」', /数据至/.test(s36off.sub), s36off.sub);
+    // 关键：主行必须能塞进 178px 侧栏（CJK 按 10.5px、其余按 6px 估）
+    const w36 = s => { let w = 0; for (const ch of String(s)) w += (ch.charCodeAt(0) > 0x2e80 ? 10.5 : 6); return w; };
+    [s36synced, s36lag, s36off].forEach(s => {
+      check('§36 主行估算宽度 ≤ 侧栏可用宽度 153px（照 §36 用户报的「挤坏」修）',
+        w36(s.main) <= 153, Math.round(w36(s.main)) + 'px：' + s.main);
+    });
+    API.watchSetEnabled(null);
+    API.watchSetWS(undefined);
+    delete API.getSymbols()[T36];
+
+    // ---- 36.6 静态检查：样式不许再用 nowrap（「挤坏页面」的直接原因）----
+    check('§36 状态位容器不再用 white-space:nowrap（允许换行，永不横向溢出）',
+      !/st\.style\.cssText\s*=\s*'[^']*nowrap/.test(APP36));
+    check('§36 状态位容器带 overflow-wrap / word-break（长文案兜底换行）',
+      /overflow-wrap|word-break/.test(APP36));
+
+    // ---- 36.7 尾部缺口：末根很新 ≠ 数据连续（WS 只推当前那根，接不上就留洞）----
+    const c15b = Math.floor(Math.floor(Date.now() / 60000) / 15) * 15;
+    API.watchPutSymbol(T36, '15m', [[c15b - 15, 1, 1, 1, 1, 1], [c15b, 1, 1, 1, 1, 1]]);
+    check('§36 相邻两根 → 缺口 0', API.watchGapBars(T36, '15m') === 0, String(API.watchGapBars(T36, '15m')));
+    API.watchPutSymbol(T36, '15m', [[c15b - 15 * 75, 1, 1, 1, 1, 1], [c15b, 1, 1, 1, 1, 1]]);
+    check('§36 接缝漏 74 根 → 缺口 74（洞必须被明说，不许静默）',
+      API.watchGapBars(T36, '15m') === 74, String(API.watchGapBars(T36, '15m')));
+    API.watchSetEnabled(true);
+    API.watchOnOpen();
+    const s36gap = API.watchStatusText(T36, '15m');
+    check('§36 有缺口时不许报「已同步到最新」',
+      s36gap.main.indexOf('已同步到最新') < 0, s36gap.main);
+    check('§36 有缺口时主行明说「有缺口」', /有缺口/.test(s36gap.main), s36gap.main);
+    check('§36 次行给出缺口根数', /缺口 74 根/.test(s36gap.sub), s36gap.sub);
+    check('§36 有缺口时主行同样塞得进侧栏',
+      w36(s36gap.main) <= 153, Math.round(w36(s36gap.main)) + 'px：' + s36gap.main);
+    API.watchSetEnabled(null);
+    API.watchSetWS(undefined);
+    delete API.getSymbols()[T36];
+
+    // ---- 36.8 静态检查：数据变了要刷新状态位；首屏不许跳过内联全量标的 ----
+    check('§36 App 静态检查：WS 合并成功后重算状态位（否则停在连接时的快照）',
+      /watchMergeInto\(hit\.sym, period, bars\);[\s\S]{0,220}watchRenderStatus\(\)/.test(APP36));
+    check('§36 App 静态检查：首屏不再跳过「已内联全量」的标的（否则留下几十根宽的洞）',
+      APP36.indexOf('SYMBOLS[s.sym] && !ethShardBacks(s.sym)') < 0);
   }
 
   // ============ 汇总 ============
