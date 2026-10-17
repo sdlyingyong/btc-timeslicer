@@ -123,6 +123,8 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     // §14 缩放降速 + VOL 平滑
     getZoomSensitivity: () => ZOOM_SENSITIVITY, getZoomMaxPerFrame: () => ZOOM_MAX_PER_FRAME,
     getVolNormSmooth: () => volNormSmooth, setVolNormSmooth: v => { volNormSmooth = v; },
+    // §38：把两个口径常量暴露出来，测试按真实系数算期望，不再硬编码 0.18 / 3
+    getVolSnapRatio: () => VMAX_SNAP_RATIO, getVolSmoothStep: () => VMAX_SMOOTH,
     setTool: t => { toolMode = t; },
     setContinuousDraw: b => { continuousDraw = b; },
     setTradeMode: b => { tradeMode = b; },
@@ -675,7 +677,7 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     check('§14 静止时 VOL 基准收敛（不漂移）', seq.every(v => Math.abs(v - base) <= base * 1e-3),
       seq.map(v => v.toFixed(0)).join(' → '));
 
-    // 缓动生效性：把基准手动偏离 1.5x（< VMAX_SNAP_RATIO=3，走缓动分支而非吸附）。
+    // 缓动生效性：把基准手动偏离 1.2x（< VMAX_SNAP_RATIO，走缓动分支而非吸附）。
     // 注意：mock 的 rAF 是同步的（f => f()），draw() 内 redrawSoon() 会递归跑完整段缓动，
     // 因此这里临时「挂起」rAF 以观察单帧步进比例，测完恢复并放行 pending 回调复位状态。
     {
@@ -683,12 +685,13 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
       let pending = null;
       global.requestAnimationFrame = f => { pending = f; return 0; };
       try {
+        const STEP = API.getVolSmoothStep();
         const cur = API.getVolNormSmooth();
-        const off = cur * 1.5;
+        const off = cur * 1.2;
         API.setVolNormSmooth(off);
         API.draw(); const a1 = API.getVolNormSmooth();
-        const expect1 = off + (cur - off) * 0.18;   // 缓动一步 ≈ cur * 1.41
-        check('§14 VOL 基准缓动（单帧走 18%，非瞬跳）',
+        const expect1 = off + (cur - off) * STEP;   // 缓动一步
+        check('§14 VOL 基准缓动（单帧走一个系数，非瞬跳）',
           Math.abs(a1 - expect1) <= Math.max(1e-6, cur * 1e-3) && a1 < off && a1 > cur,
           'off=' + off.toFixed(0) + ' → ' + a1.toFixed(0) + ' (期望≈' + expect1.toFixed(0) + ') target=' + cur.toFixed(0));
         // 再挂起帧：继续靠近且步长递减
@@ -2746,6 +2749,90 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
       for (let k = 0; k < 90; k++) API.draw();
       require('fs').writeFileSync('/tmp/shot_channel.png', canvasMock.toBuffer('image/png'));
       console.log('§37 wrote /tmp/shot_channel.png');
+    }
+  }
+
+  // ============ 38. 缩放瞬间不再出现「多根柱子被截成同一高度」============
+  // 根因（§14 遗留）：柱高 = 量/基准 × 面板高，基准=视口最大量且只做缓动，
+  // 绘制时又 Math.min(vh, 面板高) 截断 → 缩放让最大值变大、基准却没跟上时，
+  // 所有「量 ≥ 基准」的柱子被截成**完全相同**的高度（实测 1d 600→1200 根第 1 帧 9 根）。
+  // 本节锁两件事：① 口径常量收紧；② 跨档后第 1 帧只剩最大那根顶格。
+  {
+    const volH = 700 * API.getVolFrac();
+    // 柱底边 = 出现次数最多的底边（与 §21 同法，不硬编码坐标）
+    const volBotOf = rs => {
+      const cnt = new Map();
+      for (const r of rs) { const b = +(r[1] + r[3]).toFixed(2); if (b < 400) continue; cnt.set(b, (cnt.get(b) || 0) + 1); }
+      let bot = 0, best = 0;
+      for (const [b, c] of cnt) if (c > best) { best = c; bot = b; }
+      return bot;
+    };
+    const clipped = rs => {
+      const bot = volBotOf(rs);
+      // 上界必须卡在面板高附近：主图背景块（高 600+）同样以 volBot 为底边，会被误计
+      return rs.filter(r => bot > 0 && Math.abs(r[1] + r[3] - bot) < 0.6 &&
+        r[3] > 0.5 && r[3] <= volH + 0.05 && r[3] >= volH - 0.05).length;
+    };
+    // 只跑一帧：挂起 rAF，避免 draw 内部续帧把缓动一次跑完
+    const oneFrame = () => {
+      const realRaf = global.requestAnimationFrame;
+      let pending = null;
+      global.requestAnimationFrame = f => { pending = f; return 0; };
+      try {
+        ctxRects.length = 0; API.draw();
+        return { clip: clipped(ctxRects), n: ctxRects.length };
+      } finally {
+        global.requestAnimationFrame = realRaf;
+        if (pending) pending();
+      }
+    };
+    const warm = () => { for (let k = 0; k < 80; k++) API.draw(); };
+
+    // ---- 38.1 口径常量 ----
+    check('§38 吸附阈值收紧（大跳变直接吸附，不走缓动）', API.getVolSnapRatio() <= 1.35,
+      'VMAX_SNAP_RATIO=' + API.getVolSnapRatio());
+    check('§38 缓动系数提高（万一走缓动也更快追上）', API.getVolSmoothStep() >= 0.3,
+      'VMAX_SMOOTH=' + API.getVolSmoothStep());
+
+    await API.setView(null, '1d');
+    const L1 = API.dataLen();
+
+    // ---- 38.2 1d 600→1200 根：基准跳 1.86x，旧版走缓动 → 9 根顶格 ----
+    API.setViewRange(L1 - 600, 600); warm();
+    API.setViewRange(L1 - 1200, 1200);
+    const f1 = oneFrame();
+    check('§38 1d 缩到 1200 根第 1 帧只剩最大那根顶格', f1.clip === 1, '顶格 ' + f1.clip + ' 根');
+    warm();
+    const f1b = oneFrame();
+    check('§38 1d 收敛后仍只有最大那根顶格', f1b.clip === 1, '顶格 ' + f1b.clip + ' 根');
+
+    // ---- 38.3 15m 16000→40000 根（基准跳 2.2x）----
+    await API.setView(null, '15m');
+    const L15 = API.dataLen();
+    API.setViewRange(L15 - 16000, 16000); warm();
+    API.setViewRange(L15 - 40000, 40000);
+    const f2 = oneFrame();
+    check('§38 15m 缩到 40000 根第 1 帧只剩最大那根顶格', f2.clip === 1, '顶格 ' + f2.clip + ' 根');
+
+    // ---- 38.4 反方向（放大）：基准变小，本就不该截断，锁住不回归 ----
+    await API.setView(null, '1d');
+    API.setViewRange(0, L1); warm();
+    API.setViewRange(L1 - 300, 300);
+    const f3 = oneFrame();
+    check('§38 放大到 300 根第 1 帧也不出现额外顶格', f3.clip === 1, '顶格 ' + f3.clip + ' 根');
+
+    // ---- 38.5 肉眼复核（RENDER=1）：跳档第 1 帧 vs 收敛后 ----
+    if (process.env.RENDER) {
+      API.setViewRange(L1 - 600, 600); warm();
+      API.setViewRange(L1 - 1200, 1200);
+      const realRaf = global.requestAnimationFrame;
+      global.requestAnimationFrame = () => 0;
+      try { API.draw(); } finally { global.requestAnimationFrame = realRaf; }
+      require('fs').writeFileSync('/tmp/shot_vol_flash.png', canvasMock.toBuffer('image/png'));
+      console.log('§38 wrote /tmp/shot_vol_flash.png（跳档第 1 帧）');
+      warm();
+      require('fs').writeFileSync('/tmp/shot_vol_settled.png', canvasMock.toBuffer('image/png'));
+      console.log('§38 wrote /tmp/shot_vol_settled.png（收敛后）');
     }
   }
 
