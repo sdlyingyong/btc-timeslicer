@@ -1808,20 +1808,12 @@ function drawLines() {
       ctx.lineWidth = isSel ? 2 : 1.4;
       ctx.beginPath(); ctx.moveTo(b1x, b1y); ctx.lineTo(b2x, b2y); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(p1x, p1y); ctx.lineTo(p2x, p2y); ctx.stroke();
+      // §37 通道不标注任何数字（用户明确）：过去在右端画了一个「通道宽度」数值徽标，
+      //     现已去掉 —— 通道只留两条射线 + 区间填充，选中时给三个端点手柄，不写任何文字。
       if (isSel) {
         drawHandle(dataXToScreenX(i1), priceToY(ln.y1));
         drawHandle(dataXToScreenX(i2), priceToY(ln.y2));
         drawHandle(dataXToScreenX(i3), priceToY(ln.y3));
-      } else {
-        const w = Math.abs((ln.y3 - ln.y1) - k * (i3 - i1));
-        const cy = (b2y + p2y) / 2;
-        const txt = fmtPrice(w);
-        ctx.font = 'bold 11px system-ui, sans-serif';
-        ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
-        const tw = ctx.measureText(txt).width + 12, th = 16;
-        ctx.fillStyle = 'rgba(12,18,28,0.85)'; ctx.strokeStyle = '#b18cff'; ctx.lineWidth = 1;
-        roundRect(b2x - tw, cy - th / 2, tw, th, 3); ctx.fill(); ctx.stroke();
-        ctx.fillStyle = '#b18cff'; ctx.fillText(txt, b2x - 5, cy);
       }
     } else if (ln.type === 'hchannel') {
       // 水平通道：两条水平线（§25 上限绿=供应 / 下限红=需求）+ 淡紫区间填充，纯区间带、无任何数字标注

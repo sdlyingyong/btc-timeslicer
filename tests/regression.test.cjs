@@ -2680,6 +2680,75 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
       APP36.indexOf('SYMBOLS[s.sym] && !ethShardBacks(s.sym)') < 0);
   }
 
+  // ============ 37. 通道不标注任何数字（价格通道 / 水平通道）============
+  // 用户要求：「通道不需要标注任何数字」。水平通道本来就干净，价格通道却在未选中态
+  // 于右端画了一个「通道宽度」数值徽标 —— 这里用「文本增量」判定：把图上的画线全清空先
+  // 记一份基线文本（坐标轴 / 均线图例都在这份里），画上通道后再 draw 一次，新增的文本必须为空。
+  {
+    const APP37 = fs.readFileSync(APP_JS, 'utf8');
+    API.clearLines();
+    await API.setView(null, '1d');
+    const L37 = API.dataLen();
+    API.setViewRange(Math.max(0, L37 - 260), Math.min(260, L37));
+    for (let k = 0; k < 60; k++) API.draw();
+
+    let n37 = ctxTexts.length; API.draw();
+    const base37 = ctxTexts.slice(n37);
+    const diff37 = arr => {                       // 多重集差：从 arr 里扣掉基线中同名的那些
+      const m = new Map();
+      base37.forEach(t => m.set(t, (m.get(t) || 0) + 1));
+      const out = [];
+      arr.forEach(t => { const c = m.get(t) || 0; if (c > 0) m.set(t, c - 1); else out.push(t); });
+      return out;
+    };
+
+    // ---- 37.1 价格通道（三点）：未选中态是唯一会画数值标注的分支 ----
+    API.setTool('channel');
+    down(200, 480); down(520, 380); down(560, 520);
+    const ch37 = API.getLines()[API.getLines().length - 1];
+    check('§37 价格通道三点创建', !!ch37 && ch37.type === 'channel');
+    down(1050, 600); up();       // 点右下空白区取消选中（带内/线上会被命中，故取带下方的空白）
+    check('§37 价格通道已取消选中（走的是会画标注的那个分支）', API.getSelected() === null);
+    n37 = ctxTexts.length; API.draw();
+    const new37 = diff37(ctxTexts.slice(n37));
+    check('§37 价格通道不产生任何数字标注', !new37.some(t => /\d/.test(t)), JSON.stringify(new37));
+    check('§37 价格通道不产生任何标注（文本增量为空）', new37.length === 0, JSON.stringify(new37));
+    // 选中态只有端点手柄，也不许有文字
+    down(sx(API.lnIdx(ch37, 'x1')), sy(ch37.y1));
+    check('§37 价格通道可选中', API.getSelected() === ch37);
+    n37 = ctxTexts.length; API.draw();
+    check('§37 价格通道选中态同样无标注', diff37(ctxTexts.slice(n37)).length === 0,
+      JSON.stringify(diff37(ctxTexts.slice(n37))));
+    up();
+    check('§37 价格通道删除', deleteLine('channel', ch37));
+
+    // ---- 37.2 水平通道：本来就是纯区间带，锁住不许回退 ----
+    API.setTool('hchannel'); down(300, 250); down(300, 450);
+    const hc37 = API.getLines()[API.getLines().length - 1];
+    check('§37 水平通道两点创建', !!hc37 && hc37.type === 'hchannel');
+    down(1050, 600); up();
+    check('§37 水平通道已取消选中', API.getSelected() === null);
+    n37 = ctxTexts.length; API.draw();
+    const newH37 = diff37(ctxTexts.slice(n37));
+    check('§37 水平通道不产生任何标注', newH37.length === 0, JSON.stringify(newH37));
+    check('§37 水平通道删除', deleteLine('hchannel', hc37));
+
+    // ---- 37.3 静态检查：价格通道分支不再算出宽度数值（避免只删绘制不删计算又被加回来）----
+    const chBlock37 = (APP37.match(/ln\.type === 'channel'\)\s*\{([\s\S]{0,4000}?)\n\s*\} else if \(ln\.type === 'hchannel'\)/) || [])[1] || '';
+    check('§37 静态检查：找到价格通道绘制分支', chBlock37.length > 200, String(chBlock37.length));
+    check('§37 静态检查：价格通道分支里没有「宽度→文字」的绘制',
+      chBlock37.indexOf('fmtPrice(w)') < 0 && chBlock37.indexOf('measureText') < 0);
+
+    // ---- 37.4 肉眼复核（RENDER=1）：价格通道 + 水平通道同屏，右端不应有任何数字 ----
+    if (process.env.RENDER) {
+      API.setTool('channel'); down(120, 520); down(430, 400); down(470, 540);
+      API.setTool('hchannel'); down(700, 200); down(700, 320);
+      for (let k = 0; k < 90; k++) API.draw();
+      require('fs').writeFileSync('/tmp/shot_channel.png', canvasMock.toBuffer('image/png'));
+      console.log('§37 wrote /tmp/shot_channel.png');
+    }
+  }
+
   // ============ 汇总 ============
 
   // 摘要必须在 stdout 回调里再 exit：直接 console.log + process.exit 在 stdout 是管道/重定向时
