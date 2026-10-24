@@ -2976,3 +2976,80 @@ vh = Math.min(量 / vNorm × 面板高, 面板高)   ← 截断
 - [x] 回归 **562 → 568 PASS / 0 FAIL**；冒烟 **43 PASS / 0 FAIL**；`build_live.cjs --check` → `[OK]`
 - [x] `RENDER=1` 真画布全绿 + `/tmp/shot_vol_flash.png` 与 `/tmp/shot_vol_settled.png` 一致
 - [x] 提交并推送
+
+# §39 看盘工具条状态不同步（周期全亮 / 标的按钮停在 BTC）
+
+## 39.1 背景
+
+用户反馈：**「试试看盘。咋坏了」**。看盘入口本身的数据链路是好的（状态位 `● 已同步到最新`，
+数据至当下、四个周期与 BTC/ETH 都没有缺口、价格与 OKX 实时一致），坏在**工具条的状态显示**：
+
+| 病症 | 现象 | 实测 |
+|---|---|---|
+| ① 周期按钮全亮 | 日线 / 4小时 / 1小时 / 15分 **四个同时高亮** | `.periods button` 带 `active` 的有 4 个 |
+| ② 标的按钮不跟随 | 点左侧自选切到 ETH，标题已变 `ETH · 时光机（看盘）`，工具栏「标的」还亮着 BTC | `.symbols button.active` 的 `data-sym` 仍是 `BTC` |
+
+## 39.2 根因
+
+`syncPeriodButtons()` 把「**该周期有数据**」误当成「**当前周期**」：
+
+```js
+const ok = avail.has(b.dataset.p);      // ok = 该周期有数据
+b.disabled = !ok;
+if (ok) b.classList.add('active');      // ← 有数据就高亮
+```
+
+看盘页四个周期全都加载完了，于是四个全加 `active`。后面那句
+`querySelector('.periods button[data-p=cur]').classList.add('active')` 只是再补一次，
+**没有任何区分作用**（`active` 早已全量为真）。
+
+标的这边是漏了同步：`watchSelect()` → `setView(sym)` 只更新了 `#title` 与左侧自选行的背景，
+工具栏 `.symbols button` 的 `active` 没人管，于是停在初始的 BTC。
+
+## 39.3 改法
+
+`syncPeriodButtons()` 里两处，都改成「**先定稿当前值，再按等值 toggle**」：
+
+```js
+if (!avail.has(cur)) cur = PERIODS.find(x => avail.has(x.p)).p;   // 先定 cur
+document.querySelectorAll('.periods button').forEach(b => {
+  const ok = avail.has(b.dataset.p);
+  b.disabled = !ok;                                    // ok 只管 disabled
+  b.classList.toggle('active', ok && b.dataset.p === cur);   // active 只管当前
+});
+document.querySelectorAll('.symbols button').forEach(b => {
+  b.classList.toggle('active', b.dataset.sym === curSym);
+});
+```
+
+副带效果：看盘页切到 ETH 时工具栏「标的」不再有任何高亮（该区块只有 BTC 一项，
+当前不是 BTC 就不该亮）。这比"亮着错的标的"好；若以后要彻底消除这个冗余区块，另开一节。
+
+## 39.4 验收
+
+- **C1** 看盘入口初始只有一个周期 `active`
+- **C2** 点自选行切标的后，`.symbols button.active` 的 `data-sym` 与标题里的标的**同名**
+- **C3** 切标的后周期按钮仍只有一个 `active`
+- **C4** 静态检查：`syncPeriodButtons` 内含 `.symbols button` 同步（防"只改标题忘了按钮"回潮）
+- **C5** 本地真浏览器（起 http server）：初始 `periods=[1d] symbols=[BTC]`；点 ETH 后
+  `title=ETH`、`symbols=[]`（正确地不高亮任何 BTC）、周期仍 `[1d]`
+
+## 39.5 测试策略与一个限制
+
+⚠️ **jsdom 里抓不到 ETH 分片**（`resources` 不是 `usable`），`SYMBOLS` 里往往没有 ETH，
+所以「切到 ETH」这条端到端路径在冒烟里**跑不出真实切换**。处理办法：
+
+- 断言退化为**不变式**：`active` 的标的按钮必须与标题里的标的同名（切不动时也成立）
+- 再补一条**静态检查**盯源码，防止写法回退
+- 真正的「切 ETH」验证放在**本地真浏览器**（`python3 -m http.server` + `agent-browser`）跑 C5
+
+`tests/smoke_entries.cjs` **43 → 47 PASS / 0 FAIL**；`tests/regression.test.cjs` **568 PASS / 0 FAIL**（不变）。
+
+## 39.6 完成定义
+
+- [x] PRD §39 写完
+- [x] 先红后绿：§39 初始 3 条红（`1d,4h,1h,15m` 四个 active / 标的停在 BTC）→ 修后全绿
+- [x] 冒烟 **47 PASS / 0 FAIL**；回归 **568 PASS / 0 FAIL**；`RENDER=1` 同样 568
+- [x] `build_live.cjs --check` → `[OK]`；四个 HTML 无 `data-page-node-id` 注入
+- [x] 本地真浏览器验证 C5（截图 `/tmp/live_fixed.png`）
+- [x] 提交并推送

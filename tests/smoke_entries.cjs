@@ -140,6 +140,48 @@ check('§34 看盘入口的自选列表同样渲染出两行（BTC / ETH）', ((
 check('§34 看盘入口的分片脚本按声明顺序真实加载（data → manifest → app）',
   B.loaded.join(' ') === 'share/data.js share/eth/manifest.js share/app.js', B.loaded.join(' '));
 
+// §39：工具栏「当前状态」必须唯一且跟随真实状态。
+//   病症①：周期按钮把「有数据」误当成「当前周期」，四个周期全亮，分不清在哪个周期。
+//   病症②：点左侧自选切到 ETH，标题变了，工具栏「标的」按钮还亮着 BTC。
+console.log('\n=== §39 看盘工具条状态同步 ===');
+check('§39 周期按钮只有一个 active（当前周期）', (() => {
+  const bs = [...B.w.document.querySelectorAll('.periods button')];
+  const act = bs.filter(b => b.classList.contains('active'));
+  return bs.length > 1 && act.length === 1;
+})(), (() => {
+  const bs = [...B.w.document.querySelectorAll('.periods button')];
+  return bs.filter(b => b.classList.contains('active')).map(b => b.dataset.p).join(',') || '无';
+})());
+check('§39 切到 ETH 后，工具栏标的按钮跟着变（不再停在 BTC）', (() => {
+  const rows = B.w.document.getElementById('watchList').children;
+  if (!rows || rows.length < 2) return false;
+  rows[1].click();                                  // 真实点击自选行 → watchSelect('ETH')
+  const title = String((B.w.document.getElementById('title') || {}).textContent || '');
+  const act = B.w.document.querySelector('.symbols button.active');
+  // jsdom 抓不到 ETH 分片 → SYMBOLS 里未必有 ETH，标题可能不变；
+  // 这种情况下退化为「不变式检查」：active 标的按钮必须与标题里的标的同名。
+  const symInTitle = title.split(' · ')[0];
+  return !!act && act.dataset.sym === symInTitle;
+})(), (() => {
+  const rows = B.w.document.getElementById('watchList').children;
+  const t = String((B.w.document.getElementById('title') || {}).textContent || '');
+  const act = B.w.document.querySelector('.symbols button.active');
+  return 'rows=' + [...rows].map(r => r.dataset.sym).join(',') +
+    ' 标题=' + t + ' 标的active=' + (act ? act.dataset.sym : '无');
+})());
+// jsdom 里 ETH 分片加载不到，切标的这条路径无法端到端复现（见上一条的退化逻辑）；
+// 补一条静态检查盯住源码，防止「只改标题、忘了按钮」的写法再回来。
+check('§39 静态检查：syncPeriodButtons 会同步工具栏标的按钮', (() => {
+  const src = fs.readFileSync(path.join(REPO, 'share', 'app.js'), 'utf8');
+  const m = src.match(/function syncPeriodButtons\(\)\s*\{[\s\S]{0,1600}?\n\}/);
+  if (!m) return false;
+  return /querySelectorAll\('\.symbols button'\)/.test(m[0]);
+})(), 'syncPeriodButtons 内含 .symbols button 同步');
+check('§39 切标的之后，周期按钮仍然只有一个 active', (() => {
+  const act = [...B.w.document.querySelectorAll('.periods button')].filter(b => b.classList.contains('active'));
+  return act.length === 1;
+})(), String([...B.w.document.querySelectorAll('.periods button')].filter(b => b.classList.contains('active')).length) + ' 个');
+
 console.log('\n=== 自选入口 watch/index.html ===');
 const C = boot('watch/index.html');
 check('§32 自选入口无脚本错误', C.errs.length === 0, C.errs.join(' | ') || '干净');

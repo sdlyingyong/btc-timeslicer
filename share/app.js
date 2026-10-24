@@ -1294,13 +1294,19 @@ async function setView(sym, period) {
 function syncPeriodButtons() {
   const s = SYMBOLS[curSym];
   const avail = new Set(Object.keys(s.map).filter(k => s.data[s.map[k]] != null));
+  if (!avail.has(cur)) cur = PERIODS.find(x => avail.has(x.p)).p;
+  // §39 active 只标「当前周期」。原来写的是 `if (ok) add('active')` —— 把「该周期有数据」
+  //   当成了「当前周期」，看盘页四个周期全亮，分不清现在在哪一档。`ok` 只该控制 disabled。
   document.querySelectorAll('.periods button').forEach(b => {
     const ok = avail.has(b.dataset.p);
     b.disabled = !ok;
-    if (ok) b.classList.add('active'); else b.classList.remove('active');
+    b.classList.toggle('active', ok && b.dataset.p === cur);
   });
-  if (!avail.has(cur)) cur = PERIODS.find(x => avail.has(x.p)).p;
-  document.querySelector(`.periods button[data-p="${cur}"]`)?.classList.add('active');
+  // §39 工具栏「标的」按钮必须跟着 curSym 走。看盘/自选靠左侧自选行切标的，
+  //   原来只更新了标题，工具栏那枚按钮还亮着上一个标的（标题 ETH、按钮 BTC）。
+  document.querySelectorAll('.symbols button').forEach(b => {
+    b.classList.toggle('active', b.dataset.sym === curSym);
+  });
   document.getElementById('title').textContent = curSym + ' · 时光机' + (APP_INSTANCE === 'live' ? '（看盘）' : APP_INSTANCE === 'watch' ? '（自选）' : '（复盘）');
 }
 
