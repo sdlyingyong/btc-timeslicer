@@ -2807,12 +2807,19 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     check('§38 1d 收敛后仍只有最大那根顶格', f1b.clip === 1, '顶格 ' + f1b.clip + ' 根');
 
     // ---- 38.3 15m 16000→40000 根（基准跳 2.2x）----
+    // §42 之后 15m 改用 P99.5 当基准，本来就会有约 0.5% 的柱子（≈6 根）被截顶 ——
+    // 那不是本节的"缓动截断"。本节要验的是：**第 1 帧不许比收敛后多截**。
     await API.setView(null, '15m');
     const L15 = API.dataLen();
     API.setViewRange(L15 - 16000, 16000); warm();
     API.setViewRange(L15 - 40000, 40000);
     const f2 = oneFrame();
-    check('§38 15m 缩到 40000 根第 1 帧只剩最大那根顶格', f2.clip === 1, '顶格 ' + f2.clip + ' 根');
+    warm();
+    const f2b = oneFrame();
+    check('§38 15m 缩到 40000 根：第 1 帧顶格数 == 收敛后（不因缓动多截）', f2.clip === f2b.clip,
+      '第1帧 ' + f2.clip + ' 根 / 收敛后 ' + f2b.clip + ' 根');
+    check('§42 15m 顶格只来自 P99.5 口径（≤1% 的列）', f2.clip <= Math.ceil(f2.n * 0.01) + 2,
+      f2.clip + ' 根 / ' + f2.n + ' 列');
 
     // ---- 38.4 反方向（放大）：基准变小，本就不该截断，锁住不回归 ----
     await API.setView(null, '1d');
@@ -2833,6 +2840,84 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
       warm();
       require('fs').writeFileSync('/tmp/shot_vol_settled.png', canvasMock.toBuffer('image/png'));
       console.log('§38 wrote /tmp/shot_vol_settled.png（收敛后）');
+    }
+  }
+
+  // ============ 42. 小周期成交量基准抗离群（15m/1h 用 P99.5，日线以上不动）============
+  // 用户报告：「缩放以后突然长出特别长的一个柱子」。
+  // 实测：15m 2023-10-16 13:30 那根爆量 171,631，而视口中位数只有 1,813（差 95 倍）。
+  //   基准 = 视口最大量 → 它一进屏，其余柱子全被压到 1.6px，只有它顶满。
+  // 方案：15m / 1h 改用可见量的 P99.5 当基准（超出的截顶）；1d / 4h 保持线性真实比例。
+  {
+    const q995 = arr => { const v = arr.filter(x => x > 0).sort((a, b) => a - b);
+      return v.length ? v[Math.min(v.length - 1, Math.floor(v.length * 0.995))] : 0; };
+    const findPeak = a => { let si = 0, sv = 0; a.forEach((r, i) => { if (+r[5] > sv) { sv = +r[5]; si = i; } }); return { si, sv }; };
+    const warm = () => { for (let k = 0; k < 120; k++) API.draw(); };
+
+    await API.setView(null, '15m');
+    const A15 = DATA['15m'];
+    const pk = findPeak(A15);
+    API.setViewRange(Math.max(0, pk.si - 600), 1200); warm();
+    const vNorm15 = API.getVolNormSmooth();
+    const p995 = q995(A15.slice(Math.max(0, pk.si - 600), pk.si + 600).map(r => +r[5]));
+    check('§42 15m 基准 = P99.5（不被单根爆量拉走）', Math.abs(vNorm15 - p995) / p995 < 0.10,
+      '基准=' + vNorm15.toFixed(0) + ' P99.5=' + p995.toFixed(0));
+    check('§42 15m 基准远低于视口最大量（这才是问题根因）', vNorm15 < pk.sv * 0.5,
+      '基准=' + vNorm15.toFixed(0) + ' 最大=' + pk.sv.toFixed(0) + ' 倍数=' + (pk.sv / vNorm15).toFixed(1) + 'x');
+
+    // 1h 同样
+    await API.setView(null, '1h');
+    const A1h = DATA['1h'];
+    const pk1 = findPeak(A1h);
+    API.setViewRange(Math.max(0, pk1.si - 400), 800); warm();
+    const vn1h = API.getVolNormSmooth();
+    const p1 = q995(A1h.slice(Math.max(0, pk1.si - 400), pk1.si + 400).map(r => +r[5]));
+    check('§42 1h 基准 = P99.5', Math.abs(vn1h - p1) / p1 < 0.10,
+      '基准=' + vn1h.toFixed(0) + ' P99.5=' + p1.toFixed(0));
+
+    // 1d / 4h 不受影响：基准仍等于视口最大量
+    await API.setView(null, '1d');
+    const A1d = DATA['1d'];
+    const p1d = findPeak(A1d);
+    API.setViewRange(Math.max(0, p1d.si - 300), 600); warm();
+    const vn1d = API.getVolNormSmooth();
+    const max1d = Math.max.apply(null, A1d.slice(Math.max(0, p1d.si - 300), p1d.si + 300).map(r => +r[5]));
+    check('§42 1d 仍用视口最大量（真实比例不变）', Math.abs(vn1d - max1d) / max1d < 0.03,
+      '基准=' + vn1d.toFixed(0) + ' 最大=' + max1d.toFixed(0));
+
+    await API.setView(null, '4h');
+    const A4h = DATA['4h'];
+    const p4 = findPeak(A4h);
+    API.setViewRange(Math.max(0, p4.si - 300), 600); warm();
+    const vn4h = API.getVolNormSmooth();
+    const max4h = Math.max.apply(null, A4h.slice(Math.max(0, p4.si - 300), p4.si + 300).map(r => +r[5]));
+    check('§42 4h 仍用视口最大量', Math.abs(vn4h - max4h) / max4h < 0.03,
+      '基准=' + vn4h.toFixed(0) + ' 最大=' + max4h.toFixed(0));
+
+    // 效果：15m 含爆量视口的中位柱高要从 1-2px 回到 6px 以上
+    await API.setView(null, '15m');
+    API.setViewRange(Math.max(0, pk.si - 600), 1200); warm();
+    const volH = 700 * API.getVolFrac();
+    const volBotOf = rs => {
+      const c = new Map();
+      for (const r of rs) { const b = +(r[1] + r[3]).toFixed(2); if (b < 400) continue; c.set(b, (c.get(b) || 0) + 1); }
+      let bb = 0, best = 0;
+      for (const [k, v] of c) if (v > best) { best = v; bb = k; }
+      return bb;
+    };
+    ctxRects.length = 0; API.draw();
+    const bot42 = volBotOf(ctxRects);
+    const hs = ctxRects.filter(r => Math.abs(r[1] + r[3] - bot42) < 0.6 && r[3] > 0.2 && r[3] <= volH + 0.5)
+      .map(r => r[3]).sort((a, b) => a - b);
+    const medH = hs[Math.floor(hs.length / 2)];
+    check('§42 15m 含爆量时中位柱仍可读（≥6px）', medH >= 6,
+      '中位柱=' + medH.toFixed(1) + 'px（改前 1.6px）');
+
+    // ---- 肉眼复核（RENDER=1）：同一爆量视口，P99.5 口径下其余柱子应恢复可读 ----
+    if (process.env.RENDER) {
+      API.setViewRange(Math.max(0, pk.si - 600), 1200); warm();
+      require('fs').writeFileSync('/tmp/shot_vol_p995.png', canvasMock.toBuffer('image/png'));
+      console.log('§42 wrote /tmp/shot_vol_p995.png（15m 含爆量，P99.5 基准）');
     }
   }
 

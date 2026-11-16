@@ -1569,6 +1569,27 @@ function draw() {
       }
       targetNorm = maxSum > 0 ? maxSum : vmax;   // 兜底：桶全空时退回 vmax
     }
+    // §42 小周期抗离群：15m / 1h 改用可见量的 **P99.5** 当基准，超出的柱子截顶。
+    // 根因：基准取「视口最大量」时，一根真实爆量进来就把整屏压平 ——
+    //   实测 15m 2023-10-16 13:30 是 171,631，而视口中位数只有 1,813（差 95 倍），
+    //   一屏 1130 列里中位柱从 15.5px 掉到 1.6px，只剩那根顶满（用户："突然长出一根特别长的"）。
+    // 为什么只改 15m/1h：日线的量能分布没这么极端（1d 最大/中位 ≈ 8 倍，4h ≈ 28 倍），
+    //   线性真实比例更有用，不该牺牲。
+    // 为什么是 P99.5 而不是 P95：P95 离最大值太远，会让 5% 的柱子全部顶格（§14 的反面教材①）；
+    //   P99.5 只压平最高的约 5 根（1130 列），中位柱能从 1.6px 回到 8.7px。
+    if (cur === '15m' || cur === '1h') {
+      const pool = [];
+      if (xW < 1 && sums) {
+        for (let x = 0; x < Wpx; x++) if (gotB[x] && sums[x] > 0) pool.push(sums[x]);
+      } else {
+        for (let i = s; i < e; i++) { const r = getBar(i); if (r) { const v = +r[5]; if (v > 0) pool.push(v); } }
+      }
+      if (pool.length >= 20) {                       // 样本太少时 P99.5 就等于最大值，没意义，直接用 max
+        pool.sort((a, b) => a - b);
+        const q = pool[Math.min(pool.length - 1, Math.floor(pool.length * 0.995))];
+        if (q > 0) targetNorm = q;
+      }
+    }
     // 指数缓动平滑；首次 / 偏差超 3 倍（切换周期、大幅缩放）直接吸附，避免长时间爬升
     if (volNormSmooth <= 0 || targetNorm <= 0 ||
         targetNorm / volNormSmooth > VMAX_SNAP_RATIO ||
