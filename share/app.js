@@ -1022,6 +1022,33 @@ function computeEMA(period, upto) {
   emaFullLen[period] = len;
 }
 
+// §43 OKX 风格成交量均量线 VOL MA5/10/20（SMA，基于每根K线的成交量 r[5]）。
+// ⚠️ 必须独立于 EMA 缓存：均线周期键 5/10/20 里也有 20，与 EMA20 共用会串数据。
+const VOL_MA = [{ p: 5, color: '#ffd166' }, { p: 10, color: '#c792ea' }, { p: 20, color: '#5ec8f5' }];
+let volMaOn = true;
+const volMaFull = {};     // period -> Float64Array（SMA 值，从 0 算到 volMaFullLen[period]）
+const volMaFullLen = {};  // period -> 已计算到的索引数
+function computeVolMa(period, upto) {
+  const total = DS ? DS.len : 0;
+  const len = Math.max(0, Math.min(upto, total));
+  if (len <= 0) return;
+  let arr = volMaFull[period];
+  const start = volMaFullLen[period] || 0;
+  if (arr && start >= len) return;                       // 已覆盖到 upto，直接命中
+  if (!arr) { arr = new Float64Array(Math.max(len, 1)); volMaFull[period] = arr; volMaFullLen[period] = 0; }
+  else if (arr.length < len) { const n = new Float64Array(len); n.set(arr); arr = n; volMaFull[period] = arr; }
+  // 重建滚动窗口和：从 start-period 开始累加（不依赖旧 arr 值，回退后重算同样正确）
+  let sum = 0;
+  const from = Math.max(0, start - period);
+  for (let i = from; i < start; i++) { const b = getBar(i); sum += b ? (+b[5] || 0) : 0; }
+  for (let i = start; i < len; i++) {
+    const b = getBar(i); sum += b ? (+b[5] || 0) : 0;
+    if (i >= period) { const old = getBar(i - period); if (old) sum -= (+old[5] || 0); }
+    arr[i] = i >= period - 1 ? sum / period : NaN;
+  }
+  volMaFullLen[period] = len;
+}
+
 // 异步取某根K线（未加载则触发加载并等待完成，而非盲轮询）
 function getBarAsync(i) {
   return new Promise(async res => {
@@ -1180,6 +1207,8 @@ function showGoToDialog() {
 async function setView(sym, period) {
   for (const k in emaFull) delete emaFull[k];
   for (const k in emaFullLen) delete emaFullLen[k];
+  for (const k in volMaFull) delete volMaFull[k];       // §43：均量线缓存与 EMA 独立，切周期/标的同样整体清空
+  for (const k in volMaFullLen) delete volMaFullLen[k];
   volNormSmooth = 0;   // §14：切换标的/周期后重新吸附 VOL 基准，避免跨量纲长时间爬升
   if (DS) {   // 离开前保存当前画线 + 浏览位置
     linesStore[lineKey()] = lines;
@@ -1569,27 +1598,10 @@ function draw() {
       }
       targetNorm = maxSum > 0 ? maxSum : vmax;   // 兜底：桶全空时退回 vmax
     }
-    // §42 小周期抗离群：15m / 1h 改用可见量的 **P99.5** 当基准，超出的柱子截顶。
-    // 根因：基准取「视口最大量」时，一根真实爆量进来就把整屏压平 ——
-    //   实测 15m 2023-10-16 13:30 是 171,631，而视口中位数只有 1,813（差 95 倍），
-    //   一屏 1130 列里中位柱从 15.5px 掉到 1.6px，只剩那根顶满（用户："突然长出一根特别长的"）。
-    // 为什么只改 15m/1h：日线的量能分布没这么极端（1d 最大/中位 ≈ 8 倍，4h ≈ 28 倍），
-    //   线性真实比例更有用，不该牺牲。
-    // 为什么是 P99.5 而不是 P95：P95 离最大值太远，会让 5% 的柱子全部顶格（§14 的反面教材①）；
-    //   P99.5 只压平最高的约 5 根（1130 列），中位柱能从 1.6px 回到 8.7px。
-    if (cur === '15m' || cur === '1h') {
-      const pool = [];
-      if (xW < 1 && sums) {
-        for (let x = 0; x < Wpx; x++) if (gotB[x] && sums[x] > 0) pool.push(sums[x]);
-      } else {
-        for (let i = s; i < e; i++) { const r = getBar(i); if (r) { const v = +r[5]; if (v > 0) pool.push(v); } }
-      }
-      if (pool.length >= 20) {                       // 样本太少时 P99.5 就等于最大值，没意义，直接用 max
-        pool.sort((a, b) => a - b);
-        const q = pool[Math.min(pool.length - 1, Math.floor(pool.length * 0.995))];
-        if (q > 0) targetNorm = q;
-      }
-    }
+    // §43：撤销 §42 的 15m/1h P99.5 截顶 —— 用户看过 OKX 后选择「完全照搬 OKX」：
+    //   OKX/TradingView 成交量是线性真实比例（视口最大量为基准，爆量柱就该顶满），
+    //   靠 MA5/10/20 均量线提供「正常量能」参照，而不是人为压平爆量。
+    //   这样所有周期统一口径，也回到 §14b 的「实际绘制量最大值」基准。
     // 指数缓动平滑；首次 / 偏差超 3 倍（切换周期、大幅缩放）直接吸附，避免长时间爬升
     if (volNormSmooth <= 0 || targetNorm <= 0 ||
         targetNorm / volNormSmooth > VMAX_SNAP_RATIO ||
@@ -1622,6 +1634,42 @@ function draw() {
     }
     ctx.fillStyle = '#6b7689'; ctx.textAlign = 'left';
     ctx.fillText('VOL', PAD_L + 2, volTop + 12);
+
+    // §43 OKX 风格成交量均量线 MA5/10/20：与柱子共用 vNorm 基准，画在成交量副图内。
+    // 和 drawEMA 对称：xW>=1 逐根，xW<1 按像素桶中点采样；y = volBot - MA/vNorm*volH（clamp 到副图内）。
+    if (volMaOn) {
+      const volPaneH = volBot - volTop;
+      const yOfVol = v => volBot - Math.min(v / vNorm, 1) * volPaneH;
+      for (const mc of VOL_MA) {
+        computeVolMa(mc.p, e);
+        const full = volMaFull[mc.p];
+        if (!full) continue;
+        ctx.strokeStyle = mc.color; ctx.lineWidth = 1.2; ctx.beginPath();
+        let started = false;
+        if (xW >= 1) {
+          for (let i = s; i < e; i++) {
+            const v = full[i];
+            if (v == null || Number.isNaN(v)) continue;
+            const x = xI(i - s), y = yOfVol(v);
+            if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+          }
+        } else {
+          for (let x = 0; x < Wpx; x++) {
+            const { i0, i1 } = bucketOf(x);
+            const mid = i0 + Math.floor((i1 - i0) / 2);
+            const v = full[mid];
+            if (v == null || Number.isNaN(v)) continue;
+            const px = PAD_L + x + 0.5, y = yOfVol(v);
+            if (!started) { ctx.moveTo(px, y); started = true; } else ctx.lineTo(px, y);
+          }
+        }
+        if (started) ctx.stroke();
+        // 图例（OKX 风格）：左上角 VOL 旁横排，三条各占一段、颜色同线。
+        // ⚠️ 不要画在右端同一 y：三条线在右端数值接近会互相覆盖，只看见最后一条。
+        ctx.fillStyle = mc.color; ctx.textAlign = 'left';
+        ctx.fillText('MA' + mc.p, PAD_L + 26 + VOL_MA.indexOf(mc) * 34, volTop + 12);
+      }
+    }
   }
   // 主图 / 成交量副图 分隔线（可上下拖动调节 VOL 高度）
   ctx.strokeStyle = '#222b3d'; ctx.lineWidth = 1;
@@ -3093,11 +3141,11 @@ async function liveRefreshTick() {
       const d1 = liveArrOf('1d', sym);
       minIdxOf['1d'] = Math.max(0, d1.length - dDay - 2);   // 保守：覆盖到变化区之前
     }
-    // 当前周期被改了 → EMA 从改动处重算（emaFull/emaFullLen 是按 EMA 长度 20/120 键的，
-    // 且切周期时 setView 会整体清空，所以只需管当前这一份）
+    // 当前周期被改了 → EMA / 均量线 从改动处重算（切周期时 setView 会整体清空，这里只管当前这一份）
     if (sym === curSym && minIdxOf[cur] !== undefined && minIdxOf[cur] >= 0) {
       const from = minIdxOf[cur];
       [20, 120].forEach(n => { if (typeof emaFullLen[n] === 'number' && emaFullLen[n] > from) emaFullLen[n] = from; });
+      VOL_MA.forEach(mc => { if (typeof volMaFullLen[mc.p] === 'number' && volMaFullLen[mc.p] > from) volMaFullLen[mc.p] = from; });
     }
     liveStatus = { ok: true, ts: Date.now(), msg: touched.length ? ('已更新 ' + touched.length + ' 个周期') : '无新数据' };
     await liveAfterMerge(touched, sym);
@@ -3315,6 +3363,7 @@ function watchAfterMerge(sym, period, r) {
   if (atRight) viewStart = Math.max(vsLo(), len - viewCount);
   const from = (r && r.minIdx >= 0) ? r.minIdx : 0;
   [20, 120].forEach(n => { if (typeof emaFullLen[n] === 'number' && emaFullLen[n] > from) emaFullLen[n] = from; });
+  VOL_MA.forEach(mc => { if (typeof volMaFullLen[mc.p] === 'number' && volMaFullLen[mc.p] > from) volMaFullLen[mc.p] = from; });
   redrawSoon();
   watchRenderList();
 }

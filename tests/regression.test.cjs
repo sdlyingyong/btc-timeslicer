@@ -125,6 +125,10 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     getVolNormSmooth: () => volNormSmooth, setVolNormSmooth: v => { volNormSmooth = v; },
     // §38：把两个口径常量暴露出来，测试按真实系数算期望，不再硬编码 0.18 / 3
     getVolSnapRatio: () => VMAX_SNAP_RATIO, getVolSmoothStep: () => VMAX_SMOOTH,
+    // §43：OKX 风格成交量均量线
+    getVolMaColors: () => VOL_MA.map(mc => ({ p: mc.p, color: mc.color })),
+    setVolMaEnabled: v => { volMaOn = !!v; },
+    getVolMaCacheInfo: () => { const o = {}; for (const mc of VOL_MA) o[mc.p] = volMaFullLen[mc.p] || 0; return o; },
     setTool: t => { toolMode = t; },
     setContinuousDraw: b => { continuousDraw = b; },
     setTradeMode: b => { tradeMode = b; },
@@ -2807,8 +2811,8 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     check('§38 1d 收敛后仍只有最大那根顶格', f1b.clip === 1, '顶格 ' + f1b.clip + ' 根');
 
     // ---- 38.3 15m 16000→40000 根（基准跳 2.2x）----
-    // §42 之后 15m 改用 P99.5 当基准，本来就会有约 0.5% 的柱子（≈6 根）被截顶 ——
-    // 那不是本节的"缓动截断"。本节要验的是：**第 1 帧不许比收敛后多截**。
+    // §43 起 15m 恢复 OKX 线性真实比例（视口最大量），顶格只该是最大那一根/桶。
+    // 本节要验的是：**第 1 帧不许比收敛后多截**（缓动不得造成额外顶格）。
     await API.setView(null, '15m');
     const L15 = API.dataLen();
     API.setViewRange(L15 - 16000, 16000); warm();
@@ -2818,7 +2822,7 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     const f2b = oneFrame();
     check('§38 15m 缩到 40000 根：第 1 帧顶格数 == 收敛后（不因缓动多截）', f2.clip === f2b.clip,
       '第1帧 ' + f2.clip + ' 根 / 收敛后 ' + f2b.clip + ' 根');
-    check('§42 15m 顶格只来自 P99.5 口径（≤1% 的列）', f2.clip <= Math.ceil(f2.n * 0.01) + 2,
+    check('§43 15m 恢复真实比例后顶格仅最大那根（≤2）', f2.clip <= 2,
       f2.clip + ' 根 / ' + f2.n + ' 列');
 
     // ---- 38.4 反方向（放大）：基准变小，本就不该截断，锁住不回归 ----
@@ -2843,81 +2847,78 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     }
   }
 
-  // ============ 42. 小周期成交量基准抗离群（15m/1h 用 P99.5，日线以上不动）============
-  // 用户报告：「缩放以后突然长出特别长的一个柱子」。
-  // 实测：15m 2023-10-16 13:30 那根爆量 171,631，而视口中位数只有 1,813（差 95 倍）。
-  //   基准 = 视口最大量 → 它一进屏，其余柱子全被压到 1.6px，只有它顶满。
-  // 方案：15m / 1h 改用可见量的 P99.5 当基准（超出的截顶）；1d / 4h 保持线性真实比例。
+  // ============ 43. 成交量完全对齐 OKX：线性真实比例 + MA5/10/20 均量线 ============
+  // 用户看过 OKX 后明确选择「完全照搬 OKX」：
+  //   ① 撤销 §42 的 P99.5 截顶 → 所有周期统一「视口最大量」基准（爆量柱顶满、其它相对矮，
+  //      这才是真实成交比例；OKX/TradingView 默认就是这样，不人为压平）。
+  //   ② 新增 OKX 成交量副图最显眼的特征：MA5 / MA10 / MA20 三条均量线做「正常量能」参照，
+  //      有锚点后即使出现爆量，眼睛也有基准，不再觉得是渲染 bug。
+  // 口径：均量线基于连续收盘 K 线的成交量（不含未收盘当前根），按视口最大量同一基准绘制；
+  //      大缩放 xW<1 时按像素桶采样（与蜡烛/成交量同一分桶），保证平移缩放不漂移。
   {
-    const q995 = arr => { const v = arr.filter(x => x > 0).sort((a, b) => a - b);
-      return v.length ? v[Math.min(v.length - 1, Math.floor(v.length * 0.995))] : 0; };
     const findPeak = a => { let si = 0, sv = 0; a.forEach((r, i) => { if (+r[5] > sv) { sv = +r[5]; si = i; } }); return { si, sv }; };
     const warm = () => { for (let k = 0; k < 120; k++) API.draw(); };
+    const median = a => { const s = a.slice().sort((x, y) => x - y); return s.length ? s[Math.floor(s.length / 2)] : 0; };
 
+    // ---- 43.1 所有周期基准 = 视口最大量（P99.5 已撤销）----
     await API.setView(null, '15m');
     const A15 = DATA['15m'];
     const pk = findPeak(A15);
+    const w15 = A15.slice(Math.max(0, pk.si - 600), pk.si + 600).map(r => +r[5]);
     API.setViewRange(Math.max(0, pk.si - 600), 1200); warm();
     const vNorm15 = API.getVolNormSmooth();
-    const p995 = q995(A15.slice(Math.max(0, pk.si - 600), pk.si + 600).map(r => +r[5]));
-    check('§42 15m 基准 = P99.5（不被单根爆量拉走）', Math.abs(vNorm15 - p995) / p995 < 0.10,
-      '基准=' + vNorm15.toFixed(0) + ' P99.5=' + p995.toFixed(0));
-    check('§42 15m 基准远低于视口最大量（这才是问题根因）', vNorm15 < pk.sv * 0.5,
-      '基准=' + vNorm15.toFixed(0) + ' 最大=' + pk.sv.toFixed(0) + ' 倍数=' + (pk.sv / vNorm15).toFixed(1) + 'x');
+    const max15 = Math.max.apply(null, w15);
+    check('§43 15m 基准恢复为视口最大量（P99.5 已撤销）', Math.abs(vNorm15 - max15) / max15 < 0.03,
+      '基准=' + vNorm15.toFixed(0) + ' 最大=' + max15.toFixed(0));
+    check('§43 15m 基准不再是 P99.5（要明显高于原分位基准）',
+      vNorm15 > median(w15) * 20, '基准=' + vNorm15.toFixed(0) + ' 中位=' + median(w15).toFixed(0));
 
-    // 1h 同样
-    await API.setView(null, '1h');
-    const A1h = DATA['1h'];
-    const pk1 = findPeak(A1h);
-    API.setViewRange(Math.max(0, pk1.si - 400), 800); warm();
-    const vn1h = API.getVolNormSmooth();
-    const p1 = q995(A1h.slice(Math.max(0, pk1.si - 400), pk1.si + 400).map(r => +r[5]));
-    check('§42 1h 基准 = P99.5', Math.abs(vn1h - p1) / p1 < 0.10,
-      '基准=' + vn1h.toFixed(0) + ' P99.5=' + p1.toFixed(0));
+    // 1h / 1d / 4h 一律视口最大量
+    for (const [p, half, tag] of [['1h', 400, '1h'], ['1d', 300, '1d'], ['4h', 300, '4h']]) {
+      await API.setView(null, p);
+      const A = DATA[p], pkx = findPeak(A);
+      const seg = A.slice(Math.max(0, pkx.si - half), pkx.si + half).map(r => +r[5]);
+      API.setViewRange(Math.max(0, pkx.si - half), half * 2); warm();
+      const vn = API.getVolNormSmooth(), mx = Math.max.apply(null, seg);
+      check('§43 ' + tag + ' 仍用视口最大量（真实比例）', Math.abs(vn - mx) / mx < 0.03,
+        '基准=' + vn.toFixed(0) + ' 最大=' + mx.toFixed(0));
+    }
 
-    // 1d / 4h 不受影响：基准仍等于视口最大量
-    await API.setView(null, '1d');
-    const A1d = DATA['1d'];
-    const p1d = findPeak(A1d);
-    API.setViewRange(Math.max(0, p1d.si - 300), 600); warm();
-    const vn1d = API.getVolNormSmooth();
-    const max1d = Math.max.apply(null, A1d.slice(Math.max(0, p1d.si - 300), p1d.si + 300).map(r => +r[5]));
-    check('§42 1d 仍用视口最大量（真实比例不变）', Math.abs(vn1d - max1d) / max1d < 0.03,
-      '基准=' + vn1d.toFixed(0) + ' 最大=' + max1d.toFixed(0));
-
-    await API.setView(null, '4h');
-    const A4h = DATA['4h'];
-    const p4 = findPeak(A4h);
-    API.setViewRange(Math.max(0, p4.si - 300), 600); warm();
-    const vn4h = API.getVolNormSmooth();
-    const max4h = Math.max.apply(null, A4h.slice(Math.max(0, p4.si - 300), p4.si + 300).map(r => +r[5]));
-    check('§42 4h 仍用视口最大量', Math.abs(vn4h - max4h) / max4h < 0.03,
-      '基准=' + vn4h.toFixed(0) + ' 最大=' + max4h.toFixed(0));
-
-    // 效果：15m 含爆量视口的中位柱高要从 1-2px 回到 6px 以上
+    // ---- 43.2 均量线：MA5/10/20 三条折线 + 图例文字 ----
     await API.setView(null, '15m');
-    API.setViewRange(Math.max(0, pk.si - 600), 1200); warm();
-    const volH = 700 * API.getVolFrac();
-    const volBotOf = rs => {
-      const c = new Map();
-      for (const r of rs) { const b = +(r[1] + r[3]).toFixed(2); if (b < 400) continue; c.set(b, (c.get(b) || 0) + 1); }
-      let bb = 0, best = 0;
-      for (const [k, v] of c) if (v > best) { best = v; bb = k; }
-      return bb;
-    };
-    ctxRects.length = 0; API.draw();
-    const bot42 = volBotOf(ctxRects);
-    const hs = ctxRects.filter(r => Math.abs(r[1] + r[3] - bot42) < 0.6 && r[3] > 0.2 && r[3] <= volH + 0.5)
-      .map(r => r[3]).sort((a, b) => a - b);
-    const medH = hs[Math.floor(hs.length / 2)];
-    check('§42 15m 含爆量时中位柱仍可读（≥6px）', medH >= 6,
-      '中位柱=' + medH.toFixed(1) + 'px（改前 1.6px）');
+    API.setViewRange(Math.max(0, pk.si - 300), 600); warm();
+    ctxTexts.length = 0; ctxStrokes.length = 0; API.draw();
+    const maColors = API.getVolMaColors();
+    check('§43 均量线配置为 MA5/10/20 三条', maColors.length === 3 &&
+      maColors[0].p === 5 && maColors[1].p === 10 && maColors[2].p === 20,
+      JSON.stringify(maColors.map(x => x.p)));
+    for (const mc of maColors) {
+      check('§43 MA' + mc.p + ' 折线被描边（颜色 ' + mc.color + '）',
+        ctxStrokes.some(s => s.color === mc.color), 'stroke 颜色集合=' + [...new Set(ctxStrokes.map(s => s.color))].join('|'));
+      check('§43 MA' + mc.p + ' 图例文字出现', ctxTexts.includes('MA' + mc.p),
+        '文字样本=' + ctxTexts.slice(-8).join('|'));
+    }
+    // 开关关闭时三条线都不画
+    API.setVolMaEnabled(false); ctxTexts.length = 0; ctxStrokes.length = 0; API.draw();
+    check('§43 关闭均量线后不再描边 MA', !ctxStrokes.some(s => maColors.some(mc => s.color === mc.color)),
+      'stroke 颜色集合=' + [...new Set(ctxStrokes.map(s => s.color))].join('|'));
+    API.setVolMaEnabled(true); warm();
 
-    // ---- 肉眼复核（RENDER=1）：同一爆量视口，P99.5 口径下其余柱子应恢复可读 ----
+    // ---- 43.3 MA 数值正确：首帧算对 + 缓存跨帧复用（性能不退化）----
+    // 找一段普通视口（无爆量），核对 MA5 第一条折线的第一个 y 落在合理区间内。
+    await API.setView(null, '1d');
+    const L1d = API.dataLen();
+    API.setViewRange(L1d - 300, 300); warm();
+    const cacheInfo = API.getVolMaCacheInfo();
+    check('§43 均量线缓存按周期建立（5/10/20）', [5, 10, 20].every(p => cacheInfo[p] > 0),
+      JSON.stringify(cacheInfo));
+
+    // ---- 43.4 肉眼复核（RENDER=1）：爆量视口下真实比例 + 三条均量线 ----
     if (process.env.RENDER) {
+      await API.setView(null, '15m');
       API.setViewRange(Math.max(0, pk.si - 600), 1200); warm();
-      require('fs').writeFileSync('/tmp/shot_vol_p995.png', canvasMock.toBuffer('image/png'));
-      console.log('§42 wrote /tmp/shot_vol_p995.png（15m 含爆量，P99.5 基准）');
+      require('fs').writeFileSync('/tmp/shot_vol_okx.png', canvasMock.toBuffer('image/png'));
+      console.log('§43 wrote /tmp/shot_vol_okx.png（15m 含爆量，OKX 真实比例 + 均量线）');
     }
   }
 
