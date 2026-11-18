@@ -1025,7 +1025,9 @@ function computeEMA(period, upto) {
 // §43 OKX 风格成交量均量线 VOL MA5/10/20（SMA，基于每根K线的成交量 r[5]）。
 // ⚠️ 必须独立于 EMA 缓存：均线周期键 5/10/20 里也有 20，与 EMA20 共用会串数据。
 const VOL_MA = [{ p: 5, color: '#ffd166' }, { p: 10, color: '#c792ea' }, { p: 20, color: '#5ec8f5' }];
-let volMaOn = true;
+// §45：用户看过页面后说成交量区只要柱子、不要均量线 → 默认关闭。
+//      代码与开关完整保留（setVolMaEnabled(true) 可开回），不删是为了不丢 §43 已验证的口径实现。
+let volMaOn = false;
 const volMaFull = {};     // period -> Float64Array（SMA 值，从 0 算到 volMaFullLen[period]）
 const volMaFullLen = {};  // period -> 已计算到的索引数
 function computeVolMa(period, upto) {

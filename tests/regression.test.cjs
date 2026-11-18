@@ -2888,41 +2888,47 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
         '基准=' + vn.toFixed(0) + ' 最大=' + mx.toFixed(0));
     }
 
-    // ---- 43.2 均量线：MA5/10/20 三条折线 + 图例文字 ----
+    // ---- 43.2 均量线默认关闭（用户：成交量那不需要均量线，只要柱子）----
+    // §45：用户看过页面后说成交量区只要成交量柱。默认关掉 MA5/10/20，
+    //       但保留代码 + 显式开关（setVolMaEnabled(true) 仍可开回来，防回归）。
     await API.setView(null, '15m');
     API.setViewRange(Math.max(0, pk.si - 300), 600); warm();
-    ctxTexts.length = 0; ctxStrokes.length = 0; API.draw();
     const maColors = API.getVolMaColors();
-    check('§43 均量线配置为 MA5/10/20 三条', maColors.length === 3 &&
+    check('§43 均量线配置为 MA5/10/20 三条（代码保留）', maColors.length === 3 &&
       maColors[0].p === 5 && maColors[1].p === 10 && maColors[2].p === 20,
       JSON.stringify(maColors.map(x => x.p)));
+    // 默认状态：三条线都不画、无图例文字
+    API.setVolMaEnabled(false); ctxTexts.length = 0; ctxStrokes.length = 0; API.draw();
+    check('§45 默认成交量区不描边 MA（只要柱子）', !ctxStrokes.some(s => maColors.some(mc => s.color === mc.color)),
+      'stroke 颜色集合=' + [...new Set(ctxStrokes.map(s => s.color))].join('|'));
+    check('§45 默认成交量区不出现 MA 图例文字', !maColors.some(mc => ctxTexts.includes('MA' + mc.p)),
+      '文字样本=' + ctxTexts.slice(-8).join('|'));
+    // 显式开启后：三条折线 + 图例仍正确（代码没删，开关可恢复）
+    API.setVolMaEnabled(true); ctxTexts.length = 0; ctxStrokes.length = 0; API.draw();
     for (const mc of maColors) {
-      check('§43 MA' + mc.p + ' 折线被描边（颜色 ' + mc.color + '）',
+      check('§43 开启后 MA' + mc.p + ' 折线被描边（颜色 ' + mc.color + '）',
         ctxStrokes.some(s => s.color === mc.color), 'stroke 颜色集合=' + [...new Set(ctxStrokes.map(s => s.color))].join('|'));
-      check('§43 MA' + mc.p + ' 图例文字出现', ctxTexts.includes('MA' + mc.p),
+      check('§43 开启后 MA' + mc.p + ' 图例文字出现', ctxTexts.includes('MA' + mc.p),
         '文字样本=' + ctxTexts.slice(-8).join('|'));
     }
-    // 开关关闭时三条线都不画
-    API.setVolMaEnabled(false); ctxTexts.length = 0; ctxStrokes.length = 0; API.draw();
-    check('§43 关闭均量线后不再描边 MA', !ctxStrokes.some(s => maColors.some(mc => s.color === mc.color)),
-      'stroke 颜色集合=' + [...new Set(ctxStrokes.map(s => s.color))].join('|'));
-    API.setVolMaEnabled(true); warm();
+    API.setVolMaEnabled(false); warm();   // 还原默认关闭，后面用例不受影响
 
-    // ---- 43.3 MA 数值正确：首帧算对 + 缓存跨帧复用（性能不退化）----
-    // 找一段普通视口（无爆量），核对 MA5 第一条折线的第一个 y 落在合理区间内。
+    // ---- 43.3 MA 缓存：显式开启后按周期建立（默认关闭时不必算，省性能）----
+    API.setVolMaEnabled(true);
     await API.setView(null, '1d');
     const L1d = API.dataLen();
     API.setViewRange(L1d - 300, 300); warm();
     const cacheInfo = API.getVolMaCacheInfo();
     check('§43 均量线缓存按周期建立（5/10/20）', [5, 10, 20].every(p => cacheInfo[p] > 0),
       JSON.stringify(cacheInfo));
+    API.setVolMaEnabled(false);
 
-    // ---- 43.4 肉眼复核（RENDER=1）：爆量视口下真实比例 + 三条均量线 ----
+    // ---- 43.4 肉眼复核（RENDER=1）：默认成交量区只有柱子（无 MA）----
     if (process.env.RENDER) {
       await API.setView(null, '15m');
       API.setViewRange(Math.max(0, pk.si - 600), 1200); warm();
       require('fs').writeFileSync('/tmp/shot_vol_okx.png', canvasMock.toBuffer('image/png'));
-      console.log('§43 wrote /tmp/shot_vol_okx.png（15m 含爆量，OKX 真实比例 + 均量线）');
+      console.log('§43 wrote /tmp/shot_vol_okx.png（15m 含爆量，真实比例 + 默认无均量线）');
     }
   }
 
