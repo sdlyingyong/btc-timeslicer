@@ -1336,7 +1336,9 @@ function syncPeriodButtons() {
   document.querySelectorAll('.symbols button').forEach(b => {
     b.classList.toggle('active', b.dataset.sym === curSym);
   });
-  document.getElementById('title').textContent = curSym + ' · 时光机' + (APP_INSTANCE === 'live' ? '（看盘）' : APP_INSTANCE === 'watch' ? '（自选）' : '（复盘）');
+  document.getElementById('title').textContent = curSym + ' · 时光机' +
+    (APP_INSTANCE === 'live' ? '（看盘）' : APP_INSTANCE === 'watch' ? '（自选）' :
+     APP_INSTANCE === 'eth' ? '（ETH 复盘）' : '（复盘）');
 }
 
 function setLoading(msg) { document.getElementById('loading').textContent = msg || ''; }
@@ -3180,14 +3182,30 @@ if (Object.keys(tradesBySym).length) {
   const total = Object.values(tradesBySym).reduce((a, b) => a + b.length, 0);
   setTradeInfo(`已载入 ${total} 笔交割单（点击「清除交割单」可移除）`);
 }
-// 若有上次会话则恢复到上次的标的+周期，否则默认 BTC 日线
-const START_SYM = (RESTORE && SYMBOLS[RESTORE.sym]) ? RESTORE.sym : 'BTC';
+// §44 ETH 复盘入口：纯 ETH 页面 —— 显示 ETH 按钮、隐藏 BTC、默认标的固定 ETH，
+//     且忽略历史会话里的其它标的（本页只复盘 ETH）。其余入口维持原逻辑。
+const IS_ETH_PAGE = APP_INSTANCE === 'eth';
+if (IS_ETH_PAGE) {
+  const btcBtn = document.querySelector('.symbols button[data-sym="BTC"]');
+  const ethBtn = document.querySelector('.symbols button[data-sym="ETH"]');
+  if (btcBtn) btcBtn.style.display = 'none';
+  if (ethBtn) ethBtn.style.display = '';
+}
+// 若有上次会话则恢复到上次的标的+周期，否则默认 BTC 日线（ETH 复盘页固定 ETH）
+const START_SYM = IS_ETH_PAGE ? 'ETH' : ((RESTORE && SYMBOLS[RESTORE.sym]) ? RESTORE.sym : 'BTC');
 const START_PERIOD = RESTORE ? RESTORE.period : '1d';
 document.querySelectorAll('.symbols button').forEach(x => x.classList.remove('active'));
 (document.querySelector(`.symbols button[data-sym="${START_SYM}"]`) ||
  document.querySelector('.symbols button[data-sym="BTC"]')).classList.add('active');
 resize();
-setView(START_SYM, START_PERIOD);
+if (IS_ETH_PAGE) {
+  // §44：ETH 是异步分片数据（manifest 只有年份清单，首屏要 fetch 最近一年才有 K 线），
+  //     不能像 BTC 那样同步 setView('ETH')——那时 SYMBOLS['ETH'] 还不存在会崩。
+  //     先 loading，等首个分片 materialize 后再 setView；其余年份由后台引导继续补齐。
+  setLoading('ETH 历史加载中…');
+} else {
+  setView(START_SYM, START_PERIOD);
+}
 // §31 看盘实例：每 5 分钟直连 OKX 补一次数据（复盘实例不启用）。
 // §34：这里的启动**挪到了文件末尾的引导块**，与 §32 的启动相邻。两个原因：
 //   ① watchShouldRun() 读的是下面才声明的 let watchForce，在此处调用会命中 TDZ（ReferenceError）；
@@ -3791,6 +3809,9 @@ function ethShardOf(year) {
 }
 function ethShouldRun() {
   if (ethForce !== undefined) return !!ethForce;
+  // §44：ETH 复盘独立入口也要加载分片，但它不走 watch —— 复用 §33 的 ETHFUT_MANIFEST 渐进加载。
+  //     注意：这里只放开「数据加载」，不碰 watchShouldRun（后者会带 WS/REST 实时，破坏复盘可复现）。
+  if (APP_INSTANCE === 'eth') return !!ethManifest();
   return watchShouldRun() && !!ethManifest();
 }
 function ethSetEnabled(v) { ethForce = (v === undefined) ? undefined : !!v; }
@@ -3954,3 +3975,23 @@ async function ethBootstrap() {
 //      §31 降为兜底，两者**绝不同时跑**（同一份数组两个写入方会互相覆盖）。
 if (liveShouldRun() && !watchShouldRun()) liveRefreshStart();
 if (watchShouldRun()) watchInit();
+// §44 ETH 复盘独立页：只驱动 §33 分片渐进加载，不跑 watchInit（无 WS/REST 实时）→ 保持可复现。
+//     引导顺序：先加载最近一年 → materialize 进 SYMBOLS → 这时才能 setView('ETH') →
+//     再后台补齐其余年份。提前 setView 会因 SYMBOLS['ETH'] 不存在而崩。
+if (APP_INSTANCE === 'eth' && ethShouldRun()) {
+  (async () => {
+    try {
+      const mf = ethManifest();
+      const years = mf ? mf.years.map(Number).sort((a, b) => b - a) : [];
+      ethRegisterExisting();
+      if (years.length) await ethLoadYear(years[0]);       // 首屏只等最近一年
+      ethMaterialize();
+      setView('ETH', START_PERIOD);
+      setLoading('');
+      await ethLoadAll();                                   // 其余年份后台渐进补齐
+      if (SYMBOLS.ETH) { try { setView('ETH', START_PERIOD); } catch (e) {} }
+    } catch (e) {
+      setLoading('ETH 历史加载失败：' + (e && e.message ? e.message : '未知错误'));
+    }
+  })();
+}

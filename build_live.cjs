@@ -7,10 +7,11 @@
 //   2) 资源路径   src="share/…" → src="../share/…"   （多一层目录）
 //   3) 页面标题   BTC 时光机 · 复盘 → … · 看盘 / … · 自选
 //
-// 入口清单（§32 起为三个）：
-//   index.html        复盘（源，手改这一个）           __APP_INSTANCE__='review'
-//   live/index.html   看盘（每 5 分钟 REST 自动补数）   __APP_INSTANCE__='live'
+// 入口清单（§44 起为四个）：
+//   index.html        复盘·BTC（源，手改这一个）        __APP_INSTANCE__='review'
+//   live/index.html   看盘（多币种 + WebSocket 实时）   __APP_INSTANCE__='live'
 //   watch/index.html  自选（多币种 + WebSocket 实时）   __APP_INSTANCE__='watch'
+//   eth/index.html    ETH 复盘（纯 ETH，可复现不实时）  __APP_INSTANCE__='eth'
 //
 // 用法：node build_live.cjs          （正常流程；数据在 share/，与本文件无关）
 //      node build_live.cjs --check  （只校验派生壳是否与 index.html 同步，不写盘；测试用）
@@ -38,6 +39,12 @@ const ENTRIES = [
     dir: 'watch', instance: 'watch', title: '<title>BTC 时光机 · 自选</title>',
     // 只引 manifest（≈700B）；年份分片 share/eth/YYYY.js 由 §33 在前端「新→旧渐进加载」，
     // 这样首屏只吃最近 2 年（≈3.6MB），而不是一上来并发 15.5MB 与 data.js 抢带宽。
+    extraScripts: ['share/eth/manifest.js']
+  },
+  {
+    dir: 'eth', instance: 'eth', title: '<title>ETH 时光机 · 复盘</title>',
+    // §44：ETH 复盘独立页 —— 引 manifest 让 §33 分片渐进加载生效。
+    // 与 watch/live 的区别在 app.js：eth 实例不跑 WS/REST（可复现），默认标的 = ETH。
     extraScripts: ['share/eth/manifest.js']
   }
 ];

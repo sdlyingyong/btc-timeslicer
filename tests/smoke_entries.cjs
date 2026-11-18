@@ -47,6 +47,7 @@ console.log('=== 入口 HTML 静态检查 ===');
 // 这里先静态对一遍「谁能引什么」——尤其是 §33 只许 watch 引 ETH 分片。
 const htmlOf = f => fs.readFileSync(path.join(REPO, f), 'utf8');
 const REV_HTML = htmlOf('index.html'), LIV_HTML = htmlOf('live/index.html'), WAT_HTML = htmlOf('watch/index.html');
+const ETH_HTML = fs.existsSync(path.join(REPO, 'eth/index.html')) ? htmlOf('eth/index.html') : '';
 const srcsOf = h => (h.match(/<script src="[^"]+"><\/script>/g) || []).map(s => /src="([^"]+)"/.exec(s)[1]);
 check('§33 复盘入口不引 ETH 分片', !/share\/eth\//.test(REV_HTML), srcsOf(REV_HTML).join(' '));
 // §34：看盘入口升级为多币种，从「不许引」反转为「必须引」，且规格与自选完全对齐。
@@ -67,6 +68,17 @@ for (const [name, html] of [['自选', WAT_HTML], ['看盘', LIV_HTML]]) {
 }
 check('§34 看盘与自选的脚本声明顺序完全一致', srcsOf(LIV_HTML).join('|') === srcsOf(WAT_HTML).join('|'),
   srcsOf(LIV_HTML).join(' '));
+
+// §44 ETH 复盘独立入口 /eth/
+check('§44 eth/index.html 已由构建脚本生成', !!ETH_HTML);
+check('§44 ETH 复盘入口实例标记 = eth', /window\.__APP_INSTANCE__='eth'/.test(ETH_HTML));
+check('§44 ETH 复盘标题为 ETH 时光机', /<title>ETH 时光机 · 复盘<\/title>/.test(ETH_HTML));
+check('§44 ETH 复盘入口引 manifest（否则 ETH 分片加载不到）', /share\/eth\/manifest\.js/.test(ETH_HTML),
+  srcsOf(ETH_HTML).join(' '));
+check('§44 ETH 复盘的分片脚本排在 app.js 之前', (() => {
+  const s = srcsOf(ETH_HTML);
+  return s.indexOf('../share/eth/manifest.js') >= 0 && s.indexOf('../share/eth/manifest.js') < s.indexOf('../share/app.js');
+})(), srcsOf(ETH_HTML).join(' '));
 
 function boot(entryRel) {
   const html = htmlOf(entryRel);
@@ -250,5 +262,43 @@ check('同一浏览器里三个入口的进度互不覆盖',
   A.w.localStorage.getItem('live__kline_session_v1') === 'LIVE' &&
   A.w.localStorage.getItem('watch__kline_session_v1') === 'WATCH');
 
-console.log('\n======== 三入口冒烟: ' + pass + ' PASS / ' + fail + ' FAIL ========');
+// §44 ETH 复盘独立入口 /eth/：真 DOM 起一遍，验默认 ETH + 不跑实时 + 存储隔离。
+console.log('\n=== ETH 复盘入口 eth/index.html ===');
+const E = ETH_HTML ? boot('eth/index.html') : { errs: ['eth/index.html 不存在'], marker: '', keys: [], loaded: [], w: null };
+check('§44 ETH 复盘入口无脚本错误', E.errs.length === 0, E.errs.join(' | ') || '干净');
+check('§44 ETH 复盘入口实例标记 = eth', E.marker === 'eth', String(E.marker));
+// 注：侧栏标题由 setView() 内的 syncPeriodButtons() 异步设置（await findIdxByTime 之后），
+//     同步冒烟抓不到；这里验页面 <title> + app.js 里的 eth 标题分支源码（静态）即可。
+check('§44 ETH 复盘入口 <title> = ETH 时光机 · 复盘', /<title>ETH 时光机 · 复盘<\/title>/.test(ETH_HTML));
+check('§44 app.js 侧栏标题对 eth 实例标注（ETH 复盘）',
+  /APP_INSTANCE === 'eth'[\s\S]{0,80}ETH 复盘/.test(htmlOf('share/app.js')));
+check('§44 ETH 复盘默认标的 ETH（符号按钮 active 是 ETH 不是 BTC）',
+  (() => {
+    if (!E.w) return false;
+    const bs = [...E.w.document.querySelectorAll('.symbols button')];
+    return bs.some(b => b.dataset.sym === 'ETH' && b.classList.contains('active')) &&
+           !bs.some(b => b.dataset.sym === 'BTC' && b.classList.contains('active'));
+  })(), E.w ? [...E.w.document.querySelectorAll('.symbols button')].map(b => b.dataset.sym + (b.classList.contains('active') ? '*' : '')).join(',') : 'null');
+check('§44 ETH 复盘隐藏 BTC 按钮（纯 ETH）',
+  (() => {
+    if (!E.w) return false;
+    const btc = E.w.document.querySelector('.symbols button[data-sym="BTC"]');
+    return !btc || btc.style.display === 'none';
+  })(), E.w ? String((E.w.document.querySelector('.symbols button[data-sym="BTC"]') || {}).style && (E.w.document.querySelector('.symbols button[data-sym="BTC"]') || {}).style.display) : 'null');
+check('§44 ETH 复盘不跑实时（无 #watchStatus 状态位）',
+  !!E.w && !E.w.document.getElementById('watchStatus'));
+check('§44 ETH 复盘读到了 ETHFUT_MANIFEST', !!E.w && !!E.w.ETHFUT_MANIFEST,
+  E.w && E.w.ETHFUT_MANIFEST ? E.w.ETHFUT_MANIFEST.src : 'null');
+check('§44 ETH 复盘脚本顺序 = data → manifest → app',
+  E.loaded.join(' ') === 'share/data.js share/eth/manifest.js share/app.js', E.loaded.join(' '));
+check('§44 ETH 复盘写入 eth__ 前缀键（与其它入口隔离）',
+  E.keys.length === 0 || E.keys.every(k => k.startsWith('eth__')), E.keys.join(',') || '(还没写)');
+A.w.localStorage.setItem('eth__kline_session_v1', 'ETH_REVIEW');
+check('同一浏览器里四个入口的进度互不覆盖',
+  A.w.localStorage.getItem('kline_session_v1') === 'REVIEW' &&
+  A.w.localStorage.getItem('live__kline_session_v1') === 'LIVE' &&
+  A.w.localStorage.getItem('watch__kline_session_v1') === 'WATCH' &&
+  A.w.localStorage.getItem('eth__kline_session_v1') === 'ETH_REVIEW');
+
+console.log('\n======== 四入口冒烟: ' + pass + ' PASS / ' + fail + ' FAIL ========');
 process.exit(fail ? 1 : 0);

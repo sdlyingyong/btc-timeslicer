@@ -1860,8 +1860,12 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
 
     // ---- 30.8 页面标题与实例挂钩（肉眼能分辨当前在哪个入口）----
     // §32 起多一态：watch（自选）—— 断言随实现一起更新
-    check('§30 页内标题区分复盘/看盘/自选',
-      APP_SRC.includes("(APP_INSTANCE === 'live' ? '（看盘）' : APP_INSTANCE === 'watch' ? '（自选）' : '（复盘）')"));
+    // §44：标题分支新增 eth（ETH 复盘），断言同步放宽为「四入口各自标注」
+    check('§30/§44 页内标题区分复盘/看盘/自选/ETH复盘',
+      APP_SRC.includes("APP_INSTANCE === 'live' ? '（看盘）'") &&
+      APP_SRC.includes("APP_INSTANCE === 'watch' ? '（自选）'") &&
+      APP_SRC.includes("APP_INSTANCE === 'eth' ? '（ETH 复盘）'") &&
+      APP_SRC.includes("'（复盘）'"));
 
     // ---- 30.9 工具链已全部指向 share/data.js（防止改回去又内联）----
     const tool = f => fs.existsSync(path.join(REPO2, f)) ? fs.readFileSync(path.join(REPO2, f), 'utf8') : '';

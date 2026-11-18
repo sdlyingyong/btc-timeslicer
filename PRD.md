@@ -3189,3 +3189,58 @@ P99.5 只压平约 0.5%（一屏 1130 列里 5~6 根）。
 - [x] 回归 **574 → 582 PASS**（§43 +14，§38 改 1）；冒烟 **47 PASS**；`build_live.cjs --check` → `[OK]`
 - [x] `RENDER=1` 出 `/tmp/shot_vol_okx.png` 肉眼确认（爆量柱真实高度 + 三条均量线）
 - [ ] 提交并推送 GitHub，线上核对代码特征串
+
+---
+
+# §44 ETH 复盘独立入口 `/eth/`（第四入口）
+
+用户原话：**「拆分做一个 eth 的复盘的单独的页面 也要在博客上增加入口呢 单独的网页路径」**。
+确认参数：路径 `/eth/`、纯 ETH（隐藏 BTC 按钮）、博客入口用绿色。
+
+## 44.1 为什么是「新入口」而不是改复盘页
+
+复盘入口 `index.html` 从 §34 起**故意不引 ETH 分片**（`share/eth/manifest.js`），
+以保证复盘「可复现、不被活数据污染」。所以 ETH 复盘不是把现有复盘页切成多币种，
+而是**全新第 4 个入口**，与 `review` / `live` / `watch` 并列：
+
+| 入口 | 路径 | 实例标记 | 标的 | 实时 |
+|---|---|---|---|---|
+| BTC 复盘 | `/` | `review` | 仅 BTC | 无（可复现） |
+| 看盘 | `/live/` | `live` | 多币种 | WS + REST |
+| 自选 | `/watch/` | `watch` | 多币种 | WS + REST |
+| **ETH 复盘** | `/eth/` | `eth` | **仅 ETH** | **无（可复现）** |
+
+## 44.2 改动内容
+
+1. **`build_live.cjs`**：`ENTRIES` 加一行 `{dir:'eth', instance:'eth', title:'ETH 时光机 · 复盘',
+   extraScripts:['share/eth/manifest.js']}`；从 3 入口变 4 入口，仍从单一源 `index.html` 派生。
+2. **`index.html`（源）**：标的组加 `<button data-sym="ETH" style="display:none">`（平时隐藏，
+   eth 实例由 app.js 显示）。改 HTML 只用 node 脚本（禁 Write/Edit 直改）。
+3. **`share/app.js`**：
+   - `ethShouldRun()`：`APP_INSTANCE==='eth'` 也返回真（复用 §33 分片加载）；
+     **不碰 `watchShouldRun()`**——后者会带 WS/REST 实时，破坏复盘可复现。
+   - 启动段：`IS_ETH_PAGE` 时隐藏 BTC 按钮、显示 ETH 按钮、`START_SYM` 固定 `'ETH'`、
+     侧栏标题标「（ETH 复盘）」。
+   - **延迟 setView**：ETH 是异步分片（manifest 只有年份清单），同步 `setView('ETH')` 会因
+     `SYMBOLS['ETH']` 未就绪而崩（`TypeError: Cannot read properties of undefined`）。
+     改为 `setLoading('ETH 历史加载中…')` → 末尾引导 `await ethLoadYear(最近一年)` →
+     `ethMaterialize()` → `setView('ETH')` → 后台 `ethLoadAll()` 补齐其余年份。
+4. **博客 `sdlyingyong.github.io`（master 分支）**：`_includes/nav.html` 加「ETH 复盘」绿色链接、
+   `index.html` 加第三张绿色卡片，均指向 `/btc-timeslicer/eth/`。
+
+## 44.3 🔴 关键坑（red→green 真实踩到）
+
+- **加载时序**：ETH 分片异步 vs setView 同步 = 崩。jsdom 冒烟里 `setView` 是 async、
+  异常被吞进 Promise 抓不到；是**真浏览器 eval 才暴露**的（截图前页面停在 loading）。
+  教训：涉及「默认标的需要异步数据」的入口，必须真浏览器验一遍，不能只信冒烟。
+- **门控解耦**：`ethShouldRun` 原本 = `watchShouldRun() && manifest`。若图省事把 eth 塞进
+  `watchShouldRun()`，会连带启动 WS/REST 实时补数，ETH 复盘就被活数据污染了。必须单独开门。
+- **存储隔离**：`STORAGE_NS` 对任意非 `review` 实例自动加前缀 → eth 实例自动用 `eth__` 前缀，
+  无需改动；四入口进度互不覆盖（冒烟已验）。
+
+## 44.4 验收
+
+- 冒烟 **47 → 63 PASS / 0 FAIL**（§44 +16，四入口端到端）；回归 **583 PASS / 0 FAIL**；
+  `build_live.cjs --check` → `[OK]`。
+- 真浏览器（Chrome 158 headless）：标题 `ETH · 时光机（ETH 复盘）`、标的栏只有 ETH、
+  K线 + EMA20/120 + VOL + MA5/10/20 全部渲染，无 loading/报错 → `/tmp/eth_page.png`。
