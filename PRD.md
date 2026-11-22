@@ -3309,3 +3309,47 @@ P99.5 只压平约 0.5%（一屏 1130 列里 5~6 根）。
 
 回归 **584 → 595 PASS / 0 FAIL**（§46 +11）；冒烟 **63 PASS / 0 FAIL**；`build_live.cjs --check` → `[OK]`；
 真浏览器（`/tmp/eth_mini.png`）：右上角小窗 `BTC · 大盘 -10.34%` + 橙黄曲线 + 0% 虚线，ETH 主图/成交量正常。
+
+---
+
+# §47 早期年份缩略图修复 + 一键切 BTC 看大盘整体走势
+
+用户：「为何 21 年 5 月之前不显示大盘缩略图？能不能一键切换成同缩放同周期的 BTC，在同一个界面看整体走势？」
+
+## 47.1 Bug：早期年份缩略图消失（已修）
+
+**现象**：翻到 2021-05 之前，右上角 BTC 缩略图不显示。
+**根因**：§46 的缩略图绘制挂在 `draw()` 末尾，而 `draw()` 在 `!anyLoaded`
+（ETH 视口无数据）时**提前 return**——ETH 历史分片是渐进加载的（首屏只等最近 1 年，
+其余后台串行），翻到未加载的早期年份时 ETH 主图空，缩略图被一起跳过。
+但 BTC 是内联全量、立即可用的，缩略图本不该依赖 ETH 是否加载。
+
+**修复**：
+- 实测 ETH 各周期数据网格**严格线性、零非等距**（15m/1h/4h/1d 各自首根锚点 + idx×step）；
+- 新增 `ETH_ANCHOR` / `ETH_STEP` / `ethTsOf(period, idx)` / `btcMiniWindow(vs, vc, period)`，
+  用网格公式从视口索引直接推时间窗，**完全不依赖 ETH 数据加载状态**；
+- 缩略图绘制抽成全局 `paintBtcMini(vs, vc)`，在 draw 的两个分支都调用：
+  正常流程末尾 + `!anyLoaded` 提前 return 之前 → ETH 数据没加载时缩略图照常显示。
+
+## 47.2 一键切 BTC（同周期同时间窗）
+
+用户选：侧栏加 BTC/ETH 切换按钮；切到 BTC 后隐藏小窗。
+
+- ETH 复盘页侧栏恢复 BTC 按钮（与 ETH 并列），默认 ETH active；
+- 点击 BTC/ETH 调 `switchSymbolWithWindow(target)`：
+  切换前用网格公式算出 ETH 视口时间窗两端 ts → `setView` 切标的 → 用 `btcIdxOf`
+  把 ts 映射到 BTC 同周期索引 → 设 `viewStart/viewCount` → **周期不变、时间窗不变**；
+- 切到 BTC：标题变「BTC · 时光机（大盘对照）」，右上角小窗自动隐藏（绘制条件 `curSym==='ETH'`）；
+  切回 ETH：小窗恢复，可继续标的复盘。
+
+## 47.3 验收
+
+| 断言 | 结果 |
+|---|---|
+| ethTsOf 各周期严格线性 | Δ 精确 = idx×step（15m/1h/4h/1d 全过） |
+| btcMiniWindow 早期窗口基于网格 | 2020-05 窗口 ts 精确命中，BTC 序列 60 根非空 |
+| btcIdxOf 时间戳→索引 | 精确命中 500、两根间取下界 501 |
+| 一键切换同时间窗 | 真浏览器点 BTC：标题「大盘对照」、小窗隐藏、时间轴范围不变 |
+
+回归 **595 → 605 PASS / 0 FAIL**（§47 +10）；冒烟 **63 PASS / 0 FAIL**；build check `[OK]`；
+真浏览器：`/tmp/early_fixed.png`（2020-05 缩略图正常）、`/tmp/switch_btc.png`（切 BTC 小窗隐藏）。

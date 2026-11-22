@@ -279,12 +279,14 @@ check('§44 ETH 复盘默认标的 ETH（符号按钮 active 是 ETH 不是 BTC�
     return bs.some(b => b.dataset.sym === 'ETH' && b.classList.contains('active')) &&
            !bs.some(b => b.dataset.sym === 'BTC' && b.classList.contains('active'));
   })(), E.w ? [...E.w.document.querySelectorAll('.symbols button')].map(b => b.dataset.sym + (b.classList.contains('active') ? '*' : '')).join(',') : 'null');
-check('§44 ETH 复盘隐藏 BTC 按钮（纯 ETH）',
+// §47：BTC 按钮保留（可一键切大盘对照），ETH 默认 active —— 不再是「纯 ETH 隐藏 BTC」
+check('§47 ETH 复盘显示 BTC + ETH 两个切换按钮',
   (() => {
     if (!E.w) return false;
     const btc = E.w.document.querySelector('.symbols button[data-sym="BTC"]');
-    return !btc || btc.style.display === 'none';
-  })(), E.w ? String((E.w.document.querySelector('.symbols button[data-sym="BTC"]') || {}).style && (E.w.document.querySelector('.symbols button[data-sym="BTC"]') || {}).style.display) : 'null');
+    const eth = E.w.document.querySelector('.symbols button[data-sym="ETH"]');
+    return !!btc && btc.style.display !== 'none' && !!eth && eth.style.display !== 'none';
+  })(), E.w ? [...E.w.document.querySelectorAll('.symbols button')].map(b => b.dataset.sym + ':' + (b.style.display || 'show')).join(',') : 'null');
 check('§44 ETH 复盘不跑实时（无 #watchStatus 状态位）',
   !!E.w && !E.w.document.getElementById('watchStatus'));
 check('§44 ETH 复盘读到了 ETHFUT_MANIFEST', !!E.w && !!E.w.ETHFUT_MANIFEST,

@@ -1340,7 +1340,7 @@ function syncPeriodButtons() {
   });
   document.getElementById('title').textContent = curSym + ' · 时光机' +
     (APP_INSTANCE === 'live' ? '（看盘）' : APP_INSTANCE === 'watch' ? '（自选）' :
-     APP_INSTANCE === 'eth' ? '（ETH 复盘）' : '（复盘）');
+     APP_INSTANCE === 'eth' ? (curSym === 'BTC' ? '（大盘对照）' : '（ETH 复盘）') : '（复盘）');
 }
 
 function setLoading(msg) { document.getElementById('loading').textContent = msg || ''; }
@@ -1388,7 +1388,12 @@ function draw() {
     if (hi > pmax) pmax = hi; if (lo < pmin) pmin = lo; if (v > vmax) vmax = v;
   }
   setLoading(DS.chunked && !anyLoaded ? '加载数据中…' : '');
-  if (!anyLoaded) return;
+  if (!anyLoaded) {
+    // §47：ETH 分片还没加载到当前视口（如翻到 2021-05 之前的早期年份）——
+    // 主图可以不画，但 BTC 缩略图必须照常显示（BTC 是内联全量、网格公式不依赖 ETH 数据）。
+    if (IS_ETH_PAGE && btcMiniOn && curSym === 'ETH') paintBtcMini(viewStart, viewCount);
+    return;
+  }
 
   if (logScale && pmin > 0) {
     const pad = Math.pow(10, (Math.log10(pmax) - Math.log10(pmin)) * 0.04);
@@ -1795,49 +1800,9 @@ function draw() {
     }
   }
 
-  // §46 BTC 大盘缩略图（仅 ETH 复盘页 + 开关开）：画在主图右上角，半透明底 + 边框 + 涨跌幅曲线。
-  if (IS_ETH_PAGE && btcMiniOn && anyLoaded && s < e) {
-    const tsStart = (getBar(s) || [])[0], tsEnd = (getBar(Math.min(e - 1, len - 1)) || [])[0];
-    if (tsStart != null && tsEnd != null) {
-      const ser = btcMiniSeries(tsStart, tsEnd, cur);
-      const r = btcMiniRect();
-      const padT = 20, padB = 8, padL = 8, padR = 8;
-      const gx0 = r.x + padL, gy0 = r.y + padT, gw = r.w - padL - padR, gh = r.h - padT - padB;
-      // 背景 + 边框
-      ctx.fillStyle = 'rgba(10,14,22,0.86)';
-      ctx.fillRect(r.x, r.y, r.w, r.h);
-      ctx.strokeStyle = 'rgba(90,100,120,0.6)'; ctx.lineWidth = 1;
-      ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
-      // 标题 + 末根涨跌幅
-      const lastPct = ser.length ? ser[ser.length - 1][1] : 0;
-      ctx.font = '11px "SFMono-Regular", Consolas, monospace';
-      ctx.textAlign = 'left'; ctx.fillStyle = '#9aa6bd';
-      ctx.fillText('BTC · 大盘', r.x + padL, r.y + 13);
-      ctx.textAlign = 'right';
-      ctx.fillStyle = lastPct >= 0 ? '#ef4d4d' : '#2fbf71';
-      ctx.fillText((lastPct >= 0 ? '+' : '') + lastPct.toFixed(2) + '%', r.x + r.w - padR, r.y + 13);
-      // 涨跌幅范围 → Y 映射（对称含 0）
-      if (ser.length >= 2 && gw > 0 && gh > 0) {
-        let mx = 0;
-        for (const p of ser) mx = Math.max(mx, Math.abs(p[1]));
-        if (mx < 0.5) mx = 0.5;
-        const yOf = pct => gy0 + gh / 2 - (pct / mx) * (gh / 2 - 2);
-        const xOf = j => gx0 + (j / (ser.length - 1)) * gw;
-        // 0% 基准虚线
-        ctx.strokeStyle = 'rgba(120,132,155,0.35)'; ctx.setLineDash([3, 3]);
-        ctx.beginPath(); ctx.moveTo(gx0, yOf(0)); ctx.lineTo(gx0 + gw, yOf(0)); ctx.stroke();
-        ctx.setLineDash([]);
-        // BTC 涨跌曲线（橙黄）
-        ctx.strokeStyle = '#ffb454'; ctx.lineWidth = 1.4; ctx.beginPath();
-        for (let j = 0; j < ser.length; j++) {
-          const px = xOf(j), py = yOf(ser[j][1]);
-          if (j === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-        }
-        ctx.stroke();
-      }
-      ctx.textAlign = 'left';
-    }
-  }
+  // §47：ETH 复盘页画 BTC 缩略图（用网格公式算时间窗，不依赖 anyLoaded）。
+  //       主图有 ETH 数据时在这画；ETH 数据没加载时由下方 !anyLoaded 分支单独画。
+  if (IS_ETH_PAGE && btcMiniOn && curSym === 'ETH') paintBtcMini(vs0, nVis);
   ctx.restore(); // §10 橡皮筋 translate 还原
 }
 
@@ -2732,7 +2697,12 @@ document.querySelectorAll('.symbols button').forEach(b => {
   b.addEventListener('click', () => {
     document.querySelectorAll('.symbols button').forEach(x => x.classList.remove('active'));
     b.classList.add('active');
-    setView(b.dataset.sym, null);
+    // §47：ETH 复盘页一键切 BTC/ETH —— 保持同周期、同时间窗（按时间戳映射，不是简单切标的）
+    if (IS_ETH_PAGE && (b.dataset.sym === 'BTC' || b.dataset.sym === 'ETH')) {
+      switchSymbolWithWindow(b.dataset.sym);
+    } else {
+      setView(b.dataset.sym, null);
+    }
   });
 });
 document.querySelectorAll('.periods button').forEach(b => {
@@ -3239,13 +3209,13 @@ if (Object.keys(tradesBySym).length) {
   const total = Object.values(tradesBySym).reduce((a, b) => a + b.length, 0);
   setTradeInfo(`已载入 ${total} 笔交割单（点击「清除交割单」可移除）`);
 }
-// §44 ETH 复盘入口：纯 ETH 页面 —— 显示 ETH 按钮、隐藏 BTC、默认标的固定 ETH，
-//     且忽略历史会话里的其它标的（本页只复盘 ETH）。其余入口维持原逻辑。
+// §44/§47 ETH 复盘入口：默认 ETH，但侧栏保留 BTC/ETH 两个按钮可一键切换
+//     （§47：切 BTC 保持同周期同时间窗，看大盘整体走势；切回 ETH 继续标的复盘）。
 const IS_ETH_PAGE = APP_INSTANCE === 'eth';
 if (IS_ETH_PAGE) {
   const btcBtn = document.querySelector('.symbols button[data-sym="BTC"]');
   const ethBtn = document.querySelector('.symbols button[data-sym="ETH"]');
-  if (btcBtn) btcBtn.style.display = 'none';
+  if (btcBtn) btcBtn.style.display = '';   // §47：显示 BTC 按钮供一键切换
   if (ethBtn) ethBtn.style.display = '';
 }
 // 若有上次会话则恢复到上次的标的+周期，否则默认 BTC 日线（ETH 复盘页固定 ETH）
@@ -4095,4 +4065,108 @@ function btcMiniSeries(ts0, ts1, period) {
   for (let i = i0; i < i1; i++) out.push([arr[i][0], (+arr[i][4] / base - 1) * 100]);
   if (!out.length) out.push([arr[i0][0], 0]);
   return out;
+}
+
+// =====================================================================
+// §47 ETH 早期年份缩略图修复 + 一键切 BTC（同周期同时间窗）
+// ① 修复：ETH 数据分片未加载到视口时，draw 因 !anyLoaded 提前 return，缩略图被跳过。
+//    改用 ETH 规整网格公式（各周期首根锚点 + idx*step）推算视口时间窗，不依赖数据加载。
+// ② 一键切：ETH 视口时间窗 → BTC 同周期索引映射 → 切主图到 BTC，周期/时间窗不变。
+// =====================================================================
+// ETH 各周期首根锚点（分钟时间戳，UTC）—— 由分片数据实测，严格等距网格。
+const ETH_ANCHOR = { '15m': 26247345, '1h': 26247300, '4h': 26247120, '1d': 26246880 };
+const ETH_STEP = { '15m': 15, '1h': 60, '4h': 240, '1d': 1440 };
+function ethTsOf(period, idx) {
+  const p = ETH_ANCHOR[period] !== undefined ? period : '1d';
+  return ETH_ANCHOR[p] + idx * ETH_STEP[p];
+}
+// BTC 时间戳 → 索引（BTC 数据是内联全量数组，二分下界）
+function btcIdxOf(period, ts) {
+  const s = SYMBOLS && SYMBOLS.BTC;
+  const arr = s && s.data && (s.data[period] || s.data['1d']);
+  if (!arr || !arr.length) return 0;
+  let lo = 0, hi = arr.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (arr[mid][0] < ts) lo = mid + 1; else hi = mid; }
+  return Math.min(lo, arr.length - 1);
+}
+// 视口（ETH 索引）→ BTC 同期时间窗，纯公式，不依赖 ETH 数据加载
+function btcMiniWindow(vs, vc, period) {
+  const p = ETH_STEP[period] !== undefined ? period : '1d';
+  const i0 = Math.floor(vs), i1 = Math.floor(vs + vc) - 1;
+  return { ts0: ethTsOf(p, i0), ts1: ethTsOf(p, Math.max(i0, i1)) };
+}
+// 测试钩子：暴露锚点表
+function getEthAnchors() { return Object.assign({}, ETH_ANCHOR); }
+
+// §47 画 BTC 缩略图（全局函数，draw 的两个分支都能调用）。
+// vs/vc = ETH 当前视口（索引）；用网格公式推时间窗 → 不依赖 ETH 分片是否已加载。
+function paintBtcMini(vs, vc) {
+  try {
+    const win = btcMiniWindow(vs, vc, cur);
+    const ser = btcMiniSeries(win.ts0, win.ts1, cur);
+    const r = btcMiniRect();
+    const padT = 20, padB = 8, padL = 8, padR = 8;
+    const gx0 = r.x + padL, gy0 = r.y + padT, gw = r.w - padL - padR, gh = r.h - padT - padB;
+    ctx.fillStyle = 'rgba(10,14,22,0.86)';
+    ctx.fillRect(r.x, r.y, r.w, r.h);
+    ctx.strokeStyle = 'rgba(90,100,120,0.6)'; ctx.lineWidth = 1;
+    ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
+    const lastPct = ser.length ? ser[ser.length - 1][1] : 0;
+    ctx.font = '11px "SFMono-Regular", Consolas, monospace';
+    ctx.textAlign = 'left'; ctx.fillStyle = '#9aa6bd';
+    ctx.fillText('BTC · 大盘', r.x + padL, r.y + 13);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = lastPct >= 0 ? '#ef4d4d' : '#2fbf71';
+    ctx.fillText((lastPct >= 0 ? '+' : '') + lastPct.toFixed(2) + '%', r.x + r.w - padR, r.y + 13);
+    if (ser.length >= 2 && gw > 0 && gh > 0) {
+      let mx = 0;
+      for (const p of ser) mx = Math.max(mx, Math.abs(p[1]));
+      if (mx < 0.5) mx = 0.5;
+      const yOf = pct => gy0 + gh / 2 - (pct / mx) * (gh / 2 - 2);
+      const xOf = j => gx0 + (j / (ser.length - 1)) * gw;
+      ctx.strokeStyle = 'rgba(120,132,155,0.35)'; ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(gx0, yOf(0)); ctx.lineTo(gx0 + gw, yOf(0)); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.strokeStyle = '#ffb454'; ctx.lineWidth = 1.4; ctx.beginPath();
+      for (let j = 0; j < ser.length; j++) {
+        const px = xOf(j), py = yOf(ser[j][1]);
+        if (j === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+    }
+    ctx.textAlign = 'left';
+  } catch (e) { /* 缩略图失败绝不影响主图 */ }
+}
+
+// §47 ETH 复盘页一键切 BTC/ETH：保持同周期 + 同时间窗。
+// 用当前视口两端时间戳 → 目标标的同周期数据的索引 → 设 viewStart/viewCount。
+async function switchSymbolWithWindow(target) {
+  if (target === curSym) return;
+  const period = cur;
+  // 记录切换前的时间窗两端（用ETH网格公式，或当前DS的bar）
+  let ts0 = null, ts1 = null;
+  if (curSym === 'ETH') {
+    const w = btcMiniWindow(viewStart, viewCount, period);
+    ts0 = w.ts0; ts1 = w.ts1;
+  } else {
+    const b0 = getBar(Math.floor(viewStart)), b1 = getBar(Math.floor(viewStart + viewCount) - 1);
+    if (b0 && b1) { ts0 = b0[0]; ts1 = b1[0]; }
+  }
+  await setView(target, period);
+  if (ts0 == null || ts1 == null) return;
+  // 目标标的：把时间戳映射到它的索引
+  let i0, i1;
+  if (target === 'ETH') {
+    const step = ETH_STEP[period] || 1440;
+    i0 = Math.floor((ts0 - (ETH_ANCHOR[period] || ETH_ANCHOR['1d'])) / step);
+    i1 = Math.floor((ts1 - (ETH_ANCHOR[period] || ETH_ANCHOR['1d'])) / step) + 1;
+  } else {
+    i0 = btcIdxOf(period, ts0);
+    i1 = btcIdxOf(period, ts1) + 1;
+  }
+  const vc = Math.max(20, Math.min(dataLen() - i0, i1 - i0));
+  viewCount = vc;
+  viewStart = Math.max(vsLo(), Math.min(dataLen() - viewCount, i0));
+  try { DS.ensure(Math.max(0, Math.floor(viewStart) - 200), Math.floor(viewStart) + viewCount); } catch (e) {}
+  redrawSoon(); scheduleViewSave();
 }

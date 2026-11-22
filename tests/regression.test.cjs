@@ -134,6 +134,11 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     btcMiniRect: () => btcMiniRect(), btcMiniHit: (mx, my) => btcMiniHit(mx, my),
     btcMiniSeries: (ts0, ts1, period) => btcMiniSeries(ts0, ts1, period),
     getIsEthPage: () => IS_ETH_PAGE,
+    // §47：ETH 网格时间戳 + 一键切 BTC（同周期同时间窗）
+    ethTsOf: (period, idx) => ethTsOf(period, idx),
+    btcIdxOf: (period, ts) => btcIdxOf(period, ts),
+    btcMiniWindow: (vs, vc, period) => btcMiniWindow(vs, vc, period),
+    getCurSym: () => curSym, setCurSymDirect: s => { curSym = s; },
     setTool: t => { toolMode = t; },
     setContinuousDraw: b => { continuousDraw = b; },
     setTradeMode: b => { tradeMode = b; },
@@ -1866,10 +1871,11 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     // ---- 30.8 页面标题与实例挂钩（肉眼能分辨当前在哪个入口）----
     // §32 起多一态：watch（自选）—— 断言随实现一起更新
     // §44：标题分支新增 eth（ETH 复盘），断言同步放宽为「四入口各自标注」
-    check('§30/§44 页内标题区分复盘/看盘/自选/ETH复盘',
+    check('§30/§44/§47 页内标题区分复盘/看盘/自选/ETH复盘/大盘对照',
       APP_SRC.includes("APP_INSTANCE === 'live' ? '（看盘）'") &&
       APP_SRC.includes("APP_INSTANCE === 'watch' ? '（自选）'") &&
-      APP_SRC.includes("APP_INSTANCE === 'eth' ? '（ETH 复盘）'") &&
+      APP_SRC.includes("'（ETH 复盘）'") &&
+      APP_SRC.includes("'（大盘对照）'") &&
       APP_SRC.includes("'（复盘）'"));
 
     // ---- 30.9 工具链已全部指向 share/data.js（防止改回去又内联）----
@@ -2975,6 +2981,47 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     API.setBtcMiniEnabled(false);
     check('§46 开关可关闭', API.btcMiniEnabled() === false);
     API.setBtcMiniEnabled(true);
+  }
+
+  // ============ 47. ETH 早期年份缩略图修复 + 一键切 BTC ============
+  // 用户报「21 年 5 月之前没有大盘缩略图」→ 根因：缩略图绑在 draw 的 anyLoaded 上，
+  //   ETH 分片没加载到那段时主图空、draw 提前 return → 缩略图被跳过。
+  //   修复：时间窗改用 ETH 规整网格公式推算（不依赖数据加载）。
+  // 用户要「一键切同周期同时间窗的 BTC 看整体走势」→ ethTsOf / btcIdxOf 时间戳↔索引映射。
+  {
+    // 47.1 ETH 网格公式：各周期首根锚点 + i*step，早期年份（2020-05）也对
+    const anchors = API.getEthAnchors ? API.getEthAnchors() : null;
+    // 用 1d 验：索引 0 = 2019-11-27T00:00Z，step=1440min；之前实测首 ts=26246880
+    const t0 = API.ethTsOf('1d', 0);
+    check('§47 ethTsOf 1d 索引0 = 2019-11-27 00:00Z', t0 === 26246880, 'ts=' + t0);
+    const t100 = API.ethTsOf('1d', 100);
+    check('§47 ethTsOf 1d 索引100 = 索引0 + 100*1440', t100 === t0 + 100 * 1440, 'ts=' + t100);
+    for (const [p, step] of [['15m', 15], ['1h', 60], ['4h', 240]]) {
+      const a = API.ethTsOf(p, 0), b = API.ethTsOf(p, 37);
+      check('§47 ethTsOf ' + p + ' 严格线性（步长 ' + step + '）', b - a === 37 * step,
+        'Δ=' + (b - a) + ' 期望=' + 37 * step);
+    }
+    // 早期年份窗口：2020-05 对应索引（从 2019-11-27 起约 156 天 → 1d 索引 ~156）
+    const may2020 = Math.floor((Date.UTC(2020, 4, 1) / 60000 - t0) / 1440);
+    const w = API.btcMiniWindow(may2020, 60, '1d');
+    check('§47 btcMiniWindow 早期窗口基于网格（不依赖ETH数据加载）',
+      w && w.ts0 === API.ethTsOf('1d', may2020) && w.ts1 === API.ethTsOf('1d', may2020 + 59),
+      JSON.stringify(w));
+    const serEarly = API.btcMiniSeries(w.ts0, w.ts1, '1d');
+    check('§47 早期窗口 BTC 序列非空（缩略图有数据可画）', serEarly.length >= 2,
+      '根数=' + serEarly.length + ' 窗口=' + new Date(w.ts0 * 60000).toISOString().slice(0, 10));
+
+    // 47.2 一键切 BTC：时间戳 → BTC 同周期索引映射正确
+    const bc1d = DATA['1d'];
+    const bIdx = API.btcIdxOf('1d', bc1d[500][0]);
+    check('§47 btcIdxOf 命中精确时间戳', bIdx === 500, 'idx=' + bIdx + ' 期望=500');
+    const bIdxBetween = API.btcIdxOf('1d', bc1d[500][0] + 720);
+    check('§47 btcIdxOf 落在两根之间取下界', bIdxBetween === 501, 'idx=' + bIdxBetween);
+    // 切到 BTC 前的 ETH 视口时间窗，切后应映射到 BTC 同期（验证映射往返）
+    const ethTs = API.ethTsOf('1d', 200);
+    const mapped = API.btcIdxOf('1d', ethTs);
+    check('§47 ETH 视口时间 → BTC 索引在合法范围', mapped >= 0 && mapped < bc1d.length,
+      'ethIdx=200 ts=' + new Date(ethTs * 60000).toISOString().slice(0, 10) + ' → btcIdx=' + mapped);
   }
 
   // ============ 汇总 ============
