@@ -1794,6 +1794,50 @@ function draw() {
       ctx.textAlign = 'left';
     }
   }
+
+  // §46 BTC 大盘缩略图（仅 ETH 复盘页 + 开关开）：画在主图右上角，半透明底 + 边框 + 涨跌幅曲线。
+  if (IS_ETH_PAGE && btcMiniOn && anyLoaded && s < e) {
+    const tsStart = (getBar(s) || [])[0], tsEnd = (getBar(Math.min(e - 1, len - 1)) || [])[0];
+    if (tsStart != null && tsEnd != null) {
+      const ser = btcMiniSeries(tsStart, tsEnd, cur);
+      const r = btcMiniRect();
+      const padT = 20, padB = 8, padL = 8, padR = 8;
+      const gx0 = r.x + padL, gy0 = r.y + padT, gw = r.w - padL - padR, gh = r.h - padT - padB;
+      // 背景 + 边框
+      ctx.fillStyle = 'rgba(10,14,22,0.86)';
+      ctx.fillRect(r.x, r.y, r.w, r.h);
+      ctx.strokeStyle = 'rgba(90,100,120,0.6)'; ctx.lineWidth = 1;
+      ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
+      // 标题 + 末根涨跌幅
+      const lastPct = ser.length ? ser[ser.length - 1][1] : 0;
+      ctx.font = '11px "SFMono-Regular", Consolas, monospace';
+      ctx.textAlign = 'left'; ctx.fillStyle = '#9aa6bd';
+      ctx.fillText('BTC · 大盘', r.x + padL, r.y + 13);
+      ctx.textAlign = 'right';
+      ctx.fillStyle = lastPct >= 0 ? '#ef4d4d' : '#2fbf71';
+      ctx.fillText((lastPct >= 0 ? '+' : '') + lastPct.toFixed(2) + '%', r.x + r.w - padR, r.y + 13);
+      // 涨跌幅范围 → Y 映射（对称含 0）
+      if (ser.length >= 2 && gw > 0 && gh > 0) {
+        let mx = 0;
+        for (const p of ser) mx = Math.max(mx, Math.abs(p[1]));
+        if (mx < 0.5) mx = 0.5;
+        const yOf = pct => gy0 + gh / 2 - (pct / mx) * (gh / 2 - 2);
+        const xOf = j => gx0 + (j / (ser.length - 1)) * gw;
+        // 0% 基准虚线
+        ctx.strokeStyle = 'rgba(120,132,155,0.35)'; ctx.setLineDash([3, 3]);
+        ctx.beginPath(); ctx.moveTo(gx0, yOf(0)); ctx.lineTo(gx0 + gw, yOf(0)); ctx.stroke();
+        ctx.setLineDash([]);
+        // BTC 涨跌曲线（橙黄）
+        ctx.strokeStyle = '#ffb454'; ctx.lineWidth = 1.4; ctx.beginPath();
+        for (let j = 0; j < ser.length; j++) {
+          const px = xOf(j), py = yOf(ser[j][1]);
+          if (j === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        }
+        ctx.stroke();
+      }
+      ctx.textAlign = 'left';
+    }
+  }
   ctx.restore(); // §10 橡皮筋 translate 还原
 }
 
@@ -2260,6 +2304,9 @@ canvas.addEventListener('mousedown', e => {
   const rect = canvas.getBoundingClientRect();
   const mx = e.clientX - rect.left, my = e.clientY - rect.top;
 
+  // §46：BTC 缩略图画中画是只读的 —— 落在窗内的点击不触发任何画线/平移
+  if (IS_ETH_PAGE && btcMiniOn && btcMiniHit(mx, my)) return;
+
   // 时间轴区域点击：视图居中到点击处的K线
   if (my >= canvas.clientHeight - PAD_B && dataLen() > 0) {
     const plotW = canvas.clientWidth - PAD_L - PAD_R;
@@ -2387,6 +2434,11 @@ canvas.addEventListener('mousedown', e => {
 canvas.addEventListener('mousemove', e => {
   const rect = canvas.getBoundingClientRect();
   hover.x = e.clientX - rect.left; hover.y = e.clientY - rect.top;
+
+  // §46：光标进入 BTC 缩略图 → 不显示十字光标/画线预览（只读小窗）
+  if (IS_ETH_PAGE && btcMiniOn && btcMiniHit(hover.x, hover.y)) {
+    canvas.style.cursor = 'default'; redrawSoon(); return;
+  }
 
   if (toolMode === 'hline' || toolMode === 'supply' || toolMode === 'demand' || toolMode === 'trend' || toolMode === 'channel' || toolMode === 'hchannel') { redrawSoon(); return; }
 
@@ -2655,6 +2707,9 @@ function rubberBounce() {
 
 canvas.addEventListener('wheel', e => {
   e.preventDefault();
+  // §46：BTC 缩略图上滚轮不缩放主图（只读小窗）
+  const rect = canvas.getBoundingClientRect();
+  if (IS_ETH_PAGE && btcMiniOn && btcMiniHit(e.clientX - rect.left, e.clientY - rect.top)) return;
   // 触控板：高频小 delta（像素）；鼠标：一格≈120。归一化后累积。
   wheelAccum += e.deltaY / DELTA_NORM;
   panAccum += e.deltaX;                       // 横向像素直接累积（与拖拽同量纲）
@@ -3996,4 +4051,48 @@ if (APP_INSTANCE === 'eth' && ethShouldRun()) {
       setLoading('ETH 历史加载失败：' + (e && e.message ? e.message : '未知错误'));
     }
   })();
+}
+
+// =====================================================================
+// §46 BTC 大盘缩略图（画中画）—— ETH 复盘页专属
+// 用户：ETH 复盘时要同时看 BTC 当大盘基准。选「侧边小缩略图 + 起点对齐涨跌幅」。
+// 口径：ETH 视口起止时间戳 → BTC 同期数据二分定位 → BTC 首根=0% → 相对涨跌曲线。
+// 只在 ETH 复盘实例绘制；鼠标落在小窗内直接 return，绝不干扰画线/平移/缩放。
+// =====================================================================
+let btcMiniOn = true;
+const BTC_MINI_PAD = 14;          // 距主图右上角留白
+function btcMiniRect() {
+  const W = canvas.clientWidth || 1200;
+  const H = canvas.clientHeight || 700;
+  const w = Math.min(280, Math.max(140, Math.round(W * 0.26)));
+  const h = Math.min(120, Math.max(70, Math.round(H * 0.2)));
+  return { x: PAD_L + plotWOf(W) - w - BTC_MINI_PAD, y: PAD_T + BTC_MINI_PAD, w, h };
+}
+function plotWOf(W) { return W - PAD_L - PAD_R; }
+function btcMiniHit(mx, my) {
+  const r = btcMiniRect();
+  return mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h;
+}
+// 二分找第一个 ts >= 目标的索引
+function btcMiniLowerBound(arr, ts) {
+  let lo = 0, hi = arr.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (arr[mid][0] < ts) lo = mid + 1; else hi = mid; }
+  return lo;
+}
+// 按时间戳取 BTC 同期序列，返回 [[ts, pct], …]，首根 = 0%。
+function btcMiniSeries(ts0, ts1, period) {
+  const s = SYMBOLS && SYMBOLS.BTC;
+  if (!s || !s.data) return [];
+  const arr = s.data[period || cur] || s.data['1d'] || [];
+  if (!arr.length) return [];
+  let i0 = btcMiniLowerBound(arr, ts0);
+  if (i0 >= arr.length) i0 = arr.length - 1;
+  let i1 = btcMiniLowerBound(arr, ts1 + 1);
+  if (i1 <= i0) i1 = Math.min(arr.length, i0 + 2);
+  const out = [];
+  const base = +arr[i0][4];
+  if (!base) return [];
+  for (let i = i0; i < i1; i++) out.push([arr[i][0], (+arr[i][4] / base - 1) * 100]);
+  if (!out.length) out.push([arr[i0][0], 0]);
+  return out;
 }

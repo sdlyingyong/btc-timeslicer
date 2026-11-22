@@ -129,6 +129,11 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     getVolMaColors: () => VOL_MA.map(mc => ({ p: mc.p, color: mc.color })),
     setVolMaEnabled: v => { volMaOn = !!v; },
     getVolMaCacheInfo: () => { const o = {}; for (const mc of VOL_MA) o[mc.p] = volMaFullLen[mc.p] || 0; return o; },
+    // §46：BTC 大盘缩略图（画中画）
+    btcMiniEnabled: () => btcMiniOn, setBtcMiniEnabled: v => { btcMiniOn = !!v; },
+    btcMiniRect: () => btcMiniRect(), btcMiniHit: (mx, my) => btcMiniHit(mx, my),
+    btcMiniSeries: (ts0, ts1, period) => btcMiniSeries(ts0, ts1, period),
+    getIsEthPage: () => IS_ETH_PAGE,
     setTool: t => { toolMode = t; },
     setContinuousDraw: b => { continuousDraw = b; },
     setTradeMode: b => { tradeMode = b; },
@@ -2930,6 +2935,46 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
       require('fs').writeFileSync('/tmp/shot_vol_okx.png', canvasMock.toBuffer('image/png'));
       console.log('§43 wrote /tmp/shot_vol_okx.png（15m 含爆量，真实比例 + 默认无均量线）');
     }
+  }
+
+  // ============ 46. BTC 大盘缩略图（ETH 复盘页的画中画）============
+  // 用户：ETH 复盘时要同时看 BTC 当大盘基准。选了「侧边小缩略图 + 起点对齐涨跌幅」。
+  // 口径：ETH 视口起止时间戳 → 在 BTC 同期数据里二分定位 → BTC 首根=0% → 画相对涨跌曲线。
+  {
+    // 46.1 核心计算：按时间戳对齐 + 起点 0% 涨跌幅
+    const bc = DATA['1d'];                          // BTC 日线（SYMBOLS.BTC.data）
+    const i0 = Math.max(0, bc.length - 100), i1 = bc.length - 1;
+    const ts0 = bc[i0][0], ts1 = bc[i1][0];
+    const ser = API.btcMiniSeries(ts0, ts1, '1d');
+    check('§46 btcMiniSeries 返回非空序列', ser && ser.length >= 2, '长度=' + (ser ? ser.length : 0));
+    check('§46 起点对齐涨跌幅：第一根 = 0%', ser && Math.abs(ser[0][1]) < 1e-9,
+      '首根 pct=' + (ser ? ser[0][1].toFixed(4) : 'null'));
+    if (ser && ser.length >= 2) {
+      const base = +bc[i0][4], last = +bc[i1][4];
+      const expect = (last / base - 1) * 100;
+      check('§46 末根涨跌幅 = (末/首-1)*100', Math.abs(ser[ser.length - 1][1] - expect) < 0.5,
+        '实际=' + ser[ser.length - 1][1].toFixed(2) + '% 期望≈' + expect.toFixed(2) + '%');
+      check('§46 时间戳单调不回退', ser.every((p, i) => i === 0 || p[0] >= ser[i - 1][0]));
+    }
+    // 时间对齐：给一段历史窗口（不是最近），应返回那段而不是末端
+    const h0 = Math.floor(bc.length * 0.4), h1 = h0 + 60;
+    const hist = API.btcMiniSeries(bc[h0][0], bc[h1][0], '1d');
+    check('§46 历史窗口按时间戳定位（不是取末端）',
+      hist && hist.length >= 2 && Math.abs(hist[0][0] - bc[h0][0]) < 1440,
+      '首ts=' + (hist ? hist[0][0] : 'null') + ' 期望=' + bc[h0][0]);
+
+    // 46.2 画中画矩形与命中检测（落在窗内 → 事件要 return，不画线）
+    const rect = API.btcMiniRect();
+    check('§46 缩略图矩形有合法尺寸', rect && rect.w > 100 && rect.h > 40, JSON.stringify(rect));
+    check('§46 命中检测：窗内为 true', rect && API.btcMiniHit(rect.x + rect.w / 2, rect.y + rect.h / 2) === true);
+    check('§46 命中检测：窗外为 false', rect && API.btcMiniHit(rect.x - 20, rect.y - 20) === false);
+
+    // 46.3 开关默认开；只 ETH 页显示（本回归是 review 实例，isEthPage 应为 false）
+    check('§46 BTC 缩略图默认开启', API.btcMiniEnabled() === true);
+    check('§46 review 实例不显示（只 ETH 复盘页显示）', API.getIsEthPage() === false);
+    API.setBtcMiniEnabled(false);
+    check('§46 开关可关闭', API.btcMiniEnabled() === false);
+    API.setBtcMiniEnabled(true);
   }
 
   // ============ 汇总 ============
