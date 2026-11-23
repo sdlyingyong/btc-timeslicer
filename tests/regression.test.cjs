@@ -139,6 +139,13 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     btcIdxOf: (period, ts) => btcIdxOf(period, ts),
     btcMiniWindow: (vs, vc, period) => btcMiniWindow(vs, vc, period),
     getCurSym: () => curSym, setCurSymDirect: s => { curSym = s; },
+    // §48：可拖动 + 完整K线小窗
+    getBtcMiniPos: () => Object.assign({}, btcMiniPos),
+    setBtcMiniPos: p => { btcMiniPos = { x: p.x, y: p.y }; },
+    btcMiniClamp: (x, y) => btcMiniClamp(x, y),
+    btcMiniTitleHit: (mx, my) => btcMiniTitleHit(mx, my),
+    getBtcMiniKey: () => BTC_MINI_KEY,
+    btcMiniBars: (ts0, ts1, period) => btcMiniBars(ts0, ts1, period),
     setTool: t => { toolMode = t; },
     setContinuousDraw: b => { continuousDraw = b; },
     setTradeMode: b => { tradeMode = b; },
@@ -3022,6 +3029,44 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     const mapped = API.btcIdxOf('1d', ethTs);
     check('§47 ETH 视口时间 → BTC 索引在合法范围', mapped >= 0 && mapped < bc1d.length,
       'ethIdx=200 ts=' + new Date(ethTs * 60000).toISOString().slice(0, 10) + ' → btcIdx=' + mapped);
+  }
+
+  // ============ 48. BTC 小窗：完整K线（EMA+成交量）+ 可拖动 + 位置持久化 ============
+  // 用户：「小窗也显示 BTC，就是一样的，有 EMA 有成交量的图」+「能不能推动小窗」。
+  {
+    // 48.1 K线数据切片：BTC 同期 OHLCV，不是涨跌幅数组
+    const bc = DATA['1d'];
+    const i0 = bc.length - 60, i1 = bc.length - 1;
+    const bars = API.btcMiniBars(bc[i0][0], bc[i1][0], '1d');
+    check('§48 btcMiniBars 返回 OHLCV 原始K线（6 字段）',
+      bars.length >= 2 && bars[0].length === 6, '根数=' + bars.length + ' 字段=' + (bars[0] ? bars[0].length : 0));
+    check('§48 K线数据与 BTC 源逐字节一致',
+      bars.length === i1 - i0 + 1 && bars[0][4] === bc[i0][4] && bars[bars.length - 1][4] === bc[i1][4],
+      '首close=' + bars[0][4] + ' 末close=' + bars[bars.length - 1][4]);
+    // EMA 可算（小窗数据足够长时给出有限值）
+    const ser2 = API.btcMiniBars(bc[Math.max(0, bc.length - 300)][0], bc[i1][0], '1d');
+    check('§48 小窗数据够长可算 EMA20/120', ser2.length >= 120, '根数=' + ser2.length);
+
+    // 48.2 边界钳制：拖到画布外要被夹在主图内
+    const r0 = API.btcMiniRect();
+    const c1 = API.btcMiniClamp(-9999, -9999);
+    check('§48 钳制左上不越界', c1.x >= 0 && c1.y >= 0, JSON.stringify(c1));
+    const c2 = API.btcMiniClamp(99999, 99999);
+    check('§48 钳制右下留边距', c2.x + r0.w <= 1200 && c2.y + r0.h <= 700, JSON.stringify(c2));
+    const c3 = API.btcMiniClamp(500, 300);
+    check('§48 窗内拖动位置原样保留', c3.x === 500 && c3.y === 300, JSON.stringify(c3));
+
+    // 48.3 标题栏命中（只有顶部 20px 可拖，窗内其余只读）
+    check('§48 标题栏命中为 true', API.btcMiniTitleHit(r0.x + r0.w / 2, r0.y + 10) === true);
+    check('§48 窗体内（非标题栏）不触发拖动', API.btcMiniTitleHit(r0.x + r0.w / 2, r0.y + 60) === false);
+    check('§48 窗外为 false', API.btcMiniTitleHit(r0.x - 20, r0.y - 20) === false);
+
+    // 48.4 位置状态 + 持久化键（eth 实例前缀）
+    API.setBtcMiniPos({ x: 123, y: 456 });
+    const pos = API.getBtcMiniPos();
+    check('§48 小窗位置可设置/读取', pos.x === 123 && pos.y === 456, JSON.stringify(pos));
+    check('§48 持久化键带实例前缀', /^eth__|^kline_/.test(API.getBtcMiniKey()), API.getBtcMiniKey());
+    API.setBtcMiniPos({ x: -1, y: -1 });   // 还原，避免影响后续
   }
 
   // ============ 汇总 ============

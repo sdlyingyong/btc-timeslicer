@@ -3353,3 +3353,39 @@ P99.5 只压平约 0.5%（一屏 1130 列里 5~6 根）。
 
 回归 **595 → 605 PASS / 0 FAIL**（§47 +10）；冒烟 **63 PASS / 0 FAIL**；build check `[OK]`；
 真浏览器：`/tmp/early_fixed.png`（2020-05 缩略图正常）、`/tmp/switch_btc.png`（切 BTC 小窗隐藏）。
+
+---
+
+# §48 BTC 小窗升级：完整 K 线图（EMA+成交量）+ 可拖动 + 位置持久化
+
+用户：「能不能推动小窗」「小窗也显示 BTC，就是一样的，有 EMA 有成交量的图」。
+确认：边界限制在主图内、位置记住。
+
+## 48.1 从"涨跌幅曲线"升级为完整 K 线图
+
+- 窗口从 280×120 放大到 **440×260**（按画布比例缩放，min 240×180）；
+- 小窗内部绘制与主图同构的 BTC 图：**K 线蜡烛 + EMA20/120 + 成交量柱**，标题栏显示
+  `BTC · 大盘（拖动标题栏移动）` + 视口涨跌幅，右下角标最新价；
+- 数据 `btcMiniBars(ts0,ts1,period)` 取 BTC 同期原始 OHLCV（不是涨跌幅数组），
+  EMA 用 `btcMiniEMA()` **独立计算**，不碰主图 `emaFull` 缓存（MA20/EMA20 键冲突的老坑）。
+
+## 48.2 拖动 + 持久化
+
+- **只有标题栏（顶部 20px）可拖动**（`btcMiniTitleHit`），窗体其余只读——避免误触画线；
+- `btcMiniDrag` 拖拽状态挂在 window mousemove/mouseup（优先于画线拖动处理）；
+- `btcMiniClamp(x,y)` 把窗口钳制在主图绘图区内，永远拖不丢；
+- 位置存 `BTC_MINI_KEY = STORAGE_NS + 'kline_btc_mini_pos_v1'`（eth 实例自动带 `eth__` 前缀），
+  mouseup 时 `btcMiniSavePos()` 持久化，刷新后保留。
+
+## 48.3 验收
+
+| 断言 | 结果 |
+|---|---|
+| btcMiniBars 返回 OHLCV 6 字段、与源逐字节一致 | 60 根、首末 close 相等 |
+| 边界钳制左上/右下/窗内 | (8,12)/(698,354)/(500,300) 全过 |
+| 标题栏命中、窗体不触发拖动、窗外 false | 全过 |
+| 位置读写 + 持久化键带实例前缀 | 全过 |
+
+回归 **605 → 616 PASS / 0 FAIL**（§48 +11）；冒烟 **63 PASS / 0 FAIL**；build check `[OK]`；
+真浏览器：`/tmp/mini_before_drag.png`（完整 K 线小窗）、`/tmp/mini_after_drag.png`（拖到中间位置）；
+拖动后 localStorage `eth__kline_btc_mini_pos_v1 = {"x":407,"y":176}`。

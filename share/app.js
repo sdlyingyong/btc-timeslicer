@@ -2255,6 +2255,7 @@ function hitTest(mx, my) {
 let drag = false, lastX = 0, dragStart = null;
 let lastPick = null;   // §29 上一次命中的对象与位置（同一位置再点一次 → 轮换到下一个候选）
 let dragVol = false;   // 正在拖动成交量分隔条
+let btcMiniDrag = null; // §48：BTC 小窗拖动起点（{dx,dy} 光标在窗内的相对位置）
 
 // 画完一条线后退出画线模式，回到光标（保存结果，不再连续画）
 function exitToolMode() {
@@ -2269,8 +2270,15 @@ canvas.addEventListener('mousedown', e => {
   const rect = canvas.getBoundingClientRect();
   const mx = e.clientX - rect.left, my = e.clientY - rect.top;
 
-  // §46：BTC 缩略图画中画是只读的 —— 落在窗内的点击不触发任何画线/平移
-  if (IS_ETH_PAGE && btcMiniOn && btcMiniHit(mx, my)) return;
+  // §48：BTC 小窗 —— 标题栏按下开始拖动；窗内其余区域只读，不触发画线/平移
+  if (IS_ETH_PAGE && btcMiniOn && curSym === 'ETH' && btcMiniHit(mx, my)) {
+    if (btcMiniTitleHit(mx, my)) {
+      const r = btcMiniRect();
+      btcMiniDrag = { dx: mx - r.x, dy: my - r.y };
+      canvas.style.cursor = 'move';
+    }
+    return;
+  }
 
   // 时间轴区域点击：视图居中到点击处的K线
   if (my >= canvas.clientHeight - PAD_B && dataLen() > 0) {
@@ -2402,7 +2410,9 @@ canvas.addEventListener('mousemove', e => {
 
   // §46：光标进入 BTC 缩略图 → 不显示十字光标/画线预览（只读小窗）
   if (IS_ETH_PAGE && btcMiniOn && btcMiniHit(hover.x, hover.y)) {
-    canvas.style.cursor = 'default'; redrawSoon(); return;
+    // §48：标题栏显示可拖动手型，窗体其余只读
+    canvas.style.cursor = btcMiniTitleHit(hover.x, hover.y) ? 'move' : 'default';
+    redrawSoon(); return;
   }
 
   if (toolMode === 'hline' || toolMode === 'supply' || toolMode === 'demand' || toolMode === 'trend' || toolMode === 'channel' || toolMode === 'hchannel') { redrawSoon(); return; }
@@ -2461,6 +2471,14 @@ canvas.addEventListener('mousemove', e => {
 });
 
 window.addEventListener('mousemove', e => {
+  // §48：BTC 小窗拖动（优先处理，不与画线拖动冲突）
+  if (btcMiniDrag) {
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    btcMiniPos = btcMiniClamp(mx - btcMiniDrag.dx, my - btcMiniDrag.dy);
+    redrawSoon();
+    return;
+  }
   if (!dragStart) return;
   if (dragStart.line.type === 'hline' || dragStart.line.type === 'supply' || dragStart.line.type === 'demand') {
     // §26 单点水平线：直接用光标高度定价格（价格恒定 → 拖出画布再回来不会跳动）
@@ -2519,6 +2537,8 @@ window.addEventListener('mousemove', e => {
   redrawSoon();
 });
 window.addEventListener('mouseup', () => {
+  // §48：结束 BTC 小窗拖动并持久化位置
+  if (btcMiniDrag) { btcMiniDrag = null; btcMiniSavePos(); canvas.style.cursor = 'crosshair'; redrawSoon(); }
   if (tradeMode && rrDraft && !getTradePlan()) {
     if (rrDraft.phase === 'tp' && rrDraft.tp != null) {
       rrDraft.phase = 'sl'; draw(); return;          // TP 已定，进入拖 SL
@@ -4030,19 +4050,55 @@ if (APP_INSTANCE === 'eth' && ethShouldRun()) {
 // 只在 ETH 复盘实例绘制；鼠标落在小窗内直接 return，绝不干扰画线/平移/缩放。
 // =====================================================================
 let btcMiniOn = true;
+// §48：小窗升级为完整 BTC K线图（K线+EMA+成交量），窗口放大；位置可拖动并持久化。
+const BTC_MINI_KEY = STORAGE_NS + 'kline_btc_mini_pos_v1';
 const BTC_MINI_PAD = 14;          // 距主图右上角留白
-function btcMiniRect() {
+const BTC_MINI_TITLE_H = 20;      // 标题栏高度：只有这块可拖动，窗内其余只读
+let btcMiniPos = null;            // {x,y} 左上角；null = 默认右上角
+function btcMiniSize() {
   const W = canvas.clientWidth || 1200;
   const H = canvas.clientHeight || 700;
-  const w = Math.min(280, Math.max(140, Math.round(W * 0.26)));
-  const h = Math.min(120, Math.max(70, Math.round(H * 0.2)));
-  return { x: PAD_L + plotWOf(W) - w - BTC_MINI_PAD, y: PAD_T + BTC_MINI_PAD, w, h };
+  return {
+    w: Math.min(440, Math.max(240, Math.round(W * 0.38))),
+    h: Math.min(300, Math.max(180, Math.round(H * 0.42)))
+  };
+}
+// 边界钳制：窗口始终完整留在主图绘图区内（含 PAD_L/PAD_T，右侧留 PAD_R）
+function btcMiniClamp(x, y) {
+  const W = canvas.clientWidth || 1200, H = canvas.clientHeight || 700;
+  const { w, h } = btcMiniSize();
+  const minX = PAD_L, maxX = Math.max(minX, W - PAD_R - w);
+  const minY = PAD_T, maxY = Math.max(minY, H - PAD_B - h);
+  return { x: Math.max(minX, Math.min(maxX, x)), y: Math.max(minY, Math.min(maxY, y)) };
+}
+function btcMiniRect() {
+  const W = canvas.clientWidth || 1200;
+  const { w, h } = btcMiniSize();
+  const def = btcMiniClamp(PAD_L + plotWOf(W) - w - BTC_MINI_PAD, PAD_T + BTC_MINI_PAD);
+  const p = btcMiniPos ? btcMiniClamp(btcMiniPos.x, btcMiniPos.y) : def;
+  return { x: p.x, y: p.y, w, h };
 }
 function plotWOf(W) { return W - PAD_L - PAD_R; }
 function btcMiniHit(mx, my) {
   const r = btcMiniRect();
   return mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h;
 }
+// §48：只有标题栏可拖动（窗内其余区域只读，避免误触画线）
+function btcMiniTitleHit(mx, my) {
+  const r = btcMiniRect();
+  return mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + BTC_MINI_TITLE_H;
+}
+// 位置持久化（eth 实例前缀，与其它入口隔离）
+function btcMiniLoadPos() {
+  try {
+    const raw = localStorage.getItem(BTC_MINI_KEY);
+    if (raw) { const p = JSON.parse(raw); if (isFinite(p.x) && isFinite(p.y)) btcMiniPos = { x: +p.x, y: +p.y }; }
+  } catch (e) {}
+}
+function btcMiniSavePos() {
+  try { localStorage.setItem(BTC_MINI_KEY, JSON.stringify(btcMiniPos)); } catch (e) {}
+}
+btcMiniLoadPos();
 // 二分找第一个 ts >= 目标的索引
 function btcMiniLowerBound(arr, ts) {
   let lo = 0, hi = arr.length;
@@ -4064,6 +4120,29 @@ function btcMiniSeries(ts0, ts1, period) {
   if (!base) return [];
   for (let i = i0; i < i1; i++) out.push([arr[i][0], (+arr[i][4] / base - 1) * 100]);
   if (!out.length) out.push([arr[i0][0], 0]);
+  return out;
+}
+// §48：BTC 同期原始 OHLCV K线（给完整小窗用），返回 [[ts,o,h,l,c,v], …]
+function btcMiniBars(ts0, ts1, period) {
+  const s = SYMBOLS && SYMBOLS.BTC;
+  const arr = s && s.data && (s.data[period || cur] || s.data['1d']);
+  if (!arr || !arr.length) return [];
+  let i0 = btcMiniLowerBound(arr, ts0);
+  if (i0 >= arr.length) i0 = arr.length - 1;
+  let i1 = btcMiniLowerBound(arr, ts1 + 1);
+  if (i1 <= i0) i1 = Math.min(arr.length, i0 + 2);
+  return arr.slice(i0, i1);
+}
+// §48：小窗专用 EMA（独立计算，不碰主图 emaFull 缓存）。不足周期返回 NaN。
+function btcMiniEMA(bars, period) {
+  const out = new Array(bars.length).fill(NaN);
+  if (bars.length < period) return out;
+  let prev = 0;
+  for (let i = 0; i < bars.length; i++) {
+    const c = +bars[i][4];
+    prev = i === 0 ? c : c * (2 / (period + 1)) + prev * (1 - 2 / (period + 1));
+    out[i] = i >= period - 1 ? prev : NaN;
+  }
   return out;
 }
 
@@ -4103,37 +4182,76 @@ function getEthAnchors() { return Object.assign({}, ETH_ANCHOR); }
 function paintBtcMini(vs, vc) {
   try {
     const win = btcMiniWindow(vs, vc, cur);
-    const ser = btcMiniSeries(win.ts0, win.ts1, cur);
+    const bars = btcMiniBars(win.ts0, win.ts1, cur);
     const r = btcMiniRect();
-    const padT = 20, padB = 8, padL = 8, padR = 8;
-    const gx0 = r.x + padL, gy0 = r.y + padT, gw = r.w - padL - padR, gh = r.h - padT - padB;
-    ctx.fillStyle = 'rgba(10,14,22,0.86)';
+    const padL = 6, padR = 44, gap = 4, volH = Math.round((r.h - BTC_MINI_TITLE_H - 8) * 0.22);
+    const gx0 = r.x + padL, gw = r.w - padL - padR;
+    const priceTop = r.y + BTC_MINI_TITLE_H, priceBot = r.y + r.h - 8 - volH - gap;
+    const volTop = priceBot + gap, volBot = r.y + r.h - 8;
+
+    // 背景 + 边框 + 标题栏（标题栏底色略亮，提示可拖动）
+    ctx.fillStyle = 'rgba(10,14,22,0.92)';
     ctx.fillRect(r.x, r.y, r.w, r.h);
+    ctx.fillStyle = 'rgba(30,38,54,0.9)';
+    ctx.fillRect(r.x, r.y, r.w, BTC_MINI_TITLE_H);
     ctx.strokeStyle = 'rgba(90,100,120,0.6)'; ctx.lineWidth = 1;
     ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
-    const lastPct = ser.length ? ser[ser.length - 1][1] : 0;
     ctx.font = '11px "SFMono-Regular", Consolas, monospace';
-    ctx.textAlign = 'left'; ctx.fillStyle = '#9aa6bd';
-    ctx.fillText('BTC · 大盘', r.x + padL, r.y + 13);
+    ctx.textAlign = 'left'; ctx.fillStyle = '#cdd3e0';
+    ctx.fillText('BTC · 大盘（拖动标题栏移动）', r.x + padL, r.y + 13);
     ctx.textAlign = 'right';
-    ctx.fillStyle = lastPct >= 0 ? '#ef4d4d' : '#2fbf71';
-    ctx.fillText((lastPct >= 0 ? '+' : '') + lastPct.toFixed(2) + '%', r.x + r.w - padR, r.y + 13);
-    if (ser.length >= 2 && gw > 0 && gh > 0) {
-      let mx = 0;
-      for (const p of ser) mx = Math.max(mx, Math.abs(p[1]));
-      if (mx < 0.5) mx = 0.5;
-      const yOf = pct => gy0 + gh / 2 - (pct / mx) * (gh / 2 - 2);
-      const xOf = j => gx0 + (j / (ser.length - 1)) * gw;
-      ctx.strokeStyle = 'rgba(120,132,155,0.35)'; ctx.setLineDash([3, 3]);
-      ctx.beginPath(); ctx.moveTo(gx0, yOf(0)); ctx.lineTo(gx0 + gw, yOf(0)); ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.strokeStyle = '#ffb454'; ctx.lineWidth = 1.4; ctx.beginPath();
-      for (let j = 0; j < ser.length; j++) {
-        const px = xOf(j), py = yOf(ser[j][1]);
-        if (j === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-      }
-      ctx.stroke();
+    if (bars.length) {
+      const first = +bars[0][4], last = +bars[bars.length - 1][4];
+      const pct = first ? (last / first - 1) * 100 : 0;
+      ctx.fillStyle = pct >= 0 ? '#ef4d4d' : '#2fbf71';
+      ctx.fillText((pct >= 0 ? '+' : '') + pct.toFixed(2) + '%', r.x + r.w - 6, r.y + 13);
     }
+
+    if (bars.length < 1 || gw <= 0 || priceBot <= priceTop) { ctx.textAlign = 'left'; return; }
+    // 价格区间（含 EMA）
+    let pmin = Infinity, pmax = -Infinity, vmax = 0;
+    for (const b of bars) {
+      if (+b[2] > pmax) pmax = +b[2];
+      if (+b[3] < pmin) pmin = +b[3];
+      if (+b[5] > vmax) vmax = +b[5];
+    }
+    const pad = (pmax - pmin) * 0.06 || 1; pmax += pad; pmin -= pad;
+    const xw = gw / bars.length;
+    const cw = Math.max(1, Math.min(6, xw * 0.62));
+    const yP = p => priceBot - (p - pmin) / (pmax - pmin) * (priceBot - priceTop);
+    const xOf = i => gx0 + (i + 0.5) * xw;
+
+    // K 线蜡烛 + 成交量柱
+    for (let i = 0; i < bars.length; i++) {
+      const b = bars[i], o = +b[1], c = +b[4], h = +b[2], l = +b[3], v = +b[5];
+      const up = c >= o;
+      const x = xOf(i);
+      ctx.strokeStyle = ctx.fillStyle = up ? '#ef4d4d' : '#2fbf71';
+      ctx.beginPath(); ctx.moveTo(x, yP(h)); ctx.lineTo(x, yP(l)); ctx.stroke();
+      const yo = yP(o), yc = yP(c);
+      ctx.fillRect(x - cw / 2, Math.min(yo, yc), cw, Math.max(1, Math.abs(yc - yo)));
+      if (vmax > 0) {
+        const vh = v / vmax * (volBot - volTop);
+        ctx.fillStyle = up ? 'rgba(239,77,77,0.5)' : 'rgba(47,191,113,0.5)';
+        ctx.fillRect(x - cw / 2, volBot - vh, cw, vh);
+      }
+    }
+    // EMA20 / EMA120（小窗独立计算）
+    for (const [per, color] of [[20, '#ffb454'], [120, '#4ade80']]) {
+      const ema = btcMiniEMA(bars, per);
+      ctx.strokeStyle = color; ctx.lineWidth = 1.1; ctx.beginPath();
+      let started = false;
+      for (let i = 0; i < ema.length; i++) {
+        if (Number.isNaN(ema[i])) continue;
+        const x = xOf(i), y = yP(ema[i]);
+        if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+      }
+      if (started) ctx.stroke();
+    }
+    // 最新价标签
+    const last = +bars[bars.length - 1][4];
+    ctx.fillStyle = '#8a9ab0'; ctx.textAlign = 'left';
+    ctx.fillText(last.toFixed(2), r.x + r.w - padR + 2, yP(last) + 3);
     ctx.textAlign = 'left';
   } catch (e) { /* 缩略图失败绝不影响主图 */ }
 }
