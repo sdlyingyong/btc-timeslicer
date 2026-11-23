@@ -2255,7 +2255,8 @@ function hitTest(mx, my) {
 let drag = false, lastX = 0, dragStart = null;
 let lastPick = null;   // §29 上一次命中的对象与位置（同一位置再点一次 → 轮换到下一个候选）
 let dragVol = false;   // 正在拖动成交量分隔条
-let btcMiniDrag = null; // §48：BTC 小窗拖动起点（{dx,dy} 光标在窗内的相对位置）
+let btcMiniDrag = null;      // §48：BTC 小窗拖动起点（{dx,dy} 光标在窗内的相对位置）
+let btcMiniResizing = false; // §49：正在拖右下角缩放窗口
 
 // 画完一条线后退出画线模式，回到光标（保存结果，不再连续画）
 function exitToolMode() {
@@ -2270,9 +2271,12 @@ canvas.addEventListener('mousedown', e => {
   const rect = canvas.getBoundingClientRect();
   const mx = e.clientX - rect.left, my = e.clientY - rect.top;
 
-  // §48：BTC 小窗 —— 标题栏按下开始拖动；窗内其余区域只读，不触发画线/平移
+  // §48/§49：BTC 小窗 —— 右下角缩放、标题栏拖动、窗内其余只读
   if (IS_ETH_PAGE && btcMiniOn && curSym === 'ETH' && btcMiniHit(mx, my)) {
-    if (btcMiniTitleHit(mx, my)) {
+    if (btcMiniResizeHit(mx, my)) {
+      btcMiniResizing = true;              // §49：拖右下角改尺寸
+      canvas.style.cursor = 'nwse-resize';
+    } else if (btcMiniTitleHit(mx, my)) {
       const r = btcMiniRect();
       btcMiniDrag = { dx: mx - r.x, dy: my - r.y };
       canvas.style.cursor = 'move';
@@ -2410,8 +2414,9 @@ canvas.addEventListener('mousemove', e => {
 
   // §46：光标进入 BTC 缩略图 → 不显示十字光标/画线预览（只读小窗）
   if (IS_ETH_PAGE && btcMiniOn && btcMiniHit(hover.x, hover.y)) {
-    // §48：标题栏显示可拖动手型，窗体其余只读
-    canvas.style.cursor = btcMiniTitleHit(hover.x, hover.y) ? 'move' : 'default';
+    // §48/§49：手柄显示缩放光标、标题栏显示移动光标，窗体其余只读
+    canvas.style.cursor = btcMiniResizeHit(hover.x, hover.y) ? 'nwse-resize' :
+                          btcMiniTitleHit(hover.x, hover.y) ? 'move' : 'default';
     redrawSoon(); return;
   }
 
@@ -2471,6 +2476,13 @@ canvas.addEventListener('mousemove', e => {
 });
 
 window.addEventListener('mousemove', e => {
+  // §49：BTC 小窗拖右下角缩放（优先；左上角不动）
+  if (btcMiniResizing) {
+    const rect = canvas.getBoundingClientRect();
+    btcMiniResize(e.clientX - rect.left, e.clientY - rect.top);
+    redrawSoon();
+    return;
+  }
   // §48：BTC 小窗拖动（优先处理，不与画线拖动冲突）
   if (btcMiniDrag) {
     const rect = canvas.getBoundingClientRect();
@@ -2537,7 +2549,8 @@ window.addEventListener('mousemove', e => {
   redrawSoon();
 });
 window.addEventListener('mouseup', () => {
-  // §48：结束 BTC 小窗拖动并持久化位置
+  // §48/§49：结束 BTC 小窗拖动/缩放并持久化位置+尺寸
+  if (btcMiniResizing) { btcMiniResizing = false; btcMiniSavePos(); canvas.style.cursor = 'crosshair'; redrawSoon(); }
   if (btcMiniDrag) { btcMiniDrag = null; btcMiniSavePos(); canvas.style.cursor = 'crosshair'; redrawSoon(); }
   if (tradeMode && rrDraft && !getTradePlan()) {
     if (rrDraft.phase === 'tp' && rrDraft.tp != null) {
@@ -4054,14 +4067,36 @@ let btcMiniOn = true;
 const BTC_MINI_KEY = STORAGE_NS + 'kline_btc_mini_pos_v1';
 const BTC_MINI_PAD = 14;          // 距主图右上角留白
 const BTC_MINI_TITLE_H = 20;      // 标题栏高度：只有这块可拖动，窗内其余只读
-let btcMiniPos = null;            // {x,y} 左上角；null = 默认右上角
-function btcMiniSize() {
+// §49：{x,y,w,h} —— 位置 + 自定义尺寸；null = 默认右上角 + 默认尺寸
+let btcMiniPos = null;
+const BTC_MINI_MIN_W = 240, BTC_MINI_MIN_H = 180;
+const BTC_MINI_HANDLE = 14;       // 右下角缩放手柄命中半径
+function btcMiniDefaultSize() {
   const W = canvas.clientWidth || 1200;
   const H = canvas.clientHeight || 700;
   return {
-    w: Math.min(440, Math.max(240, Math.round(W * 0.38))),
-    h: Math.min(300, Math.max(180, Math.round(H * 0.42)))
+    w: Math.min(440, Math.max(BTC_MINI_MIN_W, Math.round(W * 0.38))),
+    h: Math.min(300, Math.max(BTC_MINI_MIN_H, Math.round(H * 0.42)))
   };
+}
+function btcMiniSize() {
+  if (btcMiniPos && isFinite(btcMiniPos.w) && isFinite(btcMiniPos.h)) {
+    const W = canvas.clientWidth || 1200, H = canvas.clientHeight || 700;
+    return {
+      w: Math.max(BTC_MINI_MIN_W, Math.min(W - PAD_L - PAD_R, btcMiniPos.w)),
+      h: Math.max(BTC_MINI_MIN_H, Math.min(H - PAD_T - PAD_B, btcMiniPos.h))
+    };
+  }
+  return btcMiniDefaultSize();
+}
+// §49：拖右下角缩放 —— 左上角不动，改 w/h；边界钳制
+function btcMiniResize(mx, my) {
+  const W = canvas.clientWidth || 1200, H = canvas.clientHeight || 700;
+  const r = btcMiniRect();
+  const w = Math.max(BTC_MINI_MIN_W, Math.min(W - PAD_L - PAD_R - r.x, mx - r.x));
+  const h = Math.max(BTC_MINI_MIN_H, Math.min(H - PAD_T - PAD_B - r.y, my - r.y));
+  btcMiniPos = { x: r.x, y: r.y, w, h };
+  return { x: r.x, y: r.y, w, h };
 }
 // 边界钳制：窗口始终完整留在主图绘图区内（含 PAD_L/PAD_T，右侧留 PAD_R）
 function btcMiniClamp(x, y) {
@@ -4088,11 +4123,23 @@ function btcMiniTitleHit(mx, my) {
   const r = btcMiniRect();
   return mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + BTC_MINI_TITLE_H;
 }
-// 位置持久化（eth 实例前缀，与其它入口隔离）
+// §49：右下角缩放手柄命中（优先于标题栏/窗体判断）
+function btcMiniResizeHit(mx, my) {
+  const r = btcMiniRect();
+  return mx >= r.x + r.w - BTC_MINI_HANDLE && mx <= r.x + r.w &&
+         my >= r.y + r.h - BTC_MINI_HANDLE && my <= r.y + r.h;
+}
+// 位置 + 尺寸持久化（eth 实例前缀，与其它入口隔离）
 function btcMiniLoadPos() {
   try {
     const raw = localStorage.getItem(BTC_MINI_KEY);
-    if (raw) { const p = JSON.parse(raw); if (isFinite(p.x) && isFinite(p.y)) btcMiniPos = { x: +p.x, y: +p.y }; }
+    if (raw) {
+      const p = JSON.parse(raw);
+      if (isFinite(p.x) && isFinite(p.y)) {
+        btcMiniPos = { x: +p.x, y: +p.y };
+        if (isFinite(p.w) && isFinite(p.h)) { btcMiniPos.w = +p.w; btcMiniPos.h = +p.h; }  // §49
+      }
+    }
   } catch (e) {}
 }
 function btcMiniSavePos() {
@@ -4196,9 +4243,14 @@ function paintBtcMini(vs, vc) {
     ctx.fillRect(r.x, r.y, r.w, BTC_MINI_TITLE_H);
     ctx.strokeStyle = 'rgba(90,100,120,0.6)'; ctx.lineWidth = 1;
     ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
+    // §49：右下角缩放手柄（小三角折线，提示可拖）
+    ctx.strokeStyle = 'rgba(140,155,180,0.8)'; ctx.beginPath();
+    ctx.moveTo(r.x + r.w - 11, r.y + r.h - 3); ctx.lineTo(r.x + r.w - 3, r.y + r.h - 11);
+    ctx.moveTo(r.x + r.w - 7, r.y + r.h - 3); ctx.lineTo(r.x + r.w - 3, r.y + r.h - 7);
+    ctx.stroke();
     ctx.font = '11px "SFMono-Regular", Consolas, monospace';
     ctx.textAlign = 'left'; ctx.fillStyle = '#cdd3e0';
-    ctx.fillText('BTC · 大盘（拖动标题栏移动）', r.x + padL, r.y + 13);
+    ctx.fillText('BTC · 大盘（拖标题栏移动 · 右下角缩放）', r.x + padL, r.y + 13);
     ctx.textAlign = 'right';
     if (bars.length) {
       const first = +bars[0][4], last = +bars[bars.length - 1][4];

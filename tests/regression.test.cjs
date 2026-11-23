@@ -144,6 +144,10 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     setBtcMiniPos: p => { btcMiniPos = { x: p.x, y: p.y }; },
     btcMiniClamp: (x, y) => btcMiniClamp(x, y),
     btcMiniTitleHit: (mx, my) => btcMiniTitleHit(mx, my),
+    // §49：拖右下角缩放窗口
+    btcMiniResizeHit: (mx, my) => btcMiniResizeHit(mx, my),
+    btcMiniResize: (x, y) => btcMiniResize(x, y),
+    btcMiniSetSize: (w, h) => { const p = btcMiniPos || {}; btcMiniPos = { x: p.x == null ? 400 : p.x, y: p.y == null ? 60 : p.y, w, h }; },
     getBtcMiniKey: () => BTC_MINI_KEY,
     btcMiniBars: (ts0, ts1, period) => btcMiniBars(ts0, ts1, period),
     setTool: t => { toolMode = t; },
@@ -3067,6 +3071,41 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     check('§48 小窗位置可设置/读取', pos.x === 123 && pos.y === 456, JSON.stringify(pos));
     check('§48 持久化键带实例前缀', /^eth__|^kline_/.test(API.getBtcMiniKey()), API.getBtcMiniKey());
     API.setBtcMiniPos({ x: -1, y: -1 });   // 还原，避免影响后续
+  }
+
+  // ============ 49. BTC 小窗拖边角缩放（位置+尺寸都记住）============
+  {
+    const r0 = API.btcMiniRect();
+    // 49.1 右下角手柄命中：角上 true，标题栏/窗体其它 false
+    check('§49 右下角手柄命中为 true',
+      API.btcMiniResizeHit(r0.x + r0.w - 4, r0.y + r0.h - 4) === true);
+    check('§49 标题栏不触发缩放', API.btcMiniResizeHit(r0.x + 20, r0.y + 8) === false);
+    check('§49 窗外不触发缩放', API.btcMiniResizeHit(r0.x - 5, r0.y - 5) === false);
+
+    // 49.2 缩放：放大后 w/h 增大，且左上角不动（从左边缘/顶边拉伸）
+    const before = API.btcMiniRect();
+    const out = API.btcMiniResize(before.x + before.w + 120, before.y + before.h + 80);
+    const after = API.btcMiniRect();
+    check('§49 拖角放大窗口', after.w > before.w && after.h > before.h,
+      '前=' + before.w + 'x' + before.h + ' 后=' + after.w + 'x' + after.h);
+    check('§49 缩放时左上角保持不动', after.x === before.x && after.y === before.y,
+      '前=(' + before.x + ',' + before.y + ') 后=(' + after.x + ',' + after.y + ')');
+
+    // 49.3 边界钳制：缩到最小 / 放到最大都不越界
+    const tiny = API.btcMiniResize(0, 0);
+    const rTiny = API.btcMiniRect();
+    check('§49 最小尺寸不低于 240x180', rTiny.w >= 240 && rTiny.h >= 180, rTiny.w + 'x' + rTiny.h);
+    const huge = API.btcMiniResize(99999, 99999);
+    const rHuge = API.btcMiniRect();
+    check('§49 放大不超出主图右/下边界', rHuge.x + rHuge.w <= 1200 && rHuge.y + rHuge.h <= 700,
+      JSON.stringify(rHuge));
+
+    // 49.4 尺寸存储进 btcMiniPos（w/h 字段），随位置一起持久化
+    API.btcMiniSetSize(333, 222);
+    const pos = API.getBtcMiniPos();
+    check('§49 位置对象含 w/h 尺寸', pos.w === 333 && pos.h === 222, JSON.stringify(pos));
+    // 还原默认
+    API.btcMiniSetSize(0, 0);
   }
 
   // ============ 汇总 ============

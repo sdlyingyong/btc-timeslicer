@@ -3389,3 +3389,34 @@ P99.5 只压平约 0.5%（一屏 1130 列里 5~6 根）。
 回归 **605 → 616 PASS / 0 FAIL**（§48 +11）；冒烟 **63 PASS / 0 FAIL**；build check `[OK]`；
 真浏览器：`/tmp/mini_before_drag.png`（完整 K 线小窗）、`/tmp/mini_after_drag.png`（拖到中间位置）；
 拖动后 localStorage `eth__kline_btc_mini_pos_v1 = {"x":407,"y":176}`。
+
+---
+
+# §49 BTC 小窗拖右下角缩放（位置+尺寸都记住）
+
+用户：「能不能增加小表格的缩放呢，可以拖动加缩放」。确认：**拖右下角改窗口大小**（不是滚轮缩放时间窗）。
+
+## 49.1 改动（`share/app.js`）
+
+- `btcMiniPos` 从 `{x,y}` 扩展为 `{x,y,w,h}`；`btcMiniSize()` 优先读自定义 w/h，
+  未设置时用默认（按画布比例，min 240×180）。
+- 新增 `btcMiniResize(mx,my)`：**左上角不动**，只改 w/h；边界钳制
+  （min 240×180，max 到主图右/下边缘），窗口始终完整留在主图内。
+- `btcMiniResizeHit()`：右下角 14×14 手柄命中；mousedown 手柄 → `btcMiniResizing=true` →
+  window mousemove 调 `btcMiniResize` → mouseup 持久化 `btcMiniSavePos()`。
+- 事件优先级：右下角手柄 > 标题栏拖动 > 窗体只读，三者互不冲突。
+- 标题栏文字更新为「拖标题栏移动 · 右下角缩放」；右下角画小三角手柄提示。
+- 持久化键不变（`BTC_MINI_KEY`），从 `{x,y}` 平滑兼容到 `{x,y,w,h}`（旧数据缺 w/h 时退回默认尺寸）。
+
+## 49.2 验收
+
+| 断言 | 结果 |
+|---|---|
+| 右下角手柄命中 true、标题栏/窗外 false | 全过 |
+| 拖角放大、左上角不动 | 440×294 → 560×374，(8,12) 不变 |
+| 最小 240×180、最大不越界 | (240,180)/(1122,624) 全过 |
+| 位置对象含 w/h | {x:8,y:12,w:333,h:222} |
+
+回归 **616 → 624 PASS / 0 FAIL**（§49 +8）；冒烟 **63 PASS / 0 FAIL**；build check `[OK]`；
+真浏览器：拖角后 localStorage `eth__kline_btc_mini_pos_v1 = {"x":607,"y":26,"w":425,"h":267}`，
+小窗变高、K线/EMA/成交量正确重绘。
