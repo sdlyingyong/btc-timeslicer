@@ -148,6 +148,11 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     btcMiniResizeHit: (mx, my) => btcMiniResizeHit(mx, my),
     btcMiniResize: (x, y) => btcMiniResize(x, y),
     btcMiniSetSize: (w, h) => { const p = btcMiniPos || {}; btcMiniPos = { x: p.x == null ? 400 : p.x, y: p.y == null ? 60 : p.y, w, h }; },
+    // §50：会话恢复
+    getRestore: () => RESTORE, loadSessionAgain: () => loadSession(),
+    forceEthSession: v => { ethSessionForce = !!v; },
+    getViewStart: () => viewStart, getViewCount: () => viewCount,
+    setSessionRaw: raw => localStorage.setItem(SESSION_KEY, raw),
     getBtcMiniKey: () => BTC_MINI_KEY,
     btcMiniBars: (ts0, ts1, period) => btcMiniBars(ts0, ts1, period),
     setTool: t => { toolMode = t; },
@@ -3106,6 +3111,27 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     check('§49 位置对象含 w/h 尺寸', pos.w === 333 && pos.h === 222, JSON.stringify(pos));
     // 还原默认
     API.btcMiniSetSize(0, 0);
+  }
+
+  // ============ 50. ETH 复盘记住上次浏览位置（刷新恢复）============
+  // 用户：「eth 复盘有问题，不能记住上次看到的时间」。
+  // 根因：① loadSession 要求 SYMBOLS[s.sym]，而 ETH 是异步分片，启动时还没注册 → RESTORE 被拒；
+  //       ② ETH 引导第二次 setView('ETH', period) 带 period 走「对齐最新」分支，覆盖恢复位置。
+  {
+    // 50.1 会话 sym='ETH' + viewStart 应能建立 RESTORE，即使 SYMBOLS 里此时还没有 ETH
+    //（回归沙箱是 review 实例，用钩子强制按 ETH 页语义跑；生产环境 eth 实例天然生效）
+    API.forceEthSession(true);
+    const symsBefore = Object.keys(API.getSymbols());
+    check('§50 前置：SYMBOLS 此时无 ETH（模拟异步未加载）', !symsBefore.includes('ETH'), symsBefore.join(','));
+    const raw = JSON.stringify({ sym: 'ETH', period: '1d', viewStart: 156, viewCount: 60,
+      linesStore: {}, viewStore: { 'ETH|1d': { viewStart: 156, viewCount: 60 } } });
+    API.setSessionRaw(raw);
+    API.loadSessionAgain();
+    const rest = API.getRestore();
+    check('§50 ETH 会话在无 SYMBOLS.ETH 时仍建立 RESTORE', !!rest, rest ? JSON.stringify(rest) : 'null');
+    check('§50 RESTORE 保留 sym/period/位置', rest && rest.sym === 'ETH' && rest.period === '1d' &&
+      rest.viewStart === 156 && rest.viewCount === 60, rest ? JSON.stringify(rest) : 'null');
+    API.forceEthSession(false);
   }
 
   // ============ 汇总 ============

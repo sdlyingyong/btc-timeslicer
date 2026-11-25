@@ -3420,3 +3420,37 @@ P99.5 只压平约 0.5%（一屏 1130 列里 5~6 根）。
 回归 **616 → 624 PASS / 0 FAIL**（§49 +8）；冒烟 **63 PASS / 0 FAIL**；build check `[OK]`；
 真浏览器：拖角后 localStorage `eth__kline_btc_mini_pos_v1 = {"x":607,"y":26,"w":425,"h":267}`，
 小窗变高、K线/EMA/成交量正确重绘。
+
+---
+
+# §50 ETH 复盘记住上次浏览位置（刷新恢复）
+
+用户：「eth 复盘有问题，不能记住上次看到的时间呢」。
+
+## 50.1 根因（真浏览器复现确认）
+
+写入 2020-05 的历史位置 → 刷新 → 时间轴仍显示 2026 最新，确认位置从未恢复。两处原因：
+
+1. **`loadSession()` 的 RESTORE 门槛**：`if (s.sym && SYMBOLS[s.sym] && …)`。ETH 数据走 §33 异步分片，
+   启动时 `SYMBOLS['ETH']` 尚未注册 → 恢复条件不成立 → `RESTORE` 被置空，上次的 sym/period/位置全丢。
+2. **ETH 引导第二次 `setView('ETH', START_PERIOD)` 带 period 参数**：`setView` 里传 period 会走
+   「切换周期 → 右侧边缘对齐最新」分支，即便第一次 setView 恢复了位置，第二次也会把它冲回最新。
+
+## 50.2 修复（`share/app.js`）
+
+- `loadSession()`：ETH 实例下 `sym==='ETH'` 无条件接受（数据加载后由 setView 消费）：
+  `const symReady = SYMBOLS[s.sym] || ((APP_INSTANCE === 'eth' || ethSessionForce) && s.sym === 'ETH');`
+  `ethSessionForce` 是测试钩子，生产恒 false。
+- ETH 引导第二次调用改为 **`setView('ETH', null)`**：不传 period → 走 `savedView` 分支读取
+  `viewStore['ETH|period']` 的记忆位置，不再对齐最新。
+- 第一次 setView 仍用 `START_PERIOD`（来自 RESTORE），保证周期也恢复。
+
+## 50.3 验收
+
+| 断言 | 结果 |
+|---|---|
+| ETH 会话在无 SYMBOLS.ETH 时仍建立 RESTORE | 前置确认 SYMBOLS 只有 BTC，RESTORE 成功 |
+| RESTORE 保留 sym/period/位置 | `{sym:'ETH',period:'1d',viewStart:156,viewCount:60}` |
+
+回归 **624 → 627 PASS / 0 FAIL**（§50 +3）；冒烟 **63 PASS / 0 FAIL**；build check `[OK]`；
+真浏览器：写入 2020-05（索引 156）→ 刷新 → 时间轴显示 `05-01 → 06-28`（2020 年），恢复成功。

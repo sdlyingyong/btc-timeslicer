@@ -266,6 +266,7 @@ const SESSION_KEY = STORAGE_NS + 'kline_session_v1';
 let linesStore = {};          // 标的 -> 画线数组（X 以时间戳存储，跨周期共享显示）
 let viewStore = {};           // "SYM|period" -> {viewStart, viewCount}  浏览位置（按周期独立记忆）
 let RESTORE = null;           // 首次启动待恢复的 {sym,period,viewStart,viewCount}
+let ethSessionForce = false;  // §50：测试钩子——强制按 ETH 复盘实例语义恢复会话（生产恒 false）
 let sessSaveTimer = null;
 function sessionKey() { return curSym + '|' + cur; }   // 浏览位置：按 标的|周期 独立记忆
 function lineKey() { return curSym; }                    // 画线：按 标的 共享（时间戳锚定，跨周期显示）
@@ -277,7 +278,10 @@ function loadSession() {
     if (s && typeof s === 'object') {
       if (s.linesStore && typeof s.linesStore === 'object') linesStore = s.linesStore;
       if (s.viewStore && typeof s.viewStore === 'object') viewStore = s.viewStore;
-      if (s.sym && SYMBOLS[s.sym] && s.period &&
+      // §50：ETH 是异步分片，启动时 SYMBOLS['ETH'] 尚未注册。若因这个就丢掉 RESTORE，
+      // 用户上次看到的时间就永远回不去。ETH 实例下 sym==='ETH' 无条件接受（数据加载后 setView 会消费）。
+      const symReady = SYMBOLS[s.sym] || ((APP_INSTANCE === 'eth' || ethSessionForce) && s.sym === 'ETH');
+      if (s.sym && symReady && s.period &&
           typeof s.viewStart === 'number' && typeof s.viewCount === 'number') {
         RESTORE = { sym: s.sym, period: s.period, viewStart: s.viewStart, viewCount: s.viewCount };
       }
@@ -4049,7 +4053,9 @@ if (APP_INSTANCE === 'eth' && ethShouldRun()) {
       setView('ETH', START_PERIOD);
       setLoading('');
       await ethLoadAll();                                   // 其余年份后台渐进补齐
-      if (SYMBOLS.ETH) { try { setView('ETH', START_PERIOD); } catch (e) {} }
+      // §50：全量加载后重建 DS，但**不能带 period** —— 带 period 会走「切换周期→对齐最新」分支，
+      // 把刚才恢复的上次浏览位置冲掉。不传 period 则走 savedView 分支读取 ETH|period 的记忆位置。
+      if (SYMBOLS.ETH) { try { setView('ETH', null); } catch (e) {} }
     } catch (e) {
       setLoading('ETH 历史加载失败：' + (e && e.message ? e.message : '未知错误'));
     }
