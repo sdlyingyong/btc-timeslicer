@@ -3454,3 +3454,51 @@ P99.5 只压平约 0.5%（一屏 1130 列里 5~6 根）。
 
 回归 **624 → 627 PASS / 0 FAIL**（§50 +3）；冒烟 **63 PASS / 0 FAIL**；build check `[OK]`；
 真浏览器：写入 2020-05（索引 156）→ 刷新 → 时间轴显示 `05-01 → 06-28`（2020 年），恢复成功。
+
+---
+
+# §50b ETH 早期年份位置仍丢失（二次修复）
+
+用户反馈「还是不能记住」。§50 的首轮修复只解决了"RESTORE 因 SYMBOLS.ETH 未注册被拒"，
+但真浏览器复现发现**第二个更隐蔽的失败点**。
+
+## 50b.1 根因（真浏览器探针确认）
+
+写入 2022-03 位置（viewStart=566, viewCount=260）→ 刷新 → 仍回 2026 最新。探针记录到：
+
+- `loadSession` 正确建立 RESTORE（566/260）
+- 首屏 `setView('ETH', START_PERIOD)` 时 **len=329**（ETH 只加载了最近一年），
+  `need = 566+260 = 826 > 329` → 旧逻辑把 viewStart clamp 到 `329-260=69`，随后 `RESTORE=null` 消费掉
+- 全量加载后的第二次 setView 已无 RESTORE 可用 → 停在错误位置
+
+**关键**：`ethMaterialize()` 后 `SYMBOLS.ETH.data[period]` 是**普通数组**（内联 DS），
+不是 chunked；所以任何基于 `DS.chunked` 的判断都不成立。ETH 页首屏 len 天然只有一年。
+
+## 50b.2 修复（`setView` RESTORE 分支）
+
+增加「数据不足则保留 RESTORE」保护：
+
+```js
+const need = RESTORE.viewStart + RESTORE.viewCount;
+if (len > 0 && len < need) {
+  // 先渲染当前可用范围，但不消费 RESTORE
+  viewCount = Math.max(20, Math.min(len, viewCount || 260));
+  viewStart = Math.max(vsLo(), Math.min(len - viewCount, viewStart));
+  syncPeriodButtons(); DS.ensure(...); draw();
+  return;                       // ← RESTORE 保留
+}
+// 数据充足，才按 RESTORE 精确恢复并置空
+```
+
+全量分片加载完成后，ETH 引导的第二次 `setView('ETH', null)`（§50）重新走到 RESTORE 分支，
+此时 `len=2552 > need=826`，精确恢复到 566。
+
+## 50b.3 验收
+
+| 断言 | 结果 |
+|---|---|
+| RESTORE 分支有 len<need 保护、且不早于消费点 | 通过 |
+| 真浏览器：跳 2022-03 → 刷新 → 位置不变 | 前后截图 sha256 完全一致 |
+
+回归 **627 → 628 PASS / 0 FAIL**（§50b +1）；冒烟 **63 PASS / 0 FAIL**；build check `[OK]`；
+真浏览器 `/tmp/fix50d_after.png`：刷新后时间轴 `6-15 → 2022-02-10`（2021-06~2022-02 历史窗口）。

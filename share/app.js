@@ -1261,7 +1261,20 @@ async function setView(sym, period) {
   if (viewCount <= 0 || viewCount > len) viewCount = Math.min(260, len);
 
   // 首次启动：恢复上次浏览位置（仅当标的+周期一致）
+  // §50b：ETH 分片渐进加载，首屏 setView 时 len 可能只有一年（329），而上次位置在更早年份
+  //       （viewStart+viewCount=826）。此时若 clamp 并消费 RESTORE，就把位置永久压到末端。
+  //       数据不足时保留 RESTORE 不消费，等全量分片加载完（第二次 setView）再精确恢复。
   if (RESTORE && RESTORE.sym === curSym && RESTORE.period === cur) {
+    const need = RESTORE.viewStart + RESTORE.viewCount;
+    if (len > 0 && len < need) {
+      // 数据还不够：先渲染当前可用范围，但不动 RESTORE
+      viewCount = Math.max(20, Math.min(len, viewCount || 260));
+      viewStart = Math.max(vsLo(), Math.min(len - viewCount, viewStart));
+      syncPeriodButtons();
+      DS.ensure(Math.max(0, Math.floor(viewStart) - 200), Math.floor(viewStart) + viewCount);
+      draw();
+      return;
+    }
     viewCount = Math.max(20, Math.min(len, RESTORE.viewCount));
     viewStart = Math.max(vsLo(), Math.min(len - viewCount, RESTORE.viewStart));
     RESTORE = null;

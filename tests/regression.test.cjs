@@ -151,6 +151,9 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     // §50：会话恢复
     getRestore: () => RESTORE, loadSessionAgain: () => loadSession(),
     forceEthSession: v => { ethSessionForce = !!v; },
+    setRestoreDirect: r => { RESTORE = r; },
+    getSavedView: (sym, period) => viewStore[sym + '|' + period],
+    ethGridTs: (p, i) => ethTsOf(p, i),
     getViewStart: () => viewStart, getViewCount: () => viewCount,
     setSessionRaw: raw => localStorage.setItem(SESSION_KEY, raw),
     getBtcMiniKey: () => BTC_MINI_KEY,
@@ -3131,6 +3134,15 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     check('§50 ETH 会话在无 SYMBOLS.ETH 时仍建立 RESTORE', !!rest, rest ? JSON.stringify(rest) : 'null');
     check('§50 RESTORE 保留 sym/period/位置', rest && rest.sym === 'ETH' && rest.period === '1d' &&
       rest.viewStart === 156 && rest.viewCount === 60, rest ? JSON.stringify(rest) : 'null');
+
+    // 50.2 §50b：早期年份位置（超出首屏已加载长度）不能被 clamp 消费掉。
+    // 真浏览器实测：跳 2022-03（viewStart=566）刷新后若首屏 len 只有 329，
+    // 旧逻辑把 566 clamp 成 69 且 RESTORE=null，位置永久丢失。
+    const appSrc50 = fs.readFileSync(path.join(__dirname, '..', 'share', 'app.js'), 'utf8');
+    check('§50b RESTORE 分支有「数据不足时保留」保护（超界位置不被 clamp 消费）',
+      /len < need/.test(appSrc50) &&
+      appSrc50.indexOf('len < need') < appSrc50.indexOf('RESTORE = null;\n    syncPeriodButtons();'),
+      '保护逻辑位置检查');
     API.forceEthSession(false);
   }
 
