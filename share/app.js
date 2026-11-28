@@ -1408,7 +1408,7 @@ function draw() {
   if (!anyLoaded) {
     // §47：ETH 分片还没加载到当前视口（如翻到 2021-05 之前的早期年份）——
     // 主图可以不画，但 BTC 缩略图必须照常显示（BTC 是内联全量、网格公式不依赖 ETH 数据）。
-    if (IS_ETH_PAGE && btcMiniOn && curSym === 'ETH') paintBtcMini(viewStart, viewCount);
+    if (IS_ETH_PAGE && btcMiniOn && (curSym === 'ETH' || curSym === 'BTC')) paintBtcMini(viewStart, viewCount);
     return;
   }
 
@@ -1819,7 +1819,7 @@ function draw() {
 
   // §47：ETH 复盘页画 BTC 缩略图（用网格公式算时间窗，不依赖 anyLoaded）。
   //       主图有 ETH 数据时在这画；ETH 数据没加载时由下方 !anyLoaded 分支单独画。
-  if (IS_ETH_PAGE && btcMiniOn && curSym === 'ETH') paintBtcMini(vs0, nVis);
+  if (IS_ETH_PAGE && btcMiniOn && (curSym === 'ETH' || curSym === 'BTC')) paintBtcMini(vs0, nVis);
   ctx.restore(); // §10 橡皮筋 translate 还原
 }
 
@@ -2288,15 +2288,22 @@ canvas.addEventListener('mousedown', e => {
   const rect = canvas.getBoundingClientRect();
   const mx = e.clientX - rect.left, my = e.clientY - rect.top;
 
-  // §48/§49：BTC 小窗 —— 右下角缩放、标题栏拖动、窗内其余只读
-  if (IS_ETH_PAGE && btcMiniOn && curSym === 'ETH' && btcMiniHit(mx, my)) {
-    if (btcMiniResizeHit(mx, my)) {
+  // §48/§49/§51：BTC 小窗 —— 互换图标、右下角缩放、标题栏拖动、窗内点击联动光标
+  if (IS_ETH_PAGE && btcMiniOn && (curSym === 'ETH' || curSym === 'BTC') && btcMiniHit(mx, my)) {
+    if (btcMiniSwapHit(mx, my)) {
+      // §51：点标题栏互换图标 → 主图/小窗互换（BTC↔ETH），同周期同时间窗
+      switchSymbolWithWindow(curSym === 'BTC' ? 'ETH' : 'BTC');
+    } else if (btcMiniResizeHit(mx, my)) {
       btcMiniResizing = true;              // §49：拖右下角改尺寸
       canvas.style.cursor = 'nwse-resize';
     } else if (btcMiniTitleHit(mx, my)) {
       const r = btcMiniRect();
       btcMiniDrag = { dx: mx - r.x, dy: my - r.y };
       canvas.style.cursor = 'move';
+    } else {
+      // §51：点小窗体 → 主图十字光标竖线跳到同一时间（不滚动视图）
+      const win = btcMiniWindow(viewStart, viewCount, cur);
+      btcMiniSyncCrosshair(btcMiniXToTs(mx, viewStart, viewCount, cur));
     }
     return;
   }
@@ -2429,11 +2436,14 @@ canvas.addEventListener('mousemove', e => {
   const rect = canvas.getBoundingClientRect();
   hover.x = e.clientX - rect.left; hover.y = e.clientY - rect.top;
 
-  // §46：光标进入 BTC 缩略图 → 不显示十字光标/画线预览（只读小窗）
-  if (IS_ETH_PAGE && btcMiniOn && btcMiniHit(hover.x, hover.y)) {
-    // §48/§49：手柄显示缩放光标、标题栏显示移动光标，窗体其余只读
-    canvas.style.cursor = btcMiniResizeHit(hover.x, hover.y) ? 'nwse-resize' :
-                          btcMiniTitleHit(hover.x, hover.y) ? 'move' : 'default';
+  // §51：光标在小窗内 → 主图十字光标联动到同一时间（不滚动视图）
+  if (IS_ETH_PAGE && btcMiniOn && (curSym === 'ETH' || curSym === 'BTC') && btcMiniHit(hover.x, hover.y)) {
+    canvas.style.cursor = btcMiniSwapHit(hover.x, hover.y) ? 'pointer' :
+                          btcMiniResizeHit(hover.x, hover.y) ? 'nwse-resize' :
+                          btcMiniTitleHit(hover.x, hover.y) ? 'move' : 'crosshair';
+    if (!btcMiniTitleHit(hover.x, hover.y) && !btcMiniResizeHit(hover.x, hover.y)) {
+      btcMiniSyncCrosshair(btcMiniXToTs(hover.x, viewStart, viewCount, cur));
+    }
     redrawSoon(); return;
   }
 
@@ -4199,6 +4209,68 @@ function btcMiniBars(ts0, ts1, period) {
   if (i1 <= i0) i1 = Math.min(arr.length, i0 + 2);
   return arr.slice(i0, i1);
 }
+// §51：小窗像素 x → BTC 时间戳（光标联动用）。
+// 小窗内 K 线布局：gx0 = r.x+padL, gw = r.w-padL-padR, xOf(i)=gx0+(i+0.5)*xw。
+// 反推：先按 x 在小窗内的比例定位到 BTC 同期 bar 索引，再取该 bar 时间。
+function btcMiniXToTs(mx, vs, vc, period) {
+  const r = btcMiniRect();
+  const padL = 6, padR = 44;
+  const gx0 = r.x + padL, gw = r.w - padL - padR;
+  const p = ETH_STEP[period] !== undefined ? period : '1d';
+  const win = btcMiniWindow(vs, vc, p);
+  const bars = btcMiniBars(win.ts0, win.ts1, p);
+  if (!bars.length || gw <= 0) return win.ts0;
+  const frac = Math.max(0, Math.min(1, (mx - gx0) / gw));
+  const idx = Math.min(bars.length - 1, Math.max(0, Math.round(frac * (bars.length - 1))));
+  return bars[idx][0];
+}
+// §51：小窗取数——主图 ETH 时画 BTC，主图 BTC 时画 ETH（大小窗互换）
+function miniBarsFor(sym, win, period) {
+  if (sym === 'BTC') return btcMiniBars(win.ts0, win.ts1, period);
+  // ETH：从 SYMBOLS.ETH.data 按时间戳切片（材料化后是普通数组）
+  const s = SYMBOLS && SYMBOLS[sym];
+  const arr = s && s.data && (s.data[period] || s.data['1d']);
+  if (!arr || !arr.length) return [];
+  let i0 = btcMiniLowerBound(arr, win.ts0);
+  if (i0 >= arr.length) i0 = arr.length - 1;
+  let i1 = btcMiniLowerBound(arr, win.ts1 + 1);
+  if (i1 <= i0) i1 = Math.min(arr.length, i0 + 2);
+  return arr.slice(i0, i1);
+}
+// §51：标题栏右侧互换图标命中区（与涨跌幅文字左侧分开）
+function btcMiniSwapHit(mx, my) {
+  const r = btcMiniRect();
+  const cx = r.x + r.w - 62, cy = r.y + BTC_MINI_TITLE_H / 2;
+  return mx >= cx - 10 && mx <= cx + 10 && my >= cy - 9 && my <= cy + 9;
+}
+// §51：把小窗点击的时间映射为主图十字光标 x（主图可见范围内则精确定位，否则夹到边缘）
+function btcMiniSyncCrosshair(ts) {
+  const sc = SCALE;
+  if (!sc || !sc.plotW || !sc.xW) return false;
+  const len = dataLen();
+  if (!len) return false;
+  // 主图可见的索引范围 → 用时间戳反查索引
+  const s = sc.viewStart, n = sc.viewCount;
+  let idx = null;
+  // 主图 bar 时间戳：优先二分（内联/分片均可）
+  if (typeof findIdxByTime === 'function') {
+    // 同步版：线性扫描可见区（最多几百根），保证不依赖异步
+    const i0 = Math.max(0, Math.floor(s)), i1 = Math.min(len - 1, Math.ceil(s + n));
+    let best = -1, bestD = Infinity;
+    for (let i = i0; i <= i1; i++) {
+      const b = getBar(i); if (!b) continue;
+      const d = Math.abs(b[0] - ts);
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    if (best >= 0) idx = best;
+  }
+  if (idx == null) return false;
+  hover.x = sc.plotW > 0 ? (PAD_L + (idx - s + 0.5) * sc.xW) : PAD_L;
+  hover.y = Math.max(sc.mainTop || 0, Math.min(sc.mainBot || 0, hover.y || sc.mainTop || 0));
+  redrawSoon();
+  return true;
+}
+
 // §48：小窗专用 EMA（独立计算，不碰主图 emaFull 缓存）。不足周期返回 NaN。
 function btcMiniEMA(bars, period) {
   const out = new Array(bars.length).fill(NaN);
@@ -4248,7 +4320,9 @@ function getEthAnchors() { return Object.assign({}, ETH_ANCHOR); }
 function paintBtcMini(vs, vc) {
   try {
     const win = btcMiniWindow(vs, vc, cur);
-    const bars = btcMiniBars(win.ts0, win.ts1, cur);
+    // §51：小窗显示"另一个标的"——主图 ETH→小窗 BTC，主图 BTC→小窗 ETH（互换后仍互相对照）
+    const miniSym = curSym === 'BTC' ? 'ETH' : 'BTC';
+    const bars = miniBarsFor(miniSym, win, cur);
     const r = btcMiniRect();
     const padL = 6, padR = 44, gap = 4, volH = Math.round((r.h - BTC_MINI_TITLE_H - 8) * 0.22);
     const gx0 = r.x + padL, gw = r.w - padL - padR;
@@ -4269,7 +4343,11 @@ function paintBtcMini(vs, vc) {
     ctx.stroke();
     ctx.font = '11px "SFMono-Regular", Consolas, monospace';
     ctx.textAlign = 'left'; ctx.fillStyle = '#cdd3e0';
-    ctx.fillText('BTC · 大盘（拖标题栏移动 · 右下角缩放）', r.x + padL, r.y + 13);
+    ctx.fillText(miniSym + (miniSym === 'BTC' ? ' · 大盘（点 ⇄ 互换）' : ' · 标的（点 ⇄ 互换）'), r.x + padL, r.y + 13);
+    // §51：互换图标 ⇄（点此把小窗放大为主图）
+    ctx.textAlign = 'center'; ctx.fillStyle = '#7ec8ff'; ctx.font = '13px system-ui, sans-serif';
+    ctx.fillText('⇄', r.x + r.w - 62, r.y + 14);
+    ctx.font = '11px "SFMono-Regular", Consolas, monospace';
     ctx.textAlign = 'right';
     if (bars.length) {
       const first = +bars[0][4], last = +bars[bars.length - 1][4];
@@ -4331,6 +4409,8 @@ function paintBtcMini(vs, vc) {
 // 用当前视口两端时间戳 → 目标标的同周期数据的索引 → 设 viewStart/viewCount。
 async function switchSymbolWithWindow(target) {
   if (target === curSym) return;
+  // §51：从互换图标调用时，同步侧栏标的按钮的高亮（工具栏点击路径本身已设置）
+  document.querySelectorAll('.symbols button').forEach(x => x.classList.toggle('active', x.dataset.sym === target));
   const period = cur;
   // 记录切换前的时间窗两端（用ETH网格公式，或当前DS的bar）
   let ts0 = null, ts1 = null;

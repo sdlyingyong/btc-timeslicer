@@ -158,6 +158,12 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     setSessionRaw: raw => localStorage.setItem(SESSION_KEY, raw),
     getBtcMiniKey: () => BTC_MINI_KEY,
     btcMiniBars: (ts0, ts1, period) => btcMiniBars(ts0, ts1, period),
+    // §51：光标联动 + 标题栏互换
+    btcMiniXToTs: (mx, vs, vc, period) => btcMiniXToTs(mx, vs, vc, period),
+    btcMiniSwapHit: (mx, my) => btcMiniSwapHit(mx, my),
+    setHover: (x, y) => { hover.x = x; hover.y = y; },
+    getHover: () => ({ x: hover.x, y: hover.y }),
+    getScale: () => SCALE,
     setTool: t => { toolMode = t; },
     setContinuousDraw: b => { continuousDraw = b; },
     setTradeMode: b => { tradeMode = b; },
@@ -3144,6 +3150,26 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
       appSrc50.indexOf('len < need') < appSrc50.indexOf('RESTORE = null;\n    syncPeriodButtons();'),
       '保护逻辑位置检查');
     API.forceEthSession(false);
+  }
+
+  // ============ 51. 小窗光标联动 + 标题栏互换 ============
+  // 用户：点小窗某处→外面十字光标竖线跳到同一时间；标题栏点一下互换大小窗。
+  {
+    const r = API.btcMiniRect();
+    const padL = 6, padR = 44, gw = r.w - padL - padR;
+    // 51.1 小窗 x → BTC 时间戳：左端≈首根时间，右端≈末根时间，单调
+    const tsL = API.btcMiniXToTs(r.x + padL, 400, 260, '1d');
+    const tsR = API.btcMiniXToTs(r.x + padL + gw, 400, 260, '1d');
+    check('§51 小窗左端 x→首根时间', tsL === API.ethGridTs('1d', 400), 'tsL=' + tsL + ' 期望=' + API.ethGridTs('1d', 400));
+    check('§51 小窗右端 x→末根时间（按根数定位，非固定窗口）', tsR > tsL, 'tsL=' + tsL + ' tsR=' + tsR);
+    const tsM = API.btcMiniXToTs(r.x + padL + gw / 2, 400, 260, '1d');
+    check('§51 小窗中点时间居中', tsM > tsL && tsM < tsR, 'tsM=' + tsM);
+
+    // 51.2 互换图标命中：标题栏右侧
+    const swapX = r.x + r.w - 60, swapY = r.y + 10;
+    check('§51 标题栏互换图标命中', API.btcMiniSwapHit(swapX, swapY) === true, 'r=' + JSON.stringify(r));
+    check('§51 标题栏左侧（拖动区）不误触互换', API.btcMiniSwapHit(r.x + 20, swapY) === false);
+    check('§51 窗体内部不误触互换', API.btcMiniSwapHit(r.x + 20, r.y + 60) === false);
   }
 
   // ============ 汇总 ============
