@@ -161,6 +161,11 @@ const fn = new Function('window', 'document', 'localStorage', 'fetch', 'location
     // §51：光标联动 + 标题栏互换
     btcMiniXToTs: (mx, vs, vc, period) => btcMiniXToTs(mx, vs, vc, period),
     btcMiniSwapHit: (mx, my) => btcMiniSwapHit(mx, my),
+    // §52：小窗十字光标 + 画线显示
+    miniTsToX: (ts, vs, vc, period) => miniTsToX(ts, vs, vc, period),
+    miniLineEndpoints: (ln, sym) => miniLineEndpoints(ln, sym),
+    setLinesStore: (sym, arr) => { linesStore[sym] = arr; lines = arr; },
+    getLines: () => lines,
     setHover: (x, y) => { hover.x = x; hover.y = y; },
     getHover: () => ({ x: hover.x, y: hover.y }),
     getScale: () => SCALE,
@@ -3170,6 +3175,34 @@ const sxT = ts => API.dataXToScreenX(API.findIdxSync(ts));  // 时间戳 -> 屏�
     check('§51 标题栏互换图标命中', API.btcMiniSwapHit(swapX, swapY) === true, 'r=' + JSON.stringify(r));
     check('§51 标题栏左侧（拖动区）不误触互换', API.btcMiniSwapHit(r.x + 20, swapY) === false);
     check('§51 窗体内部不误触互换', API.btcMiniSwapHit(r.x + 20, r.y + 60) === false);
+  }
+
+  // ============ 52. 小窗十字光标 + 画线显示 ============
+  // 用户：「小窗需要同步的十字光标，还有画线怎么小窗不显示了，都加到测试再修改」。
+  {
+    const r = API.btcMiniRect();
+    const padL = 6, padR = 44, gw = r.w - padL - padR;
+    // 52.1 时间戳 → 小窗 x（光标联动逆映射）：与 btcMiniXToTs 往返一致
+    const winTs = API.ethGridTs('1d', 410);
+    const mxFromTs = API.miniTsToX(winTs, 400, 260, '1d');
+    check('§52 miniTsToX 落在小窗内', mxFromTs >= r.x && mxFromTs <= r.x + r.w,
+      'x=' + mxFromTs + ' r=' + JSON.stringify(r));
+    const roundTrip = API.btcMiniXToTs(mxFromTs, 400, 260, '1d');
+    check('§52 ts→x→ts 往返一致（±1 天）', Math.abs(roundTrip - winTs) <= 1440,
+      'ts=' + winTs + ' 往返=' + roundTrip);
+
+    // 52.2 线条端点提取：hline 水平线（单点价格）、trend 趋势线（两点 ts+price）
+    const hline = { type: 'hline', price: 60000 };
+    const he = API.miniLineEndpoints(hline, 'BTC');
+    check('§52 hline 端点含价格', he && he.length === 1 && he[0].price === 60000, JSON.stringify(he));
+    const trendTs = API.ethGridTs('1d', 410), trendTs2 = API.ethGridTs('1d', 430);
+    const trend = { type: 'trend', x1: trendTs, y1: 60000, x2: trendTs2, y2: 70000 };
+    const te = API.miniLineEndpoints(trend, 'BTC');
+    check('§52 trend 端点含两点时间戳+价格', te && te.length === 2 &&
+      te[0].ts === trendTs && te[1].price === 70000, JSON.stringify(te));
+    const supply = { type: 'supply', price: 55000, label: '供给' };
+    const se = API.miniLineEndpoints(supply, 'BTC');
+    check('§52 supply 端点含价格', se && se.length === 1 && se[0].price === 55000, JSON.stringify(se));
   }
 
   // ============ 汇总 ============

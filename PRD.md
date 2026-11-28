@@ -3537,3 +3537,39 @@ if (len > 0 && len < need) {
 
 回归 **628 → 634 PASS / 0 FAIL**（§51 +6）；冒烟 **63 PASS / 0 FAIL**；build check `[OK]`；
 真浏览器：`/tmp/link51.png`（光标联动）、`/tmp/swap51.png`（大小窗互换）。
+
+---
+
+# §52 小窗同步十字光标 + 显示画线
+
+用户：「小窗需要同步的十字光标，还有画线怎么小窗不显示了，都加到测试再修改」（先测试后实现）。
+
+## 52.1 十字光标同步
+
+- `miniTsToX(ts, vs, vc, period)`：时间戳 → 小窗像素 x（§51 `btcMiniXToTs` 的逆映射），
+  实测 ts→x→ts 往返精确一致。
+- 绘制时主图 `hover.x` → 主图 bar 时间戳 → `miniTsToXInBars`（基于小窗自己的 bars）→ 小窗内画竖虚线，
+  与主图光标对齐到同一时间点。
+- 接入点在 paintBtcMini 末尾，仅 `toolMode==='cursor'` 且主图光标在绘图区内时画。
+
+## 52.2 小窗显示画线
+
+- 小窗显示的是"另一个标的"（miniSym），画线按标的存 `linesStore[miniSym]`，与小窗内容一致：
+  主图 ETH → 小窗 BTC 显示 BTC 的线；主图 BTC → 小窗 ETH 显示 ETH 的线。
+- `miniLineEndpoints(ln, sym)` 统一提取线条端点（时间锚定 ts + 价格）：
+  - hline/supply/demand/hchannel → 单点价格，画横跨小窗的水平虚线（裁剪在价格区内）；
+  - trend/channel/measure/trade → 两点/三点 ts+price，按小窗 bars 定位 x 画线段。
+- 颜色沿用主图口径：hline 橙、supply 绿、demand 红、其它紫。
+- `paintMiniLines()` 在 K 线/EMA 之后、光标之前绘制，用小窗自己的坐标映射。
+
+## 52.3 验收
+
+| 断言 | 结果 |
+|---|---|
+| miniTsToX 落在小窗内、ts→x→ts 往返一致 | 往返 ts 精确相等 |
+| hline/supply 端点含价格、trend 端点含两点 ts+price | 全过 |
+| 真浏览器：主图光标 07-11 → 小窗同位置竖虚线 | 通过 |
+| 真浏览器：BTC 画 hline → 切回 ETH 小窗（BTC）显示橙色虚线 | 通过，存储 BTC:1 |
+
+回归 **634 → 639 PASS / 0 FAIL**（§52 +5）；冒烟 **63 PASS / 0 FAIL**；build check `[OK]`；
+真浏览器：`/tmp/mini_cursor52.png`（光标同步）、`/tmp/mini_line52.png`（画线同步）。

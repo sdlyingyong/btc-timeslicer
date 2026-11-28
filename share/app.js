@@ -4271,6 +4271,78 @@ function btcMiniSyncCrosshair(ts) {
   return true;
 }
 
+// §52：时间戳 → 小窗像素 x（btcMiniXToTs 的逆，光标联动用）
+function miniTsToX(ts, vs, vc, period) {
+  const r = btcMiniRect();
+  const padL = 6, padR = 44;
+  const gx0 = r.x + padL, gw = r.w - padL - padR;
+  const p = ETH_STEP[period] !== undefined ? period : '1d';
+  const win = btcMiniWindow(vs, vc, p);
+  const bars = btcMiniBars(win.ts0, win.ts1, p);
+  if (!bars.length || gw <= 0) return gx0;
+  // 线性定位：按 ts 在 bars 首末时间间的比例映射到小窗宽
+  const t0 = bars[0][0], t1 = bars[bars.length - 1][0];
+  const frac = t1 === t0 ? 0 : Math.max(0, Math.min(1, (ts - t0) / (t1 - t0)));
+  return gx0 + frac * gw;
+}
+// §52：把一条画线提取为小窗可绘制的端点 [{ts,price},…]（时间锚定，跨标的适配）
+function miniLineEndpoints(ln, sym) {
+  if (!ln) return [];
+  const pts = [];
+  const tsOf = k => (typeof ln[k] === 'string' ? Date.parse(ln[k].replace(' ', 'T')) / 60000 : ln[k]);
+  switch (ln.type) {
+    case 'hline': case 'supply': case 'demand': case 'hchannel':
+      // 单点/水平线：小窗内画一条横跨的水平线，价格即 ln.price / price1 / price2
+      if (ln.price != null) pts.push({ ts: null, price: +ln.price });
+      if (ln.price1 != null) pts.push({ ts: null, price: +ln.price1 });
+      if (ln.price2 != null) pts.push({ ts: null, price: +ln.price2 });
+      break;
+    case 'trend': case 'channel': case 'measure': case 'trade':
+      if (ln.x1 != null) pts.push({ ts: tsOf('x1'), price: +ln.y1 });
+      if (ln.x2 != null) pts.push({ ts: tsOf('x2'), price: +ln.y2 });
+      if (ln.x3 != null) pts.push({ ts: tsOf('x3'), price: +ln.y3 });
+      break;
+  }
+  return pts;
+}
+// §52：时间戳 → 小窗 x，但基于小窗自己的 bars（miniSym 数据），与主图/标的无关
+function miniTsToXInBars(ts, bars, gx0, gw) {
+  if (!bars.length || gw <= 0) return gx0;
+  const t0 = bars[0][0], t1 = bars[bars.length - 1][0];
+  const frac = t1 === t0 ? 0 : Math.max(0, Math.min(1, (ts - t0) / (t1 - t0)));
+  return gx0 + frac * gw;
+}
+// §52：在小窗内画"另一个标的"的画线（miniSym 的 linesStore），用小窗自己的坐标系
+function paintMiniLines(bars, miniSym, gx0, gw, priceTop, priceBot, yP) {
+  const arr = (typeof linesStore !== 'undefined' && linesStore[miniSym]) || [];
+  for (const ln of arr) {
+    const pts = miniLineEndpoints(ln, miniSym);
+    if (!pts.length) continue;
+    const col = ln.type === 'supply' ? '#2fbf71' : ln.type === 'demand' ? '#ef4d4d' :
+                ln.type === 'hline' ? '#ff9a3d' : '#b18cff';
+    ctx.save();
+    ctx.strokeStyle = col; ctx.lineWidth = 1.1; ctx.setLineDash([5, 3]);
+    if (pts.every(p => p.ts == null)) {
+      // 水平线类：跨小窗画横线（裁剪在价格区内）
+      for (const p of pts) {
+        if (!isFinite(p.price)) continue;
+        const y = yP(p.price);
+        if (y < priceTop || y > priceBot) continue;
+        ctx.beginPath(); ctx.moveTo(gx0, y); ctx.lineTo(gx0 + gw, y); ctx.stroke();
+      }
+    } else {
+      // 时间锚定线：按 ts 在小窗 bars 内定位 x
+      ctx.beginPath();
+      pts.forEach((p, i) => {
+        const x = miniTsToXInBars(p.ts, bars, gx0, gw), y = yP(p.price);
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+}
+
 // §48：小窗专用 EMA（独立计算，不碰主图 emaFull 缓存）。不足周期返回 NaN。
 function btcMiniEMA(bars, period) {
   const out = new Array(bars.length).fill(NaN);
@@ -4401,6 +4473,24 @@ function paintBtcMini(vs, vc) {
     const last = +bars[bars.length - 1][4];
     ctx.fillStyle = '#8a9ab0'; ctx.textAlign = 'left';
     ctx.fillText(last.toFixed(2), r.x + r.w - padR + 2, yP(last) + 3);
+
+    // §52：小窗内画 miniSym 的画线（与主图共享同一套时间戳锚定，切标的各自独立）
+    paintMiniLines(bars, miniSym, gx0, gw, priceTop, priceBot, yP);
+
+    // §52：小窗十字光标 —— 主图光标 hover.x → 时间戳 → 小窗 x 竖线（同步联动）
+    if (toolMode === 'cursor' && hover.x >= PAD_L && hover.x <= PAD_L + (SCALE.plotW || 0)) {
+      const mainIdx = SCALE.viewStart + (hover.x - PAD_L) / (SCALE.xW || 1);
+      const mainBar = getBar(Math.round(mainIdx));
+      if (mainBar) {
+        const cx = miniTsToXInBars(mainBar[0], bars, gx0, gw);
+        if (cx >= gx0 && cx <= gx0 + gw) {
+          ctx.save();
+          ctx.strokeStyle = 'rgba(160,175,200,0.55)'; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+          ctx.beginPath(); ctx.moveTo(cx, priceTop); ctx.lineTo(cx, volBot); ctx.stroke();
+          ctx.restore();
+        }
+      }
+    }
     ctx.textAlign = 'left';
   } catch (e) { /* 缩略图失败绝不影响主图 */ }
 }
